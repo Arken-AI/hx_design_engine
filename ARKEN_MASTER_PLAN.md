@@ -323,15 +323,13 @@ async def run_step_9(design_state, ai_engineer, memory):
 - **Duration:** 15–25 seconds
 - **Key:** Steps always run in order 1→16. AI does NOT control the flow.
 
-### Loop 3: Autoresearch Optimization (new, optional)
+### Loop 3: Autoresearch Optimization
 
-- **Location:** `hx_engine/app/autoresearch/experiment_runner.py`
-- **Owner:** Python + Claude proposals
-- **Purpose:** Explore 200+ geometry variants, return Pareto front
-- **Duration:** 30–60 seconds
-- **Key:** Runs only Steps 7→11 (not full 16). Only triggered when user asks for optimization.
-- **Parallelism [Decision 3R-3A]:** ThreadPoolExecutor(max_workers=16). 200 experiments × ~1s each ÷ 16 workers ≈ 12–15s wall time.
-- **Memory [CEO Autoresearch Amendment]:** Experiments run in memory only — no Redis saves during sweep.
+**Status: DEFERRED TO POST-BETA [Eng Review, 2026-03-21]**
+See §20 P2 for implementation plan. Beta ships with Loop 1 + Loop 2 only.
+
+- **Purpose:** Explore 200+ geometry variants, return Pareto front of cost/performance trade-offs.
+- **Why deferred:** Core value is Loop 2 (accurate 16-step design). Autoresearch adds optimization on top. Better to validate Loop 2 accuracy with beta engineers first — optimization is only useful if the base calculation is trusted. Also avoids the GIL/ThreadPoolExecutor parallelism question until we have timing data from real Bell-Delaware builds.
 
 ### How They Nest:
 
@@ -341,7 +339,7 @@ User message
 LOOP 1 (Backend — Claude orchestration):
   Claude calls hx_get_fluid_properties → HX Engine (instant, no Loop 2)
   Claude calls hx_design → HX Engine → LOOP 2 runs (15-25 seconds)
-  Claude calls hx_optimize → HX Engine → LOOP 3 runs (30-60 seconds)
+  # hx_optimize → LOOP 3 (post-beta, not in 7-week beta build)
   Claude presents results to user
 ```
 
@@ -353,7 +351,7 @@ LOOP 1 (Backend — Claude orchestration):
 | `hx_suggest_geometry` | No loop, heuristic lookup | < 100ms |
 | `hx_design` | Full 16-step + AI review | 15–25 seconds |
 | `hx_rate` | Steps 2-11 only (no sizing) | 5–15 seconds |
-| `hx_optimize` | 200 experiments, Steps 7-11 | 30–60 seconds |
+| `hx_optimize` | 200 experiments, Steps 7-11 | 30–60 seconds | **POST-BETA** |
 
 ---
 
@@ -933,21 +931,18 @@ class DesignState(BaseModel):
     step_records: List[StepRecord] = Field(default_factory=list)  # CEO Amendment: default_factory
     in_convergence_loop: bool = False    # Decision 3A / CG1A
     convergence_iteration: int = 0
-    context_notes: List[ContextNote] = Field(default_factory=list)  # /btw injection — Decision BTW-1A
+    waiting_for_user: bool = False       # True while pipeline is paused at ESCALATE; excludes session from orphan detection
+    review_notes: List[str] = Field(default_factory=list)
+    # review_notes: AI forward-looking observations appended after each step review.
+    # Distinct from warnings (warnings = Layer 2 hard-rule violations).
+    # review_notes = AI's 30-50 token observations for future steps, e.g.:
+    #   "Shell-side Re is low (650). Step 10 pressure drop will be sensitive to baffle spacing."
+    # Passed to subsequent steps in the AI prompt context [§17.2, Eng Review].
 ```
 
-**`ContextNote` model:**
-```python
-class ContextNote(BaseModel):
-    note_id: str = Field(default_factory=lambda: str(uuid4()))
-    content: str                          # raw text the user typed after /btw
-    injected_at_step: int                 # step number running at injection time (1-16, or 0 if pre-run)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    applied_from_step: int                # first step that will receive this note in its AI prompt
-    # applied_from_step = injected_at_step + 1 if pipeline running, else 1 if pre-run
-```
+**Important [CEO Amendment]:** Use `Field(default_factory=list)` for `step_records` and `warnings` to prevent mutable default sharing across instances. Test: `DesignState().step_records is not DesignState().step_records` → True.
 
-**Important [CEO Amendment]:** Use `Field(default_factory=list)` for `step_records`, `warnings`, and `context_notes` to prevent mutable default sharing across instances. Test: `DesignState().step_records is not DesignState().step_records` → True.
+**Note [CEO Review 3]:** `/btw` context injection (BTW-1A/2A/3A) deferred to post-beta. See §20 P2 for post-beta implementation plan. `ContextNote` model removed from build scope.
 
 ### 7.4 StepProtocol [Decision 6A]
 
@@ -1037,25 +1032,15 @@ class BaseStep(ABC):
                     continue   # re-review with restored state
 
             elif review.decision == "correct" and attempt == MAX_CORRECTIONS:
-                # 3 corrections exhausted — force escalate
+                # 3 corrections exhausted — convert to escalate and fall through to
+                # the shared re-escalation loop below [Eng Review — full parity fix].
+                # Both correction-exhaustion and direct-escalate use the same
+                # MAX_USER_RESPONSES=3 loop; no asymmetry in user attempt handling.
                 review.decision = "escalate"
                 review.attempts = correction_attempts
                 review.observation = "Three correction attempts did not resolve the issue."
                 review.recommendation = review.reasoning
-                emit_event("step_escalated", step=self.step_id, review=review)
-                user_response = await wait_for_user(state.session_id)
-                apply_user_response(state, user_response)
-                result = self.execute(state)
-                validation = validation_rules.check(step=self.step_id, result=result)
-                if not validation.fails:
-                    review2 = await ai_engineer.review(
-                        step=self.step_id, result=result, design_state=state,
-                        book_context=book_ctx, past_designs=past_ctx,
-                        prior_attempts=[],
-                    )
-                    emit_event("step_approved", step=self.step_id, review=review2)
-                    review = review2
-                break
+                # ↓ falls through to elif review.decision == "escalate"
 
             elif review.decision == "warn":
                 record_warning(state, step=self.step_id, warning=review)
@@ -1105,16 +1090,37 @@ class BaseStep(ABC):
                                attempts=correction_attempts)
                 else:
                     emit_event("step_approved", step=self.step_id, review=review)
+                # Append AI's forward-looking observation to review_notes [§17.2, Eng Review].
+                # Only append if the AI produced a non-empty observation with future relevance.
+                if review.observation and len(review.observation) <= 200:
+                    note = f"[Step {self.step_id}] {review.observation}"
+                    state = state.model_copy(update={
+                        "review_notes": state.review_notes + [note]
+                    })
                 break
 
         return review
 ```
 
 Each step's `run_step_N()` in `pipeline_runner.py` is now just:
-1. Execute Layer 1 (`self.execute(state)`)
-2. Check Layer 2 hard rules
-3. Fetch Supermemory context
-4. Call `await self.run_with_review_loop(result, state, ai_engineer, book_ctx, past_ctx)`
+1. Record `step_start_time = datetime.utcnow()`
+2. Emit `step_started` SSE event (step_id, step_name)
+3. Execute Layer 1 (`self.execute(state)`)
+4. Check Layer 2 hard rules
+5. Fetch Supermemory context
+6. Call `review = await self.run_with_review_loop(result, state, ai_engineer, book_ctx, past_ctx)`
+7. **Append StepRecord** [Eng Review — ownership specified here]:
+   ```python
+   record = StepRecord(
+       step_id=step.step_id, step_name=step.step_name,
+       result=result, timestamp=step_start_time,
+       duration_ms=int((datetime.utcnow() - step_start_time).total_seconds() * 1000),
+       ai_called=step._should_call_ai(state, result),
+   )
+   state = state.model_copy(update={"step_records": state.step_records + [record]})
+   ```
+8. Call `await session_store.heartbeat(session_id)` [CEO Review 3 — orphan detection]
+9. Save updated state to Redis
 
 ### 7.6 Bell-Delaware Public Interface
 
@@ -1132,24 +1138,15 @@ def shell_side_dP(fluid: FluidProperties, geom: GeometrySpec,
 ### 7.7 SSE Event Schemas
 
 ```python
-# hx_engine/app/models/sse_events.py — All 9 SSE event types
+# hx_engine/app/models/sse_events.py — All 8 SSE event types
 # step_started, step_approved, step_corrected, step_warning,
-# step_escalated, step_error, iteration_progress, design_complete,
-# context_note_ack  ← /btw acknowledgment (Decision BTW-1A)
+# step_escalated, step_error, iteration_progress, design_complete
 #
 # step_error payload: step, message, observation, recommendation, options
 # Emitted when a step cannot be resolved after 3 user inputs. Pipeline halts.
 # StepHardFailure exception is raised in pipeline_runner after this event.
-```
-
-**`context_note_ack` event payload:**
-```json
-{
-  "type": "context_note_ack",
-  "note_id": "uuid",
-  "applied_from_step": 9,
-  "content_preview": "prefer fixed tubesheet…"   // first 60 chars
-}
+#
+# Note: context_note_ack removed — /btw deferred to post-beta [CEO Review 3]
 ```
 
 ### 7.8 SSE Architecture [Decision 1B + CEO-1A nginx]
@@ -1158,16 +1155,8 @@ def shell_side_dP(fluid: FluidProperties, geom: GeometrySpec,
 POST /api/v1/hx/design              → {session_id, stream_url (relative path), token}  [instant, < 100ms]
 GET  /api/v1/hx/design/{id}/stream  [EventSource via nginx proxy → HX Engine]
 GET  /api/v1/hx/design/{id}/status  [poll fallback, CG2A]
-POST /api/v1/hx/design/{id}/context-note  [/btw injection — Decision BTW-1A]
+POST /api/v1/hx/design/{id}/respond [user response to ESCALATED step]
 ```
-
-**`POST /api/v1/hx/design/{id}/context-note` spec:**
-- **Auth:** same JWT Bearer as all other `/api/v1/hx/` endpoints
-- **Body:** `{"content": "<text after /btw>"}` (max 2000 chars, validated)
-- **Response 200:** `{"note_id": "uuid", "applied_from_step": 9}` where `applied_from_step` is `current_step + 1`
-- **Response 422:** if pipeline is not running and not idle (e.g. already COMPLETE — notes on completed designs not accepted; user should start new design)
-- **Side effect:** HX Engine appends `ContextNote` to `DesignState.context_notes` and emits `context_note_ack` SSE event to the client
-- **Prompt injection:** All AI prompts for steps ≥ `applied_from_step` include: `"Context note from engineer: {content}"` appended to the system prompt before the step-specific instructions. Content is sanitized (strip leading prompt-injection patterns like "Ignore previous instructions").
 
 - `stream_url` is a relative path (not absolute URL with :8100)
 - Frontend constructs: `${window.location.origin}${streamUrl}`
@@ -1196,9 +1185,51 @@ SESSION_TTL_SECONDS = 86400  # 24h
 async def save(session_id: str, state: DesignState) -> None:
     await redis.setex(session_id, SESSION_TTL_SECONDS, state.model_dump_json())
 
-# docker-compose.yml — Redis with AOF persistence:
+# docker-compose.yml — Redis with AOF persistence + healthcheck:
 # command: redis-server --appendonly yes
 # volumes: - redis-data:/data
+# healthcheck:
+#   test: ["CMD", "redis-cli", "ping"]
+#   interval: 10s
+#   timeout: 5s
+#   retries: 5
+#   start_period: 5s
+
+# docker-compose.yml — HX Engine healthcheck:
+# healthcheck:
+#   test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+#   interval: 30s
+#   timeout: 10s
+#   retries: 3
+#   start_period: 10s
+
+# docker-compose.yml — Backend healthcheck:
+# healthcheck:
+#   test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+#   interval: 30s
+#   timeout: 10s
+#   retries: 3
+#   start_period: 10s
+
+# docker-compose.yml — MongoDB healthcheck:
+# healthcheck:
+#   test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+#   interval: 30s
+#   timeout: 10s
+#   retries: 5
+#   start_period: 30s
+
+# docker-compose.yml — nginx healthcheck:
+# healthcheck:
+#   test: ["CMD", "curl", "-f", "http://localhost/health"]
+#   interval: 30s
+#   timeout: 10s
+#   retries: 3
+#   start_period: 5s
+
+# Note: MongoDB startup healthcheck triggers exponential backoff in lifespan() [CEO Review 3].
+# HX Engine depends_on: [redis, mongodb] with condition: service_healthy.
+# Backend depends_on: [hx_engine, mongodb] with condition: service_healthy.
 ```
 
 ### 7.11 Parallel Supermemory Calls [Decision 9A] with Safe Wrapper [Decision CEO-4A]
@@ -1226,7 +1257,74 @@ book_ctx, past_ctx, profile = await asyncio.gather(
 )
 ```
 
-### 7.12 Connors Pre-filter [Decision 10A]
+### 7.12 wait_for_user() Implementation [CEO Review 3]
+
+```python
+# hx_engine/app/core/sse_manager.py — escalation future management
+_escalation_futures: dict[str, asyncio.Future] = {}
+
+def create_escalation_future(session_id: str) -> asyncio.Future:
+    """Called by pipeline when entering wait_for_user()."""
+    future = asyncio.get_event_loop().create_future()
+    _escalation_futures[session_id] = future
+    return future
+
+def resolve_escalation(session_id: str, response: UserResponse) -> None:
+    """Called by POST /api/v1/hx/design/{id}/respond handler."""
+    future = _escalation_futures.pop(session_id, None)
+    if future and not future.done():
+        future.set_result(response)
+
+# hx_engine/app/core/pipeline_runner.py — wait_for_user():
+async def wait_for_user(session_id: str) -> UserResponse:
+    """Waits indefinitely until the user responds via POST /respond.
+    No timeout — the pipeline is paused until the engineer makes a deliberate decision.
+    waiting_for_user=True excludes this session from orphan detection [CEO Review 3].
+    [Eng Review — no-timeout decision: engineering decisions should not be made by default;
+     better to wait than to silently apply a conservative assumption the engineer didn't approve.]
+    """
+    state = await session_store.load(session_id)
+    state = state.model_copy(update={"waiting_for_user": True})
+    await session_store.save(session_id, state)
+    future = sse_manager.create_escalation_future(session_id)
+    try:
+        return await future  # no timeout — waits until resolve_escalation() is called
+    finally:
+        state = await session_store.load(session_id)
+        state = state.model_copy(update={"waiting_for_user": False})
+        await session_store.save(session_id, state)
+```
+
+### 7.13 Pipeline Orphan Detection [CEO Review 3]
+
+```python
+# hx_engine/app/core/session_store.py — additions
+PIPELINE_ORPHAN_THRESHOLD_SECONDS = 120  # in config.py
+
+async def heartbeat(session_id: str) -> None:
+    """Called at END of each step completion, after DesignState Redis write, before SSE emit."""
+    await redis.hset(f"{session_id}:meta", "last_heartbeat", datetime.utcnow().isoformat())
+
+async def is_orphaned(session_id: str) -> bool:
+    """Called by GET /status. Returns True if pipeline appears dead (not waiting for user)."""
+    hb = await redis.hget(f"{session_id}:meta", "last_heartbeat")
+    if not hb:
+        return False  # never heartbeated = just started, not orphaned
+    age = (datetime.utcnow() - datetime.fromisoformat(hb.decode())).total_seconds()
+    if age <= PIPELINE_ORPHAN_THRESHOLD_SECONDS:
+        return False
+    # Check if pipeline is intentionally paused waiting for user input
+    state = await load(session_id)
+    if state and state.waiting_for_user:
+        return False  # paused at ESCALATE — not dead
+    return True
+
+# GET /status handler addition:
+if await session_store.is_orphaned(session_id):
+    return {"status": "failed", "message": "Pipeline timeout — please retry."}
+```
+
+### 7.14 Connors Pre-filter [Decision 10A]
 
 ```python
 # hx_engine/app/autoresearch/connors_prefilter.py
@@ -1593,6 +1691,7 @@ arken-ai/
 | POST | `/api/v1/hx/design` | JSON | Trigger design, returns {session_id, stream_url, token} |
 | GET | `/api/v1/hx/design/{id}/stream` | SSE stream | Live 16-step events |
 | GET | `/api/v1/hx/design/{id}/status` | JSON | Poll fallback [CG2A] |
+| POST | `/api/v1/hx/design/{id}/respond` | JSON | Submit user response to ESCALATED step. Body: `{type: "accept"\|"override"\|"skip", values: dict\|null}`. Response 200/404/422. |
 | POST | `/api/v1/hx/rate` | SSE stream | Rate existing geometry |
 | POST | `/api/v1/hx/properties` | JSON | Fluid property lookup |
 | POST | `/api/v1/hx/geometry` | JSON | Suggest initial TEMA type + geometry (heuristics only) |
@@ -1704,6 +1803,9 @@ Added in Week 6. All backend endpoints except `/health` and `POST /auth/login` r
 ---
 
 ## 12. Autoresearch — Loop 3
+
+**Status: DEFERRED TO POST-BETA [Eng Review, 2026-03-21]**
+Full implementation plan in §20 P2. This section is retained as the design spec for when it's built post-beta.
 
 ### 12.1 When It Runs
 
@@ -1825,7 +1927,7 @@ Appears in HX Progress panel after Step 16 completes, above StepCards:
 - **Confidence breakdown expandable [CEO Amendment]** — shows the 4 components.
 - Constraint check indicators: `[✓ < limit]` or `[⚠ near limit]` inline.
 - "Export PDF" button: deferred to post-beta (disabled, tooltip: "Coming soon").
-- "Optimize for cost →" button: triggers POST /optimize + shows ParetoChart.
+- "Optimize for cost →" button: deferred to post-beta (disabled, tooltip: "Coming soon — optimization runs 200 design variants"). [Autoresearch deferred — Eng Review]
 
 ### 13.5 StepCard Interaction States
 
@@ -1864,6 +1966,9 @@ Badge animates each iteration. On converge: "✓ Converged in 9 iterations"
 
 ### 13.8 ParetoChart (Autoresearch)
 
+**Status: DEFERRED TO POST-BETA [Eng Review, 2026-03-21]**
+Component not built in 7-week beta. "Optimize for cost" button disabled with tooltip. Spec retained for post-beta implementation.
+
 - X axis: cost_usd (thousands). Y axis: U_overall_W_m2K. Bubble size: dP_shell_Pa.
 - Hover tooltip: shows all 3 values + geometry spec summary.
 - Currently-selected design highlighted in blue. Pareto members in green. Dominated in gray.
@@ -1901,59 +2006,11 @@ Badge animates each iteration. On converge: "✓ Converged in 9 iterations"
 - Color contrast: all status colors on dark surface meet WCAG AA (4.5:1 min).
 - Touch targets: Send button ≥ 44×44px. "View reasoning" link ≥ 44px height.
 
-### 13.12 /btw Context Injection [Decision BTW-1A]
+### 13.12 /btw Context Injection
 
-**Concept:** Engineers can inject mid-design context notes while the pipeline is running (or before starting), using `/btw <text>` in the chat input. Analogous to Claude Code's `/btw` — it is not a chat message, it is a side-channel note to the AI engineer.
+**Status: DEFERRED to post-beta [CEO Review 3, 2026-03-21]**
 
-**Syntax:** Any message beginning with `/btw` (case-insensitive) is treated as a context note.
-```
-/btw prefer fixed tubesheet — client has no room for U-tube removal
-/btw fouling factor should be 0.0003 m²K/W — dirty crude service
-/btw budget cap is $120k USD
-```
-
-**Frontend behavior:**
-
-1. **Detection:** In `MessageInput.jsx`, before submitting — if `inputValue.trimStart().toLowerCase().startsWith('/btw')` → route to context note flow, not chat message.
-
-2. **API call:** `POST /api/v1/hx/design/{currentDesignId}/context-note` with `{content: text_after_btw}`.
-
-3. **Note pill rendering:** On success, render a note pill in the chat panel (not a chat bubble). The pill is visually distinct:
-   ```
-   ╭──────────────────────────────────────╮
-   │  📌  btw · step 8+                   │
-   │  prefer fixed tubesheet — client…   │
-   ╰──────────────────────────────────────╯
-   ```
-   - Background: `rgba(59,130,246,0.06)` (faint blue tint)
-   - Border: `1px solid rgba(59,130,246,0.3)` (blue dashed or solid)
-   - Left accent: `3px solid var(--color-running)`
-   - Label: `btw · step N+` in JetBrains Mono, muted, 11px
-   - Content: first 80 chars truncated with ellipsis
-   - No avatar, no timestamp bubble — clearly not a chat message
-
-4. **SSE ack:** On `context_note_ack` event, update the pill to show `✓ injected at step N`.
-
-5. **Disabled states:**
-   - If no design is currently running AND no design has been started: show tooltip "Start a design first to add context notes"
-   - If design is COMPLETE: show tooltip "Design complete — start a new design to use /btw"
-   - Input accepts `/btw` freely at idle (pre-run notes with `applied_from_step=1` are valid)
-
-6. **Fundamental change detection:** If the `/btw` content mentions a fundamentally different design requirement (e.g., completely different fluid, drastically different temperatures) that would invalidate already-completed steps, the backend SHOULD warn in the `context_note_ack` response: `"warning": "This note may conflict with completed steps. Consider starting a new design."` Frontend renders this warning below the note pill in amber.
-
-**What `/btw` does NOT do:**
-- Does not re-run already-completed steps (forward-only, v1 scope)
-- Does not create a chat message or trigger an LLM conversation response
-- Does not pause the pipeline
-
-**HX Engine prompt injection:**
-For every step where `step_id >= applied_from_step`, the base step prompt receives all applicable context notes appended as:
-```
---- Engineer Context Notes ---
-[Note from engineer before step 9]: prefer fixed tubesheet — client has no room for U-tube removal
-[Note from engineer before step 12]: fouling factor should be 0.0003 m²K/W — dirty crude service
-------------------------------
-```
+`/btw` context injection has been removed from the beta build. Root cause: forward-only injection creates designs with internal inconsistency — `confidence_score` does not degrade when notes contradict already-completed steps. Post-beta implementation plan is in §20 P2.
 
 ---
 
@@ -1962,16 +2019,16 @@ For every step where `step_id >= applied_from_step`, the base step prompt receiv
 ### Week 1 — Foundation (Day-by-day order matters)
 
 **Day 1 — Contracts (build nothing else until these are right)**
-- `hx_engine/app/models/design_state.py` — DesignState + GeometrySpec with CG3A validators + default_factory for lists
+- `hx_engine/app/models/design_state.py` — DesignState + GeometrySpec with CG3A validators + default_factory for lists + `waiting_for_user: bool = False` field [CEO Review 3]
 - `hx_engine/app/models/step_result.py` — StepResult, AIDecision enum, AIModeEnum
-- `hx_engine/app/models/sse_events.py` — All 7 event types
+- `hx_engine/app/models/sse_events.py` — All 8 event types (not 9 — /btw deferred [CEO Review 3])
 - `hx_engine/app/steps/__init__.py` — StepProtocol (Decision 6A)
 - `frontend/src/types/hxEvents.ts` — Mirror of sse_events.py
 
 **Day 2 — Infrastructure**
-- `hx_engine/app/config.py` — pydantic-settings
-- `hx_engine/app/core/session_store.py` — Redis save/load DesignState
-- `hx_engine/app/core/sse_manager.py` — asyncio.Queue per session
+- `hx_engine/app/config.py` — pydantic-settings + `PIPELINE_ORPHAN_THRESHOLD_SECONDS = 120` [CEO Review 3]
+- `hx_engine/app/core/session_store.py` — Redis save/load DesignState + `heartbeat()` + `is_orphaned()` [CEO Review 3]
+- `hx_engine/app/core/sse_manager.py` — asyncio.Queue per session + refcount cleanup + escalation future management [CEO Review 3 §7.12]
 - `hx_engine/app/main.py` — FastAPI + /health
 
 **Day 3 — Base step infrastructure**
@@ -1982,9 +2039,9 @@ For every step where `step_id >= applied_from_step`, the base step prompt receiv
 - `hx_engine/app/core/exceptions.py` — CalculationError(step_id, message, cause)
 
 **Day 4 — API endpoints**
-- `hx_engine/app/routers/design.py` — POST /design → {session_id, stream_url (relative path), token}; GET /design/{id}/status [CG2A]
+- `hx_engine/app/routers/design.py` — POST /design → {session_id, stream_url (relative path), token}; GET /design/{id}/status [CG2A] + orphan detection; POST /design/{id}/respond [CEO Review 3 §7.12]
 - `hx_engine/app/routers/stream.py` — GET /design/{id}/stream SSE [Decision 1B]
-- `hx_engine/app/core/pipeline_runner.py` — Skeleton (runs 0 steps, just scaffolding)
+- `hx_engine/app/core/pipeline_runner.py` — Skeleton (runs 0 steps, just scaffolding) + `wait_for_user()` impl [CEO Review 3 §7.12]
 
 **Day 5 — Backend + Frontend + Docker + nginx**
 - `backend/app/core/engine_client.py` — Stub (real in Week 6)
@@ -2044,6 +2101,21 @@ Expected: J_b, J_c, J_l each within 10% of Serth values
 
 **If Serth validation fails, do not proceed to Steps 6–9. Debug bell_delaware.py first.**
 
+**Bell-Delaware vs Kern auto-conservative rule [Decision 3R-7B, resolved CEO Review 3]:**
+Add to `hx_engine/app/core/validation_rules.py` (used in Step 8 Layer 2):
+```python
+def check_bd_kern_divergence(bd_h: float, kern_h: float) -> AutoCorrectResult | None:
+    """If BD/Kern divergence > 20%, return lower value as auto-correction. Layer 2 only."""
+    if abs(bd_h - kern_h) / bd_h > 0.20:
+        conservative = min(bd_h, kern_h)
+        return AutoCorrectResult(
+            use_value=conservative,
+            reason=f"BD/Kern divergence {abs(bd_h-kern_h)/bd_h*100:.1f}% > 20% — using conservative lower value {conservative:.1f} W/m²K"
+        )
+    return None
+```
+Step 8 AI prompt receives both values + the override reason. AI annotates reasoning (which method likely under-predicts and why) — does not override the conservative choice.
+
 Then:
 - `hx_engine/app/correlations/gnielinski.py` — tube_side_h (turbulent, laminar, transition blend)
 - `step_06_initial_u.py` — asyncio.gather books + past [9A] via _safe_memory_call [CEO-4A]
@@ -2075,6 +2147,12 @@ Then:
 
 ---
 
+### Week 4 End — Pre-Week 5 Task (required before building HTRI parser)
+
+**Before writing `htri_parser.py`:** Obtain 3 sample HTRI CSV exports from the beta engineer (ask during or after a call in Week 4). Validate: (a) column names are consistent across HTRI versions, (b) U_overall, dP_shell, dP_tube are present and labeled clearly, (c) identify any version-specific column name variations. If column names vary: build a column-name mapping table in `htri_parser.py` rather than hardcoded strings. [Decision CEO Review 3 — Open Q3 resolved: CSV first, .xrf post-beta]
+
+---
+
 ### Week 5 — Steps 13–16: Vibration, Mechanical, Cost, Final Validation + HTRI Comparison Workflow
 
 > **Trust-Calibration-First insertion [Decision OH-1A]:** The HTRI Comparison workflow (previously deferred to post-beta) is built in Week 5, immediately after the pipeline is complete. Recruit 1–2 beta users with HTRI access before this week. Their comparison runs validate ARKEN's accuracy mid-build, not after launch.
@@ -2091,6 +2169,17 @@ Then steps:
 - `step_16_final_validation.py` — ai_mode=FULL + asyncio.gather all 3 Supermemory sources via _safe_memory_call. CONFIDENCE_WEIGHTS constant (equal 0.25 each) [CEO-7A]. Save to past_designs if score ≥ 0.75.
 
 **HTRI Comparison Workflow (moved from post-beta — [Decision OH-1A]):**
+**MongoDB indexes (add at FastAPI lifespan startup, before any endpoint serves traffic) [CEO Review 3]:**
+```python
+# hx_engine/app/main.py — lifespan startup
+await db.calibration_records.create_index(
+    [("key", 1), ("archived", 1), ("model_version", 1)]
+)
+await db.users.create_index([("email", 1)], unique=True)
+# Both are idempotent (MongoDB returns immediately if index exists)
+# If creation fails: log CRITICAL, exponential backoff 1s/2s/4s, then re-raise → container restart
+```
+
 - `hx_engine/app/routers/htri_compare.py` — POST /api/v1/hx/compare endpoint. Request validated by `HTRICompareRequest` Pydantic model with physics-based bounds [OH-5A, Critical Gap B]:
   ```python
   class HTRICompareRequest(BaseModel):
@@ -2099,7 +2188,7 @@ Then steps:
       dP_tube_htri:  float = Field(..., ge=0,   lt=5.0)   # bar
   ```
   FastAPI returns 422 with field-level errors on invalid values. No bad data reaches the comparator.
-- `hx_engine/app/services/htri_parser.py` — Parse `.xrf` XML / CSV export. Extract U_overall, dP_shell, dP_tube, and key geometry fields. 2MB file size enforced at endpoint before parser is called. Build after manual entry path is working.
+- `hx_engine/app/services/htri_parser.py` — **CSV only in Week 5** [Decision CEO Review 3 — Open Q3]. Use `csv.reader()` (stdlib, no extra deps). Extract U_overall, dP_shell, dP_tube by column name (use mapping table from pre-Week 5 sample validation). 2MB file size enforced at endpoint before parser is called. Build after manual entry path is working. `.xrf` XML parser deferred to post-beta; when built, use `defusedxml` library (XXE mitigation).
 - `hx_engine/app/services/htri_comparator.py` — Compute deviations (ARKEN vs HTRI): `delta_U = (U_arken - U_htri) / U_htri × 100%`. Store per CalibrationKey in `calibration_records` MongoDB collection [OH-7A]. Do not apply correction factor until ≥ 5 comparisons for that key. On successful store: update in-memory calibration cache [Critical Gap A — startup cache pattern, see below]. **Deviation sanity check before MongoDB write [Critical Gap B — second layer]:**
   ```python
   MAX_ALLOWED_DEVIATION_PCT = 50.0  # >50% means geometry mismatch or bug, not a calibration signal
@@ -2144,6 +2233,27 @@ Then steps:
 
   **CalibrationRecord schema (MongoDB document):**
   ```python
+  # CalibrationKey — defined in hx_engine/app/data/calibration.py [Decision OH-6A, Eng Review]
+  class CalibrationKey(BaseModel):
+      """Compound lookup key for calibration records.
+      All fields available from DesignState after Step 4 completes.
+      fluid_pair is always sorted (alphabetical) so (crude_oil, water) == (water, crude_oil).
+      """
+      fluid_pair:           tuple[str, str]  # sorted alphabetically, e.g. ("cooling_water", "crude_oil")
+      tema_type:            str              # e.g. "BEM", "BEU", "AES"
+      shell_diameter_class: Literal["small", "medium", "large"]
+      # small  = shell_diameter_m < 0.5
+      # medium = 0.5 <= shell_diameter_m <= 1.0
+      # large  = shell_diameter_m > 1.0
+
+      @classmethod
+      def from_state(cls, state: "DesignState") -> "CalibrationKey":
+          fluids = tuple(sorted([state.shell_fluid.name, state.tube_fluid.name]))
+          d = state.geometry.shell_diameter_m or 0
+          diam_class = "small" if d < 0.5 else ("large" if d > 1.0 else "medium")
+          return cls(fluid_pair=fluids, tema_type=state.tema_type or "unknown",
+                     shell_diameter_class=diam_class)
+
   class CalibrationRecord(BaseModel):
       key:               CalibrationKey
       delta_U_pct:       float
@@ -2172,7 +2282,7 @@ Then steps:
   - Assert: confidence_breakdown has 4 keys, CONFIDENCE_WEIGHTS sum to 1.0
   - Assert: all 7 SSE event types emitted, design_complete last
 - `tests/unit/services/test_htri_comparator.py` — deviation calculation, calibration record storage, minimum-5-comparisons gate, CalibrationKey compound key construction [OH-6A]; deviation > 50% raises 422 before MongoDB write [Critical Gap B layer 2]; archived records excluded from correction factor; model_version mismatch excludes record from cache load [OH-9A]
-- `tests/unit/services/test_htri_parser.py` — parse valid `.xrf`, missing fields, malformed XML, file > 2MB rejected before parser called [OH-8A]
+- `tests/unit/services/test_htri_parser.py` — **CSV only in Week 5** [CEO Review 3, .xrf deferred]: parse valid CSV with correct columns, missing required column raises ParseError with column name in message, empty CSV (headers only) raises ParseError, file > 2MB rejected before parser called [OH-8A], column name variations handled by mapping table (verify at least 2 variant names map to canonical names)
 - `tests/integration/test_htri_compare_e2e.py` — end-to-end: POST /compare (manual entry) → compute deviation → store calibration record → verify MongoDB insert; POST /compare (file upload, valid .xrf) → same; POST /compare before Step 16 complete → 409; invalid token → 401 [OH-5A]
 - `tests/unit/steps/test_step_09_calibration.py` — Step 9 with ≥5 calibration records: verify U_corrected applied; Step 9 with <5 records: verify U_calculated used unchanged; Step 9 with no records for key: verify proceeds without correction [OH-4A]
 
@@ -2197,23 +2307,11 @@ Then steps:
 - HX Engine webhook handler: POST /internal/design-complete → store result in MongoDB.
 
 **Frontend:**
-- `frontend/src/hooks/useHXStream.ts` — Full SSE + 2s poll fallback [CG2A]. Handle `context_note_ack` event type.
+- `frontend/src/hooks/useHXStream.ts` — Full SSE + 2s poll fallback [CG2A]. 8 event types (no `context_note_ack` — /btw deferred [CEO Review 3]).
 - `frontend/src/components/hx/StepCard.jsx` — Live step card with status badge + AI reasoning.
 - `frontend/src/components/hx/IterationBadge.jsx` — Step 12 convergence progress.
 - `frontend/src/components/hx/DesignSummary.jsx` — With confidence_breakdown expandable.
 - `frontend/src/components/chat/ChatContainer.jsx` — With error state [CEO Amendment].
-- `/btw context injection` [Decision BTW-1A]:
-  - `MessageInput.jsx`: detect `/btw` prefix before submit → call `POST /api/v1/hx/design/{id}/context-note` instead of sending chat message
-  - Render note pill in chat panel (not a chat bubble) — see §13.12 for visual spec
-  - Handle `context_note_ack` SSE event to show `✓ injected at step N` on the pill
-  - Disable `/btw` with tooltip when no design running or design is COMPLETE
-
-**HX Engine — /btw context injection [Decision BTW-1A]:**
-- `POST /api/v1/hx/design/{id}/context-note` endpoint in `hx_engine/app/routers/design.py`
-- Append `ContextNote` to `DesignState.context_notes` in Redis session
-- Emit `context_note_ack` SSE event immediately
-- `hx_engine/app/steps/base.py`: in `_build_prompt()`, collect all `context_notes` where `applied_from_step <= current_step_id` and append to system prompt (see §13.12 format)
-- Sanitize note content: strip lines starting with "Ignore", "Disregard", "System:", "Assistant:" before injection (prompt injection mitigation)
 
 **HX Engine — token security [Decision 3R-6A + CEO-5A]:**
 - POST /design generates short-lived JWT (1hr, HX_ENGINE_SECRET). Payload includes user_id + session_id.
@@ -2251,24 +2349,74 @@ Then steps:
 
 ---
 
-### Week 8 — Autoresearch (Loop 3)
+### Week 8 — DEFERRED (Autoresearch / Loop 3)
 
-- `hx_engine/app/autoresearch/connors_prefilter.py` — connors_quick_check() [Decision 10A]: simplified natural frequency + gap velocity, ~10ms, returns False if stability_ratio < 0.8
-- `hx_engine/app/autoresearch/experiment_runner.py` — 200-variant sweep with ThreadPoolExecutor(16). Per variant: validate CG3A, run connors_quick_check(), run Steps 7–11 (no AI), add to results. Every 10: Claude proposes next batch. After all: extract Pareto, run Step 13 on Pareto members. **In memory only — no Redis saves during sweep.**
-- `hx_engine/app/autoresearch/geometry_proposer.py` — Claude analyzes recent 10 results, proposes 10 new GeometrySpecs. All proposals validated by CG3A field validators. Fallback to random perturbations on failure.
-- `hx_engine/app/autoresearch/pareto.py` — Non-dominated set: minimize cost_usd + dP_shell_Pa, maximize U_overall.
-- `hx_engine/app/routers/design.py` — Add POST /api/v1/hx/optimize endpoint
-- `frontend/src/components/HXProgress/ParetoChart.tsx` — Scatter: cost vs U, bubble = dP. With loading state.
+**Autoresearch deferred to post-beta [Eng Review, 2026-03-21].** The beta build is 7 weeks. Week 7 (Supermemory) is the final beta week. Full autoresearch implementation plan in §20 P2. See §12 for the design spec.
 
-**Week 8 Tests**
-- `tests/unit/autoresearch/test_connors_quick_check.py` — 4 cases
-- `tests/unit/autoresearch/test_pareto.py` — 3-objective extraction, dominated points excluded
-- `tests/integration/test_autoresearch.py` — 20-variant mini-sweep, mock proposer, verify Pareto + Step 13
-- Verify NO Redis saves during experiment sweep: assert session_store.save not called during sweep
+**Beta build ends at Week 7. Ship checkpoint is Integration Checkpoint 7 (Supermemory live).**
 
 ---
 
 ## 15. Test Plan
+
+### 15.0 Test Infrastructure (conftest.py) [Eng Review]
+
+Build `tests/conftest.py` in Week 1 Day 2, alongside the infrastructure files. All test files import fixtures from here — no local mock duplication.
+
+```python
+# tests/conftest.py
+
+import pytest
+from unittest.mock import AsyncMock
+import fakeredis.aioredis
+
+@pytest.fixture
+def fake_redis():
+    """In-memory Redis for all session_store tests. No network, no AOF."""
+    return fakeredis.aioredis.FakeRedis()
+
+@pytest.fixture
+def mock_mongo():
+    """mongomock motor client for calibration_records + users tests."""
+    # use mongomock or motor AsyncMock depending on motor version
+    ...
+
+@pytest.fixture
+def base_design_state():
+    """Factory: returns a DesignState with required fields populated for step tests."""
+    def _factory(**overrides):
+        return DesignState(
+            session_id="test-session-001",
+            user_id="test-user-001",
+            raw_request="Design a crude oil cooler",
+            **overrides
+        )
+    return _factory
+
+@pytest.fixture
+def mock_ai_engineer():
+    """Configurable AI engineer mock. Default: returns 'proceed' with confidence=0.85.
+    Override per-test: mock_ai_engineer.review.return_value = AIReview(decision='correct', ...)
+    """
+    engineer = AsyncMock()
+    engineer.review.return_value = AIReview(
+        decision="proceed", confidence=0.85, reasoning="All checks pass."
+    )
+    return engineer
+
+@pytest.fixture
+def mock_supermemory():
+    """All 5 Supermemory methods return empty strings (safe default for most tests)."""
+    sm = AsyncMock()
+    sm.search_books.return_value = ""
+    sm.search_past_designs.return_value = ""
+    sm.get_user_profile.return_value = ""
+    sm.save_design.return_value = None
+    sm.update_user_profile.return_value = None
+    return sm
+```
+
+**Usage contract:** Import these fixtures in any test file that needs them. Never create local `AsyncMock()` versions of the AI engineer or Redis — always use these. This ensures consistent mock behavior across 20+ test files.
 
 ### 15.1 Affected Routes/Endpoints (nginx-proxied)
 
@@ -2315,11 +2463,13 @@ Then steps:
 - Proceed first try: mock AI → 'proceed' (confidence=0.85) → verify `step_approved` emitted, no correction_attempts
 - Single correction + re-review: mock AI → 'correct' attempt 1, then 'proceed' → verify `step_corrected` emitted with attempts=[1 entry]
 - 3 corrections exhausted [ENG-1A]: mock AI always 'correct' → verify force-escalate on attempt 3, `review.attempts` has 3 entries, `step_escalated` emitted
+- **3 corrections exhausted + user response fails Layer 2 [CEO Review 3 gap fix]:** mock correction exhaustion → escalate → mock user response that still fails Layer 2 → verify `step_error` SSE emitted + `StepHardFailure` raised. Confirms the `else` branch in the correction-exhaustion path (not the direct-escalate path).
 - Correction + Layer 2 hard fail → rollback: mock correction that causes validation fail → verify `state.shell_id_mm` restored to pre-correction value
 - Confidence gate override [ENG-1B]: mock AI returns `decision='correct', confidence=0.4` → verify overridden to `decision='escalate'`, `confidence_gate_triggered=True` logged
 - Confidence gate on re-review: mock AI proceed on attempt 1 but confidence=0.3 → verify force escalate even on 'proceed'
 - Warn path: mock AI → 'warn' → verify `step_warning` emitted, no `wait_for_user` called
 - Direct escalate: mock AI → 'escalate' → verify `wait_for_user` called exactly once
+- **review_notes propagation [Eng Review]:** pre-populate `state.review_notes = ["[Step 7] Shell-side Re=650, baffle spacing sensitive"]` before calling `run_with_review_loop()` → verify that `ai_engineer.review()` is called with a `book_context` or `past_designs` string that contains the review note text (or that `_build_prompt()` embeds it — spy on `_build_prompt` if needed). Ensures review_notes reach the AI prompt and aren't silently dropped.
 
 **`tests/unit/steps/test_apply_helpers.py`** — tests helper contracts from §5.7:
 
@@ -2377,12 +2527,13 @@ Then steps:
 - Serth Example 5.1: U within 5%, all 5 J-factors within 10%, dP within 10%
 - Run against implementation BEFORE wiring into Steps 6–9
 - Note: use existing `calculation_engine/core/equipment/simple/heat_exchanger.py:1408` as scaffold
+- **Bell-Delaware auto-conservative rule [CEO Review 3 — Decision 3R-7B resolved]:** test `check_bd_kern_divergence()` in isolation: (a) 10% divergence → None returned (no correction); (b) 25% divergence → AutoCorrectResult with `use_value = min(bd_h, kern_h)`; (c) Step 8 integration test: inject mock Kern result 30% below BD result → verify `h_o` in DesignState uses the lower Kern value + reason logged.
 
 **Contingency path [Decision CEO-R-1A]:** If Serth 5.1 U misses ±5% after 3 days of iteration:
 1. Activate Kern fallback — use simplified Kern correlation (Kern, *Process Heat Transfer*, 1950) for shell-side h in Step 8. Document the deviation in `bell_delaware.py` with a `# KERN_FALLBACK_ACTIVE` comment.
 2. Proceed to Weeks 4-5 with Kern fallback active. Continue debugging Bell-Delaware in parallel as a background track.
 3. Escalation: if Bell-Delaware remains unresolved after 3 days, ring-fence a week-long deep dive during Weeks 4-5 (does not block frontend/HTRI comparison work on separate tracks).
-4. **Hard gate before Week 7:** Bell-Delaware must be passing ±5% on U before autoresearch begins. Autoresearch runs Steps 7-11 and requires accurate shell-side h — Kern fallback is not accurate enough for optimization.
+4. **Hard gate before Week 7:** Bell-Delaware must be passing ±5% on U before Supermemory integration begins. Note: Autoresearch is deferred to post-beta — the original gate was "before Week 8." Supermemory does not depend on Bell-Delaware accuracy, but the gate still applies: do not proceed past Week 6 with Kern fallback active, as post-beta autoresearch will require accurate shell-side h.
 5. Kern fallback is deactivated as soon as Bell-Delaware passes the Serth 5.1 gate.
 
 ### 15.9 Validation Rules
@@ -2401,21 +2552,13 @@ Then steps:
 - Post-convergence AI review: after Step 12 converges, Steps 13–16 run with ai_mode=FULL (not CONDITIONAL) — verify AI is called in Step 13 and Step 16 even though in_convergence_loop was recently True
 - Oscillation damping: mock ΔU that alternates [+5%, −4%, +3%, −2%…] → verify convergence detects damped oscillation and terminates early when amplitude < 1%, not after 20 iterations
 
-### 15.11 Geometry Proposer Fallback [Eng Decision 4]
+### 15.11 Geometry Proposer Fallback [Eng Decision 4] — POST-BETA
 
-- Claude returns malformed JSON → _random_perturbations(best, n=10) called
-- Claude returns geometries failing CG3A validation → ValidationError caught, fallback triggered
-- Happy path: valid proposals returned → CG3A validates each before use
+**Deferred with autoresearch [Eng Review].** See §12 and §20 P2. Tests written when autoresearch is built.
 
-### 15.12 Autoresearch Parallelism [3R-3A]
+### 15.12 Autoresearch Parallelism [3R-3A] — POST-BETA
 
-- 200 experiments with ThreadPoolExecutor(16): complete in < 30s wall time
-- NO Redis saves during experiment sweep: assert session_store.save not called during sweep
-- Exception in single experiment: logged, excluded from results, others complete
-- All experiments worse than base: base returned as optimal
-- Pareto front > 20 members: clustered to 5–10 representatives
-- Step 13 (vibration) run on all Pareto members before return
-- Cancelled mid-run (user cancels after 100 of 200 experiments): return partial Pareto front from completed experiments; no crash, no dangling threads; ThreadPoolExecutor.shutdown(wait=False) called cleanly
+**Deferred with autoresearch [Eng Review].** Note for post-beta: measure single Bell-Delaware + Gnielinski + dP call time before choosing ThreadPoolExecutor vs ProcessPoolExecutor. If pure Python math, ProcessPoolExecutor(8) for true CPU parallelism. See §20 P2.
 
 ### 15.13 Loop 1 Orchestration Regression [Decision 7A]
 
@@ -2439,6 +2582,13 @@ Then steps:
 - Redis connection lost mid-save → logged, pipeline continues
 - AOF file written in docker volume (verify redis-data volume exists after restart)
 
+**Orphan detection [CEO Review 3 + Eng Review]:**
+- `is_orphaned()` — heartbeat < 120s ago → False
+- `is_orphaned()` — heartbeat > 120s ago, `waiting_for_user=False` → True (normal orphan case)
+- `is_orphaned()` — heartbeat > 200s ago, `waiting_for_user=True` → **False** (ESCALATED pipeline must NOT be marked dead; this is the critical regression guard)
+- `is_orphaned()` — no heartbeat at all → False (just started, not orphaned)
+- `heartbeat()` — updates `{session_id}:meta` key; verify TTL matches session TTL so both expire together
+
 ### 15.16 stream_url Format [Decision CEO-1A]
 
 - POST /design returns stream_url as relative path string (not absolute URL with :8100)
@@ -2460,12 +2610,12 @@ Then steps:
 
 1. Frontend → POST /design (nginx) → session_id + relative stream_url → EventSource → 16 steps → design_complete
 2. Standard crude oil / cooling water design: convergence in < 25s, all events received
-3. Full autoresearch: 200 experiments in < 30s, Pareto front, vibration check on winners
+3. ~~Full autoresearch: 200 experiments in < 30s, Pareto front, vibration check on winners~~ **POST-BETA (deferred)**
 4. Failed AI review with fallback: AI down → WARN cards → design completes with reduced confidence
 5. SSE disconnect → poll fallback → reconnect on completion [CG2A]
 6. Internal webhook failure → 3 retries → CRITICAL log → result retrievable via GET /status
 7. Supermemory down → all 3 gather calls timeout in 5s → design completes with empty context
-8. SSE event-order verification: record all SSE events in order → assert `step_start(1)` before `step_complete(1)`, all 16 steps in sequence, `design_complete` is final event, no `step_complete(N)` without preceding `step_start(N)` [regression test]
+8. SSE event-order verification: record all SSE events in order → assert `step_started(N)` before any terminal event for step N (`step_approved`/`step_corrected`/`step_warning`/`step_escalated`/`step_error`), all 16 steps present in order, `design_complete` is the final event, no terminal event for step N without a preceding `step_started(N)` [regression test; note: `step_started` is emitted by `pipeline_runner.py` before each step's execute(), not inside BaseStep]
 9. Webhook happy path (full flow): HX Engine completes Step 16 → POST /internal/design-complete with X-Internal-Token → Backend stores result in MongoDB → GET /api/v1/hx/design/{session_id}/status returns complete result with all 16 step records
 
 ---
@@ -2505,7 +2655,7 @@ Expected envelope:
 | 5 | End Week 5 | All 16 steps complete; crude oil design envelope check passes; all 7 SSE types emitted |
 | 6 (SYSTEM) | End Week 6 | Frontend types → Backend Loop 1 → HX Engine 16 steps → live StepCards; 5 orchestration tests pass |
 | 7 | End Week 7 | Supermemory book context returned; past design saved after Step 16; user profile non-empty |
-| 8 | End Week 8 | 20-variant sweep; Connors filter eliminates ≥ 1 unsafe geometry; Pareto has ≥ 3 members |
+| 8 (POST-BETA) | End Week 8 | **Deferred.** Autoresearch / Loop 3. See §20 P2. |
 
 ### Benchmark Targets Summary
 
@@ -2542,7 +2692,7 @@ STEP_8_CHECKS = {
 ### 17.2 Lost Context → Review Notes Field
 
 **Problem:** Each AI call is stateless. Earlier observations lost.
-**Solution:** `review_notes` list in design_state. After each review, store key concern (30–50 tokens) and which future steps it affects.
+**Solution:** `review_notes: List[str]` in `DesignState` (added to §7.3). After each step's AI review, `run_with_review_loop()` appends the AI's observation (≤200 chars) as `"[Step N] {observation}"`. Passed to subsequent steps in the AI prompt context. Distinct from `warnings` (Layer 2 hard-rule violations). Example: `"[Step 8] Shell-side Re=650. Step 10 dP sensitive to baffle spacing."` — Step 10 AI receives this as additional context. [Wired in §7.5, Eng Review]
 
 ### 17.3 Accuracy Ceiling → Multi-Layer Calibration
 
@@ -2590,6 +2740,9 @@ STEP_8_CHECKS = {
 | User disconnects during design | Design continues, result stored | User can retrieve result from conversation history on reconnect |
 | Redis down mid-pipeline | Catch ConnectionError, emit warning SSE, continue in memory | "Download your results now — session may not be recoverable" |
 | Internal webhook fails 3× | CRITICAL log, result in Redis for 24h | Retrievable via GET /status |
+| MongoDB down at startup | Exponential backoff 1s/2s/4s, then CRITICAL + re-raise → container restart via healthcheck | Container restart (5 services, calibration cache empty but safe — Step 9 proceeds without correction) |
+| MongoDB down during session | /auth/login + all protected endpoints return 503. Running pipelines continue (Redis only). Calibration cache (loaded at startup) still works from memory. | 503 on new logins; active sessions unaffected. |
+| Pipeline orphan (HX Engine OOM mid-pipeline) | GET /status after 120s of no heartbeat + `waiting_for_user=False` → returns `{"status": "failed"}` | "Pipeline timeout — please retry." |
 
 ### 18.2 Input Edge Cases
 
@@ -2628,7 +2781,7 @@ STEP_8_CHECKS = {
 | AI takes > 10 seconds to respond | Timeout → retry [CEO-3A]. After 3 attempts, proceed with hard rules. |
 | AI suggests correcting a parameter that doesn't exist | Ignore correction. Log error. Proceed. |
 | AI confidence < 0.5 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
-| User doesn't respond to escalation within 5 minutes | Timeout. Use most conservative default and continue with warning. |
+| User doesn't respond to escalation | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
 | Layer 2 still fails after user response (re-escalation) | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts. |
 
 ### 18.5 Supermemory Edge Cases
@@ -2767,6 +2920,47 @@ datamodel-codegen --input hx_engine/app/models/sse_events.py --output frontend/s
 **Priority:** Build inline with Step 15 (Week 5). Update takes 2 minutes per quarter.
 **Source:** Chemical Engineering Plant Cost Index, published monthly in _Chemical Engineering_ magazine. Use official annual average. 2025 estimate: ~816. Fallback: interpolate from last 3 years if current year unavailable.
 
+#### Autoresearch — Loop 3 [Eng Review — Deferred from Beta]
+**Status: Post-beta [Eng Review, 2026-03-21]**
+**Why deferred:** Core value is Loop 2 accuracy. Autoresearch adds optimization on top — only useful once engineers trust the base calculation (validated via HTRI comparison in Week 5). GIL/parallelism question also deferred until we have real Bell-Delaware timing data.
+
+**Build sequence when ready:**
+1. Measure a single Bell-Delaware + Gnielinski + dP calculation time on target hardware. If > 30ms, use `ProcessPoolExecutor(8)` for true CPU parallelism (not ThreadPoolExecutor). If < 30ms, ThreadPoolExecutor or sequential is fine (200 × 30ms = 6s).
+2. `hx_engine/app/correlations/connors_prefilter.py` — `connors_quick_check()`: simplified natural frequency + gap velocity, ~10ms, returns False if stability_ratio < 0.8. Pre-screen variants before running full Steps 7–11.
+3. `hx_engine/app/autoresearch/experiment_runner.py` — 200-variant sweep. Per variant: validate CG3A, run connors_quick_check(), run Steps 7–11 (no AI). Memory only — no Redis saves during sweep.
+4. `hx_engine/app/autoresearch/geometry_proposer.py` — Claude analyzes 10 results, proposes 10 new GeometrySpecs. CG3A validates all proposals. Fallback: `_random_perturbations(best, n=10)`.
+5. `hx_engine/app/autoresearch/pareto.py` — Non-dominated set: minimize cost_usd + dP_shell_Pa, maximize U_overall. If > 20 Pareto members, cluster to 5–10 representatives.
+6. Run Step 13 (vibration) on all Pareto front members before returning — autoresearch only runs Steps 7–11, not 13.
+7. `POST /api/v1/hx/optimize` endpoint + `frontend/src/components/HXProgress/ParetoChart.tsx`
+
+**Tests:** §15.11, §15.12 (marked post-beta) — activate when building.
+**Effort:** M (human: ~1 week / CC: ~3 hours)
+**Depends on:** Beta complete + HTRI comparison validation showing Loop 2 accuracy is trusted.
+
+#### /btw Context Injection [CEO Review 3 — Deferred from Beta]
+**Status: Post-beta [CEO-R-7A, 2026-03-21]**
+**Root cause for deferral:** Forward-only /btw creates designs with internal inconsistency — `confidence_score` does not degrade when a context note contradicts already-completed steps. Injecting "fouling factor = 0.0003" at Step 12 means Steps 1–11 are now calculated with the wrong fouling assumption, but their confidence scores remain untouched. This is a silent correctness gap.
+
+**Post-beta build sequence (two phases):**
+
+**Phase 1 — Pre-run notes only (no pipeline changes needed)**
+- Scope: `/btw` only accepted before `POST /api/v1/hx/design` is called (i.e., before the pipeline starts).
+- Notes stored as `applied_from_step=1` — injected at every step from the beginning.
+- No confidence gap: all 16 steps see the note from the start. Internal consistency maintained.
+- Implementation: `ContextNote` model in `DesignState`, stored in a separate Redis list key `{session_id}:context_notes` (avoids race condition with pipeline read-modify-write on main state key). Prompt injection in `BaseStep._build_prompt()`.
+- Frontend: detect `/btw` prefix in `MessageInput.jsx`; disable during active pipeline with tooltip "Pipeline running — add context before starting your next design".
+- SSE: add `context_note_ack` as the 9th event type (removed in beta, restored here).
+- Prompt injection mitigation: strip lines beginning with "Ignore", "Disregard", "System:", "Assistant:" before injection.
+
+**Phase 2 — Mid-pipeline injection (v2, requires parameter dependency graph)**
+- Scope: `/btw` accepted at any point, including mid-pipeline.
+- Requires: parameter dependency graph (which steps depend on which DesignState fields). When a note changes a field touched by already-completed steps, those steps are flagged for re-run. confidence_score degraded for affected steps.
+- Alternative to full re-run: emit `step_warning` SSE with message "Context note may affect steps 3, 7, 9 — confidence adjusted" and degrade those steps' scores by a fixed factor (e.g., 0.85× per contradicted step).
+- This is the architecturally clean version but requires significant DesignState graph metadata. Do not ship Phase 2 without a complete solution — partial mid-pipeline injection without confidence tracking is worse than Phase 1.
+
+**Effort:** Phase 1 — S (human: ~1 day / CC: ~30 min). Phase 2 — L (human: ~1 week / CC: ~3 hours).
+**Depends on:** Beta complete + at least 3 beta engineers using pre-run notes (Phase 1) to validate demand for mid-pipeline injection before building Phase 2.
+
 ---
 
 ## 21. Decision Log
@@ -2827,7 +3021,7 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | OH-2A | Target user refined | Both junior engineers (no HTRI seat) and senior engineers (15+ designs/year, HTRI too slow for first-pass) are primary users. Senior engineer has purchasing authority. |
 | OH-3A | Org-level sale | Initial customer is a firm (team license), not an individual. HTRI bottleneck is structural — org-level pain needs org-level purchase. Shapes pricing model decision. |
 | OH-4A | Calibration feedback point | Correction factors from HTRI comparisons applied in Step 9 (Overall U) only. Single application point: U_corrected = U_calculated × (1 − avg_delta_U_pct/100). Applied only when ≥ 5 comparisons exist for the CalibrationKey. Shown in AI reasoning. |
-| OH-5A | HTRI compare auth (Week 5) | Static `X-Compare-Token` bearer token on POST /api/v1/hx/compare during Week 5. Replaced by JWT in Week 6. Value in `.env` as `HTRI_COMPARE_TOKEN`. |
+| OH-5A | HTRI compare auth (Week 5) | Static `X-Compare-Token` bearer token on POST /api/v1/hx/compare during Week 5. Value in `.env` as `HTRI_COMPARE_TOKEN`. **Week 6 cutover:** Replace with JWT (same auth as all other protected endpoints). No dual-auth transition needed for beta (2–3 known engineers). Notify beta engineers directly when Week 6 ships. Add test: old X-Compare-Token on /compare → 401 after JWT cutover. [Eng Review] |
 | OH-6A | CalibrationKey schema | Compound key: (fluid_pair: tuple[str,str] sorted, tema_type: str, shell_diameter_class: 'small'\|'medium'\|'large'). Small < 0.5m, medium 0.5–1.0m, large > 1.0m. All fields available from DesignState after Step 4. |
 | OH-7A | Calibration persistence | `calibration_records` MongoDB collection. Schema: {key: CalibrationKey, delta_U_pct: float, delta_dP_shell_pct: float, delta_dP_tube_pct: float, comparison_count: int, last_updated: datetime, archived: bool, archived_reason: str\|None, archived_at: datetime\|None, model_version: str}. `calibration.py` is a query module, not a data store. Startup cache only loads `archived: false` records matching `CURRENT_MODEL_VERSION`. |
 | OH-9A | Calibration data lifecycle | Three mechanisms: (1) Soft archive — never hard-delete calibration records; set `archived: true` via admin endpoint when process conditions change or a Bell-Delaware bug is fixed. Step 9 and startup cache ignore archived records. (2) Model version tag — bump `CURRENT_MODEL_VERSION` constant when Bell-Delaware implementation changes significantly; old records excluded from correction factor automatically. (3) TTL on session data — 30-day TTL index on any temporary design session documents in MongoDB (not calibration records). Hard deletion only for throwaway data, never for comparison records. |
@@ -2842,13 +3036,16 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | CEO-R-3A | Pricing model | Org/team seat license. Week 6 auth builds `subscription_active` per `org_id`; returns `True` for all beta users. If Week 6 slips, beta users default to `subscription_active=True` — no blocking. |
 | CEO-R-4A | Post-beta GTM path | Three-step path: (1) first HTRI comparison < 10% deviation → ask engineer to show a colleague, (2) 2–3 engineers at one firm → org-level demo, (3) firm asks for > 2 seats → paid conversion trigger. |
 
-### Design Review Session — /btw Context Injection (2026-03-21)
+### CEO Review 3 — HOLD SCOPE (2026-03-21)
 
 | ID | Decision | Description |
 |----|----------|-------------|
-| BTW-1A | `/btw` context injection | Mid-pipeline context notes via `/btw <text>` in chat input. Forward-only (v1): applies to steps ≥ `current_step + 1`. Stored as `ContextNote` list in `DesignState`. Not a chat message — renders as note pill in chat panel. `POST /api/v1/hx/design/{id}/context-note` endpoint. `context_note_ack` SSE event. AI prompt injection from `applied_from_step` onward. Rationale: engineers often realize mid-design they need to add a constraint (tube material, fouling factor, budget cap) without restarting. |
-| BTW-2A | Forward-only scope (v1) | Completed steps are NOT re-run when a context note arrives. Note applies only to future steps. Rationale: re-running steps would invalidate downstream results and is a major scope addition — defer to v2. If the note fundamentally changes the design (different fluid, different temperatures), warn the user to start a new design. |
-| BTW-3A | Note pill vs chat bubble | `/btw` notes render as visually distinct pills (faint blue tint, left accent bar, "btw · step N+" label), NOT as chat bubbles. Rationale: they are instructions to the AI engineer, not part of the user-AI conversation. Mixing them with chat messages would confuse the design narrative. |
+| CEO-R-5A | HTRI file format: CSV first | `htri_parser.py` Week 5 uses `csv.reader()` (stdlib). Pre-Week 5: obtain 3 sample CSV exports from beta engineer. `.xrf` XML parser deferred post-beta; use `defusedxml` when built. Resolves Open Question 3. |
+| CEO-R-6A | Bell-Delaware vs Kern auto-conservative | If \|BD − Kern\| / BD > 20%, use lower h_o value (Layer 2 rule in `validation_rules.py`). Step 8 AI prompt includes both values and override reason. Resolves Open Question 6 (Decision 3R-7B). |
+| CEO-R-7A | /btw deferred to post-beta | BTW-1A/2A/3A deferred. Root cause: forward-only /btw creates designs with internal inconsistency (confidence_score doesn't degrade when notes contradict completed steps). Post-beta: implement pre-run notes only first (applied_from_step=1, no confidence gap), then full mid-pipeline with parameter dependency tracking in v2. |
+| CEO-R-8A | wait_for_user() + /respond endpoint | Specified async pattern: asyncio.Future per session in sse_manager.py, resolved by POST /api/v1/hx/design/{id}/respond. Timeout 300s + future cleanup + waiting_for_user flag. |
+| CEO-R-9A | Pipeline orphan detection | heartbeat() + is_orphaned() in session_store.py. PIPELINE_ORPHAN_THRESHOLD_SECONDS=120. waiting_for_user=True excludes session from orphan detection. GET /status returns "failed" for orphaned sessions. |
+| CEO-R-10A | MongoDB indexes at startup | Compound index on calibration_records, unique index on users.email. Created at FastAPI lifespan. Idempotent. Failure: exponential backoff 1s/2s/4s then CRITICAL + re-raise. |
 
 ### CEO Plan Amendments (applied to build sequence)
 
@@ -2868,10 +3065,10 @@ All architecture decisions from CEO review, engineering review, and convergence 
 
 1. **Accuracy trust threshold:** At what U/dP deviation does an engineer lose trust? 5%? 10%? This determines whether calibration.py is needed from day one. The HTRI Comparison workflow (Week 5) will answer this empirically.
 2. ~~**First beta user with HTRI access:**~~ **RESOLVED (2026-03-20)** — Beta engineer with HTRI access confirmed. See §24 Beta User Onboarding Checklist for pre-Week-5 coordination steps.
-3. **HTRI output format in the field:** HTRI exports `.xrf` (XML) and CSV. Which format is more commonly used by your target users? Affects htri_parser.py implementation priority.
+3. ~~**HTRI output format in the field:**~~ **RESOLVED (2026-03-21)** — **CSV first, .xrf post-beta.** `htri_parser.py` in Week 5 uses `csv.reader()` (stdlib). Pre-Week 5: obtain 3 sample CSV exports from beta engineer to validate column names. `.xrf` XML parser deferred to post-beta; when built, use `defusedxml` (XXE mitigation). See §21 Decision CEO-R-5A.
 4. ~~**Regulatory/liability positioning:**~~ **RESOLVED (2026-03-20)** — **"Decision support"** for beta. All Step 16 output and frontend copy labeled `FOR REVIEW ONLY — verify with licensed engineer`. Confidence score displayed as a suggestion, not a certification. Revisit "fabrication-ready" after first 10+ HTRI comparisons and accuracy data. See §21 Decision CEO-R-2A.
 5. ~~**Pricing model:**~~ **RESOLVED (2026-03-20)** — **Org/team seat license** selected. Week 6 auth builds `subscription_active` check per `org_id`; returns `True` for all beta users. If Week 6 auth slips, beta users default to `subscription_active=True` — no one is blocked. See §21 Decision CEO-R-3A.
-6. **Decision 3R-7B (Bell-Delaware vs. Kern fallback):** When Bell-Delaware J-factors deviate > 20% from Kern cross-check (§17.3), should the system (a) auto-select the more conservative result, (b) present both to the user via ESCALATE, or (c) always prefer Bell-Delaware and log the deviation? Decide during Week 3 implementation.
+6. ~~**Decision 3R-7B (Bell-Delaware vs. Kern cross-check divergence):**~~ **RESOLVED (2026-03-21)** — **Auto-conservative.** When |BD − Kern| / BD > 20%, use the lower of the two h_o values (Layer 2 rule in `validation_rules.py`). AI sees both values and the override reason in Step 8 prompt. See §21 Decision CEO-R-6A and §14 Week 3.
 
 ---
 
@@ -2901,6 +3098,10 @@ These are the three steps from first successful comparison to first revenue. The
 ## 24. Beta User Onboarding Checklist
 
 **Engineer:** Confirmed — process engineer with HTRI access. Target first session: Week 5.
+
+**Before Week 1 coding starts:**
+
+0. **Demand signal call (30 minutes, do this before writing a line of code).** Call the beta engineer or another process engineer from your network. Ask them to walk through their last heat exchanger design: "What took the longest?" "What would have made it faster?" "How did you check if the design was right?" At the end, ask directly: "If a tool could give you a first-pass design in 2 minutes with a confidence score and step-by-step audit trail — what would that be worth to your team per month?" Document their answer (a number, a range, or an explicit rejection). This is not the HTRI comparison session — it is demand validation before building. If the answer is "I'd use it but we'd never pay for it" — that is signal you need before writing 3 weeks of code.
 
 **Before the first comparison session (complete by end of Week 4):**
 
