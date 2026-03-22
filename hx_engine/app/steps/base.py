@@ -29,7 +29,7 @@ class StepProtocol(Protocol):
     step_id: int
     step_name: str
 
-    def execute(self, state: "DesignState") -> StepResult: ...
+    async def execute(self, state: "DesignState") -> StepResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -73,14 +73,14 @@ class BaseStep(ABC):
     # Review loop
     # ------------------------------------------------------------------
 
-    def run_with_review_loop(
+    async def run_with_review_loop(
         self,
         state: "DesignState",
         ai_engineer: "AIEngineer",
     ) -> StepResult:
         """Execute the step and optionally loop through AI review."""
         start = time.monotonic()
-        result = self.execute(state)
+        result = await self.execute(state)
 
         if not self._should_call_ai(state):
             self._record(state, result, start)
@@ -88,7 +88,7 @@ class BaseStep(ABC):
 
         corrections = 0
         while corrections < MAX_CORRECTIONS:
-            review: AIReview = ai_engineer.review(self, state, result)
+            review: AIReview = await ai_engineer.review(self, state, result)
             result.ai_review = review
 
             if review.confidence < MIN_AI_CONFIDENCE:
@@ -113,7 +113,7 @@ class BaseStep(ABC):
                 corrections += 1
                 for c in review.corrections:
                     result.outputs[c.field] = c.new_value
-                result = self.execute(state)
+                result = await self.execute(state)
 
         # Max corrections exhausted — escalate
         result.ai_review = AIReview(
@@ -159,4 +159,4 @@ class BaseStep(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def execute(self, state: "DesignState") -> StepResult: ...
+    async def execute(self, state: "DesignState") -> StepResult: ...

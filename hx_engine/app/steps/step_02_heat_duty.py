@@ -48,6 +48,6 @@ class Step02HeatDuty(BaseStep):
     # Placeholder — later pieces will fill these in
     # ------------------------------------------------------------------
 
-    def execute(self, state: "DesignState") -> StepResult:
+    async def execute(self, state: "DesignState") -> StepResult:
         """Full execute — wired in Piece 7."""
         raise NotImplementedError("Step02 execute() not yet assembled (Piece 7)")

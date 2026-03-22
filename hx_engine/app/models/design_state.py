@@ -89,6 +89,10 @@ class GeometrySpec(BaseModel):
     tube_id_m: Optional[float] = None
     tube_length_m: Optional[float] = None
     baffle_cut: Optional[float] = None
+    n_tubes: Optional[int] = None
+    n_passes: Optional[int] = None
+    pitch_layout: Optional[str] = None
+    shell_passes: Optional[int] = None
 
     @field_validator("baffle_spacing_m")
     @classmethod
@@ -150,6 +154,42 @@ class GeometrySpec(BaseModel):
         if v is not None and (v < 0.15 or v > 0.45):
             raise ValueError(
                 f"baffle_cut={v} outside TEMA range [0.15, 0.45]"
+            )
+        return v
+
+    @field_validator("n_tubes")
+    @classmethod
+    def _check_n_tubes(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1 or v > 10000):
+            raise ValueError(
+                f"n_tubes={v} outside range [1, 10000]"
+            )
+        return v
+
+    @field_validator("n_passes")
+    @classmethod
+    def _check_n_passes(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v not in {1, 2, 4, 6, 8}:
+            raise ValueError(
+                f"n_passes={v} not in standard set {{1, 2, 4, 6, 8}}"
+            )
+        return v
+
+    @field_validator("pitch_layout")
+    @classmethod
+    def _check_pitch_layout(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"triangular", "square"}:
+            raise ValueError(
+                f"pitch_layout='{v}' not in {{triangular, square}}"
+            )
+        return v
+
+    @field_validator("shell_passes")
+    @classmethod
+    def _check_shell_passes(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v not in {1, 2}:
+            raise ValueError(
+                f"shell_passes={v} not in {{1, 2}}"
             )
         return v
 
@@ -221,6 +261,10 @@ class DesignState(BaseModel):
     step_records: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     in_convergence_loop: bool = False
+
+    # --- TEMA type & allocation (populated by Step 4) ---
+    tema_type: Optional[str] = None
+    shell_side_fluid: Optional[str] = None
 
     # --- optional preferences ---
     tema_class: Optional[str] = None

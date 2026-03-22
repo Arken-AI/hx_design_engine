@@ -99,7 +99,7 @@ class Step03FluidProperties(BaseStep):
     # Piece 3 + 6: Core execute logic with corner-case warnings
     # ------------------------------------------------------------------
 
-    def execute(self, state: "DesignState") -> StepResult:
+    async def execute(self, state: "DesignState") -> StepResult:
         """Compute fluid properties for both hot and cold sides.
 
         1. Pre-condition check (all required fields from Steps 1–2)

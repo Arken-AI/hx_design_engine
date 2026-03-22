@@ -123,7 +123,7 @@ class Step01Requirements(BaseStep):
     # execute() — entry point
     # ------------------------------------------------------------------
 
-    def execute(self, state: DesignState) -> StepResult:
+    async def execute(self, state: DesignState) -> StepResult:
         """Try structured JSON first; fall back to NL parsing."""
         raw = state.raw_request.strip()
         if not raw:
