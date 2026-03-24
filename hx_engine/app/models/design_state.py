@@ -252,6 +252,7 @@ class DesignState(BaseModel):
     # --- thermal results (populated by later steps) ---
     Q_W: Optional[float] = None
     LMTD_K: Optional[float] = None
+    F_factor: Optional[float] = None
     U_W_m2K: Optional[float] = None
     A_m2: Optional[float] = None
 
