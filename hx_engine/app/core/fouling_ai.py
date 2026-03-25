@@ -16,7 +16,7 @@ from anthropic import AsyncAnthropic
 logger = logging.getLogger(__name__)
 
 # Claude model to use
-_MODEL = "claude-sonnet-4-20250514"
+_MODEL = "claude-sonnet-4-6"
 _MAX_TOKENS = 1024
 _TEMPERATURE = 0.0  # deterministic for engineering values
 
@@ -76,7 +76,7 @@ async def get_fouling_from_ai(
             "confidence": float,
             "reasoning": str,
             "classification": str,
-            "source": "claude-sonnet-4-20250514",
+            "source": "claude-sonnet-4-6",
             "error": None | str,
         }
 

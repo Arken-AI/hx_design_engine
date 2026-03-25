@@ -97,7 +97,7 @@ MongoDB persistence for AI-provided fouling factors.
   "rf_value": 0.00044,
   "confidence": 0.85,
   "reasoning": "Based on TEMA RGP-T-2.4...",
-  "source": "claude-sonnet-4-20250514",
+  "source": "claude-sonnet-4-6",
   "accepted_by": "ai | user",
   "user_override": null,
   "created_at": "2026-03-22T..."
