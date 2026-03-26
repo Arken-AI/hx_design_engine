@@ -127,7 +127,10 @@ class PipelineRunner:
                     result.ai_review
                     and result.ai_review.decision == AIDecisionEnum.ESCALATE
                 ):
+                    state.waiting_for_user = True
+                    await self.session_store.save(session_id, state)
                     state = await self._wait_for_user(session_id, state, step)
+                    state.waiting_for_user = False
 
                 # --- persist state after each step ---
                 await self.session_store.save(session_id, state)

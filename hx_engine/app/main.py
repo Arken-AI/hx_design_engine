@@ -62,9 +62,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers
-app.include_router(design.router)
-app.include_router(stream.router)
+# Register routers — plan requires /api/v1/hx prefix
+app.include_router(design.router, prefix="/api/v1/hx")
+app.include_router(stream.router, prefix="/api/v1/hx")
 
 
 # ---------------------------------------------------------------------------
@@ -73,4 +73,4 @@ app.include_router(stream.router)
 
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "hx-design-engine"}
+    return {"status": "ok", "service": "hx-engine", "version": "0.1.0"}

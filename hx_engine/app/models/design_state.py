@@ -220,6 +220,8 @@ class DesignState(BaseModel):
     # --- identity ---
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: Optional[str] = None
+    org_id: Optional[str] = None
+    mode: str = "design"  # "design" | "rating"
 
     # --- raw user input ---
     raw_request: str = ""
@@ -261,6 +263,7 @@ class DesignState(BaseModel):
     completed_steps: list[int] = Field(default_factory=list)
     step_records: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    waiting_for_user: bool = False
     in_convergence_loop: bool = False
 
     # --- TEMA type & allocation (populated by Step 4) ---

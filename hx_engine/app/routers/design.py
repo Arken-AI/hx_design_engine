@@ -1,8 +1,12 @@
-"""Design router — start a design, check status, respond to escalations."""
+"""Design router — start a design, check status, respond to escalations.
+
+POST /api/v1/hx/design              → trigger design, return {session_id, stream_url, token}
+GET  /api/v1/hx/design/{id}/status   → poll fallback
+POST /api/v1/hx/design/{id}/respond  → user response to ESCALATED step
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -20,7 +24,7 @@ from hx_engine.app.dependencies import (
 from hx_engine.app.models.design_state import DesignState
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/design", tags=["design"])
+router = APIRouter(tags=["design"])
 
 
 # ---------------------------------------------------------------------------
@@ -28,14 +32,16 @@ router = APIRouter(prefix="/design", tags=["design"])
 # ---------------------------------------------------------------------------
 
 class DesignRequest(BaseModel):
-    """Payload for POST /design — kick off a new design session."""
+    """Payload for POST /api/v1/hx/design — kick off a new design session."""
 
     raw_request: str = Field(
         ...,
         description="Natural-language design request from the user / LLM",
         min_length=1,
     )
-    user_id: str | None = None
+    user_id: str
+    org_id: str | None = None
+    mode: str = "design"  # "design" | "rating"
 
     # Optional explicit overrides (usually parsed by Step 01)
     T_hot_in_C: float | None = None
@@ -51,60 +57,59 @@ class DesignRequest(BaseModel):
     tema_preference: str | None = None
 
 
-class DesignStartResponse(BaseModel):
+class DesignResponse(BaseModel):
+    """Response from POST /api/v1/hx/design."""
+
     session_id: str
-    status: str = "started"
-    stream_url: str
+    stream_url: str   # relative path: /api/v1/hx/design/{id}/stream
+    token: str        # JWT for stream auth (stub for now)
 
 
 class DesignStatusResponse(BaseModel):
     session_id: str
     current_step: int
-    completed_steps: list[int]
+    waiting_for_user: bool
+    step_records: list[dict[str, Any]]
     warnings: list[str]
-    Q_W: float | None = None
-    LMTD_K: float | None = None
-    A_m2: float | None = None
-    tema_type: str | None = None
 
 
 class UserResponse(BaseModel):
     """Payload for POST /design/{session_id}/respond — user answers an ESCALATE."""
 
-    response: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Key-value overrides to apply to DesignState",
-    )
+    type: str  # "accept" | "override" | "skip"
+    values: dict | None = None
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.post("", response_model=DesignStartResponse, status_code=201)
+@router.post("/design", response_model=DesignResponse)
 async def start_design(
-    body: DesignRequest,
+    req: DesignRequest,
     background_tasks: BackgroundTasks,
     session_store: SessionStore = Depends(get_session_store),
     sse_manager: SSEManager = Depends(get_sse_manager),
     pipeline_runner: PipelineRunner = Depends(get_pipeline_runner),
-) -> DesignStartResponse:
+) -> DesignResponse:
     """Create a new HX design session and start the pipeline in the background."""
     # Build initial state from request
     state = DesignState(
-        raw_request=body.raw_request,
-        user_id=body.user_id,
-        T_hot_in_C=body.T_hot_in_C,
-        T_hot_out_C=body.T_hot_out_C,
-        T_cold_in_C=body.T_cold_in_C,
-        T_cold_out_C=body.T_cold_out_C,
-        m_dot_hot_kg_s=body.m_dot_hot_kg_s,
-        m_dot_cold_kg_s=body.m_dot_cold_kg_s,
-        hot_fluid_name=body.hot_fluid_name,
-        cold_fluid_name=body.cold_fluid_name,
-        P_hot_Pa=body.P_hot_Pa,
-        P_cold_Pa=body.P_cold_Pa,
-        tema_preference=body.tema_preference,
+        raw_request=req.raw_request,
+        user_id=req.user_id,
+        org_id=req.org_id,
+        mode=req.mode,
+        T_hot_in_C=req.T_hot_in_C,
+        T_hot_out_C=req.T_hot_out_C,
+        T_cold_in_C=req.T_cold_in_C,
+        T_cold_out_C=req.T_cold_out_C,
+        m_dot_hot_kg_s=req.m_dot_hot_kg_s,
+        m_dot_cold_kg_s=req.m_dot_cold_kg_s,
+        hot_fluid_name=req.hot_fluid_name,
+        cold_fluid_name=req.cold_fluid_name,
+        P_hot_Pa=req.P_hot_Pa,
+        P_cold_Pa=req.P_cold_Pa,
+        tema_preference=req.tema_preference,
     )
     session_id = state.session_id
 
@@ -118,19 +123,19 @@ async def start_design(
     # Launch pipeline in background
     background_tasks.add_task(pipeline_runner.run, state)
 
-    return DesignStartResponse(
+    return DesignResponse(
         session_id=session_id,
-        status="started",
-        stream_url=f"/design/{session_id}/stream",
+        stream_url=f"/api/v1/hx/design/{session_id}/stream",
+        token="stub-token",  # Real JWT in Week 6
     )
 
 
-@router.get("/{session_id}/status", response_model=DesignStatusResponse)
+@router.get("/design/{session_id}/status", response_model=DesignStatusResponse)
 async def get_design_status(
     session_id: str,
     session_store: SessionStore = Depends(get_session_store),
 ) -> DesignStatusResponse:
-    """Return the current progress of a design session."""
+    """Poll fallback — return the current progress of a design session."""
     state = await session_store.load(session_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -138,19 +143,16 @@ async def get_design_status(
     return DesignStatusResponse(
         session_id=state.session_id,
         current_step=state.current_step,
-        completed_steps=state.completed_steps,
+        waiting_for_user=state.waiting_for_user,
+        step_records=state.step_records,
         warnings=state.warnings,
-        Q_W=state.Q_W,
-        LMTD_K=state.LMTD_K,
-        A_m2=state.A_m2,
-        tema_type=state.tema_type,
     )
 
 
-@router.post("/{session_id}/respond", status_code=200)
+@router.post("/design/{session_id}/respond")
 async def respond_to_escalation(
     session_id: str,
-    body: UserResponse,
+    response: UserResponse,
     session_store: SessionStore = Depends(get_session_store),
     sse_manager: SSEManager = Depends(get_sse_manager),
 ) -> dict[str, str]:
@@ -159,5 +161,5 @@ async def respond_to_escalation(
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    sse_manager.resolve_user_response(session_id, body.response)
-    return {"status": "accepted", "session_id": session_id}
+    sse_manager.resolve_user_response(session_id, response.model_dump())
+    return {"status": "received"}
