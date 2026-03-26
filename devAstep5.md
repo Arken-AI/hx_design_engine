@@ -684,39 +684,22 @@ After `execute()` returns, the pipeline runner applies:
 
 **AI Constraint (Option C — agreed 2026-03-24):** The auto-correction within `execute()` handles the shell_passes 1→2 bump entirely. The AI review (when triggered) should only **WARN** or **ESCALATE** for shell_passes issues — it must **never return a CORRECT decision for `shell_passes`**. This avoids the state mutation timing issue in `BaseStep.run_with_review_loop()`, where corrections are applied to `result.outputs` but `state.geometry.shell_passes` is not updated before re-execution. The escalation hints guide the AI toward WARN/ESCALATE behavior by providing context about what auto-correction already did.
 
-**Testing Plan (18 tests):**
+**Testing Plan (12 tests):**
 
-| #   | Test                                              | What it validates                                  | Physics assertion                                            |
-| --- | ------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
-| 1   | `test_step05_benchmark_crude_oil_water`           | 150/90°C hot, 30/55°C cold, 2 tube passes, 1 shell | LMTD ≈ 76.1°C, F ≈ 0.94, effective_LMTD ≈ 71.5°C             |
-| 2   | `test_step05_missing_T_hot_in_raises`             | T_hot_in_C = None                                  | `CalculationError` with "T_hot_in_C" in message              |
-| 3   | `test_step05_missing_T_cold_out_raises`           | T_cold_out_C = None                                | `CalculationError`                                           |
-| 4   | `test_step05_missing_Q_W_raises`                  | Q_W = None                                         | `CalculationError`                                           |
-| 5   | `test_step05_missing_geometry_raises`             | geometry = None                                    | `CalculationError`                                           |
-| 6   | `test_step05_pure_countercurrent_F_is_1`          | 1 tube pass, 1 shell pass                          | F = 1.0 exactly, R and P are None (not computed)             |
-| 7   | `test_step05_auto_correct_1_to_2_shells`          | Temps giving F=0.78 with 1 shell                   | shell_passes updated to 2, F improves, `auto_corrected=True` |
-| 8   | `test_step05_auto_correct_still_below_075`        | Extreme temps where 2 shells still < 0.75          | `auto_corrected=False`, warning emitted, F left as-is        |
-| 9   | `test_step05_small_lmtd_warning`                  | Temps giving LMTD < 3°C                            | Warning about large area requirement                         |
-| 10  | `test_step05_high_R_warning`                      | R > 4.0 (very asymmetric)                          | Warning about asymmetric duty                                |
-| 11  | `test_step05_equal_delta_t_no_crash`              | ΔT₁ = ΔT₂ exactly                                  | Returns valid LMTD (arithmetic mean), no exception           |
-| 12  | `test_step05_R_equals_1_no_crash`                 | Symmetric case R = 1.0                             | F computed correctly, no NaN/inf                             |
-| 13  | `test_step05_ai_trigger_F_below_085`              | F = 0.84, no auto-correction                       | `_conditional_ai_trigger` returns True                       |
-| 14  | `test_step05_ai_trigger_F_above_085_no_call`      | F = 0.92, R = 2.0, approach > 3°C                  | `_conditional_ai_trigger` returns False — healthy, no AI     |
-| 15  | `test_step05_ai_trigger_auto_corrected_above_080` | Auto-corrected, corrected F = 0.88                 | `_conditional_ai_trigger` returns False — correction worked  |
-| 16  | `test_step05_ai_trigger_auto_corrected_below_080` | Auto-corrected, corrected F = 0.79                 | `_conditional_ai_trigger` returns True — still concerning    |
-| 17  | `test_step05_ai_trigger_high_R`                   | F = 0.95 but R = 4.5                               | `_conditional_ai_trigger` returns True — steep F-P curve     |
-| 18  | `test_step05_ai_trigger_temp_cross_risk`          | F = 0.95, R = 2.0, approach = 2°C                  | `_conditional_ai_trigger` returns True — cross risk          |
-
-**Conditional AI Trigger Decision Table (reference for tests 13–18):**
-
-| Scenario                | Auto-corrected? | F after correction | R   | Approach | AI called? | Why                |
-| ----------------------- | --------------- | ------------------ | --- | -------- | ---------- | ------------------ |
-| Healthy                 | No              | 0.92               | 2.0 | 35°C     | No         | All triggers clear |
-| F borderline            | No              | 0.84               | 2.0 | 35°C     | **Yes**    | F < 0.85           |
-| Correction worked       | Yes             | 0.88               | 2.0 | 35°C     | No         | Corrected F ≥ 0.80 |
-| Correction insufficient | Yes             | 0.79               | 2.0 | 35°C     | **Yes**    | Corrected F < 0.80 |
-| High R                  | No              | 0.95               | 4.5 | 35°C     | **Yes**    | R > 4.0            |
-| Temp cross              | No              | 0.95               | 2.0 | 2°C      | **Yes**    | Approach < 3°C     |
+| #   | Test                                       | What it validates                                  | Physics assertion                                            |
+| --- | ------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------ |
+| 1   | `test_step05_benchmark_crude_oil_water`    | 150/90°C hot, 30/55°C cold, 2 tube passes, 1 shell | LMTD ≈ 76.1°C, F ≈ 0.94, effective_LMTD ≈ 71.5°C             |
+| 2   | `test_step05_missing_T_hot_in_raises`      | T_hot_in_C = None                                  | `CalculationError` with "T_hot_in_C" in message              |
+| 3   | `test_step05_missing_T_cold_out_raises`    | T_cold_out_C = None                                | `CalculationError`                                           |
+| 4   | `test_step05_missing_Q_W_raises`           | Q_W = None                                         | `CalculationError`                                           |
+| 5   | `test_step05_missing_geometry_raises`      | geometry = None                                    | `CalculationError`                                           |
+| 6   | `test_step05_pure_countercurrent_F_is_1`   | 1 tube pass, 1 shell pass                          | F = 1.0 exactly, R and P are None (not computed)             |
+| 7   | `test_step05_auto_correct_1_to_2_shells`   | Temps giving F=0.78 with 1 shell                   | shell_passes updated to 2, F improves, `auto_corrected=True` |
+| 8   | `test_step05_auto_correct_still_below_075` | Extreme temps where 2 shells still < 0.75          | `auto_corrected=False`, warning emitted, F left as-is        |
+| 9   | `test_step05_small_lmtd_warning`           | Temps giving LMTD < 3°C                            | Warning about large area requirement                         |
+| 10  | `test_step05_high_R_warning`               | R > 4.0 (very asymmetric)                          | Warning about asymmetric duty                                |
+| 11  | `test_step05_equal_delta_t_no_crash`       | ΔT₁ = ΔT₂ exactly                                  | Returns valid LMTD (arithmetic mean), no exception           |
+| 12  | `test_step05_R_equals_1_no_crash`          | Symmetric case R = 1.0                             | F computed correctly, no NaN/inf                             |
 
 **Physics invariants the tests enforce:**
 
@@ -726,8 +709,6 @@ After `execute()` returns, the pipeline runner applies:
 4. Auto-correction only triggers when F < 0.80 AND current shell_passes == 1
 5. Pure counter-current (1-1) always gives F = 1.0 — the formula is never called
 6. Temperatures and Q_W are never modified by this step
-7. AI trigger respects auto-correction: post-correction threshold is 0.80, not 0.85
-8. AI can WARN or ESCALATE but never CORRECT `shell_passes` (Option C)
 
 ---
 
@@ -864,7 +845,7 @@ Piece 2  ─── step_05_rules.py (depends on Piece 1 output shape)
    │         10 tests → run test_step_05_rules.py
    ▼
 Piece 3  ─── step_05_lmtd.py (depends on Pieces 0, 1, 2)
-   │         18 tests → run test_step_05_execute.py
+   │         12 tests → run test_step_05_execute.py
    ▼
 Piece 4  ─── Pipeline wiring (depends on Piece 3)
    │         5 tests → run test_step_05_state.py
@@ -893,17 +874,17 @@ Phase C (Sequential — depends on Phase B):
 
 ---
 
-## Total Test Count: 56 tests
+## Total Test Count: 50 tests
 
 | Piece | Description               | Tests | Cumulative |
 | ----- | ------------------------- | ----- | ---------- |
 | 0     | Model Update (F_factor)   | 3     | 3          |
 | 1     | correlations/lmtd.py      | 14    | 17         |
 | 2     | step_05_rules.py          | 10    | 27         |
-| 3     | step_05_lmtd.py (execute) | 18    | 45         |
-| 4     | Pipeline wiring           | 5     | 50         |
-| 5     | Integration (Steps 1→5)   | 6     | 56         |
-| 6     | Full regression           | 0\*   | 56         |
+| 3     | step_05_lmtd.py (execute) | 12    | 39         |
+| 4     | Pipeline wiring           | 5     | 44         |
+| 5     | Integration (Steps 1→5)   | 6     | 50         |
+| 6     | Full regression           | 0\*   | 50         |
 
 \*Piece 6 re-runs ALL existing tests (~40+), not new tests.
 
@@ -923,8 +904,6 @@ These invariants must hold across **ALL** Step 5 tests:
 8. **No tube geometry mutation:** Step 5 only touches `shell_passes` — never tube OD, ID, length, n_tubes, etc.
 9. **Auto-correction only increases:** shell_passes can go 1→2, never 2→1
 10. **Consistent with Step 4:** If Step 4 set shell_passes=1 and Step 5 doesn't auto-correct, it stays 1
-11. **AI constraint (Option C):** AI review never returns CORRECT for `shell_passes` — only WARN or ESCALATE
-12. **Conditional AI trigger respects auto-correction:** Post-correction threshold is 0.80, not 0.85
 
 ---
 
