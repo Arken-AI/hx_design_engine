@@ -96,7 +96,7 @@ class TestEscalationHints:
             assert "trigger" in hint
             assert "recommendation" in hint
 
-    def test_escalation_via_execute(self):
+    async def test_escalation_via_execute(self):
         """Escalation hints populated through full execute()."""
         step = Step04TEMAGeometry()
         state = _make_state(
@@ -104,7 +104,7 @@ class TestEscalationHints:
             T_hot_in_C=150, T_hot_out_C=90,
             T_cold_in_C=30, T_cold_out_C=70,
         )
-        result = step.execute(state)
+        result = await step.execute(state)
         hints = result.outputs.get("escalation_hints", [])
         assert isinstance(hints, list)
 
@@ -143,11 +143,11 @@ class TestEscalationHints:
         triggers = [h["trigger"] for h in hints]
         assert "fouling_factor_uncertain" not in triggers
 
-    def test_fouling_metadata_in_execute_output(self):
+    async def test_fouling_metadata_in_execute_output(self):
         """execute() includes fouling_metadata in outputs."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        result = step.execute(state)
+        result = await step.execute(state)
         meta = result.outputs.get("fouling_metadata")
         assert meta is not None
         assert "hot" in meta
@@ -155,11 +155,11 @@ class TestEscalationHints:
         assert "rf" in meta["hot"]
         assert "needs_ai" in meta["hot"]
 
-    def test_fouling_metadata_flags_unknown(self):
+    async def test_fouling_metadata_flags_unknown(self):
         """Unknown fluid in execute → fouling_metadata needs_ai=True."""
         step = Step04TEMAGeometry()
         state = _make_state(hot_fluid_name="molten polymer resin")
-        result = step.execute(state)
+        result = await step.execute(state)
         meta = result.outputs["fouling_metadata"]
         assert meta["hot"]["needs_ai"] is True
         assert meta["hot"]["source"] == "ai_recommended"

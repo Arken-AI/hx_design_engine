@@ -39,11 +39,11 @@ def _make_benchmark_state() -> DesignState:
 class TestExecute:
     """Eight tests guarding Step 03 execute() correctness."""
 
-    def test_benchmark_both_populated(self):
+    async def test_benchmark_both_populated(self):
         """Crude oil + ethanol benchmark populates both FluidProperties."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         hot = result.outputs["hot_fluid_props"]
         cold = result.outputs["cold_fluid_props"]
@@ -58,38 +58,38 @@ class TestExecute:
 
         assert result.validation_passed is True
 
-    def test_missing_hot_fluid_name_raises(self):
+    async def test_missing_hot_fluid_name_raises(self):
         """state.hot_fluid_name = None → CalculationError."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
         state.hot_fluid_name = None
 
         with pytest.raises(CalculationError, match="hot_fluid_name"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_missing_cold_fluid_name_raises(self):
+    async def test_missing_cold_fluid_name_raises(self):
         """state.cold_fluid_name = None → CalculationError."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
         state.cold_fluid_name = None
 
         with pytest.raises(CalculationError, match="cold_fluid_name"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_missing_temperatures_raises(self):
+    async def test_missing_temperatures_raises(self):
         """state.T_hot_in_C = None → CalculationError."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
         state.T_hot_in_C = None
 
         with pytest.raises(CalculationError, match="T_hot_in_C"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_outputs_dict_keys(self):
+    async def test_outputs_dict_keys(self):
         """Result outputs contain the expected keys matching DesignState fields."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         assert "hot_fluid_props" in result.outputs
         assert "cold_fluid_props" in result.outputs
@@ -98,22 +98,22 @@ class TestExecute:
         assert result.outputs["T_mean_hot_C"] == pytest.approx(120.0)
         assert result.outputs["T_mean_cold_C"] == pytest.approx(45.0)
 
-    def test_step_result_metadata(self):
+    async def test_step_result_metadata(self):
         """StepResult carries correct step_id and step_name."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         assert result.step_id == 3
         assert result.step_name == "Fluid Properties"
 
-    def test_state_is_not_mutated(self):
+    async def test_state_is_not_mutated(self):
         """execute() is pure — Layer 1 must not mutate the input state."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
         state_before = copy.deepcopy(state)
 
-        step.execute(state)
+        await step.execute(state)
 
         # State fields should be unchanged
         assert state.hot_fluid_props is None
@@ -121,7 +121,7 @@ class TestExecute:
         assert state.T_hot_in_C == state_before.T_hot_in_C
         assert state.T_cold_out_C == state_before.T_cold_out_C
 
-    def test_both_fluids_same_different_temps(self):
+    async def test_both_fluids_same_different_temps(self):
         """Water–water at different temperatures → two different FluidProperties.
 
         Properties are temperature-dependent: Pr(30°C) ≠ Pr(90°C).
@@ -158,7 +158,7 @@ class TestExecute:
             "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
             side_effect=_side_effect,
         ):
-            result = step.execute(state)
+            result = await step.execute(state)
 
         hot = result.outputs["hot_fluid_props"]
         cold = result.outputs["cold_fluid_props"]

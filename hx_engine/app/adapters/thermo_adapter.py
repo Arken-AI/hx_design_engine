@@ -331,7 +331,7 @@ def get_fluid_properties(
                     return _get_props_coolprop("Water", temperature_C, pressure_Pa)
                 except CalculationError:
                     pass
-            raise
+            # Fall through to thermo / other backends
 
     # 2. CoolProp — mapped pure fluids
     cp_name = _COOLPROP_MAP.get(normalised)

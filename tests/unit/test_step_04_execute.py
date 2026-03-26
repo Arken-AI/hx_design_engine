@@ -40,11 +40,11 @@ def _make_state(**overrides) -> DesignState:
 
 
 class TestStep04Execute:
-    def test_benchmark_crude_water(self):
+    async def test_benchmark_crude_water(self):
         """Crude oil 150→90°C + water 30→60°C → complete result."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         assert result.step_id == 4
         assert "tema_type" in result.outputs
@@ -52,66 +52,66 @@ class TestStep04Execute:
         assert "shell_side_fluid" in result.outputs
         assert isinstance(result.outputs["geometry"], GeometrySpec)
 
-    def test_missing_fluid_props_error(self):
+    async def test_missing_fluid_props_error(self):
         """hot_fluid_props = None → CalculationError."""
         step = Step04TEMAGeometry()
         state = _make_state(hot_fluid_props=None)
         with pytest.raises(CalculationError, match="hot_fluid_props"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_missing_Q_error(self):
+    async def test_missing_Q_error(self):
         """Q_W = None → CalculationError."""
         step = Step04TEMAGeometry()
         state = _make_state(Q_W=None)
         with pytest.raises(CalculationError, match="Q_W"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_missing_temperatures_error(self):
+    async def test_missing_temperatures_error(self):
         """T_hot_in_C = None → CalculationError."""
         step = Step04TEMAGeometry()
         state = _make_state(T_hot_in_C=None)
         with pytest.raises(CalculationError, match="T_hot_in_C"):
-            step.execute(state)
+            await step.execute(state)
 
-    def test_outputs_dict_keys(self):
+    async def test_outputs_dict_keys(self):
         """Normal run → outputs has required keys."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        result = step.execute(state)
+        result = await step.execute(state)
         assert "tema_type" in result.outputs
         assert "geometry" in result.outputs
         assert "shell_side_fluid" in result.outputs
         assert "tema_reasoning" in result.outputs
         assert "escalation_hints" in result.outputs
 
-    def test_step_result_metadata(self):
+    async def test_step_result_metadata(self):
         """Normal run → step_id=4, step_name correct."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        result = step.execute(state)
+        result = await step.execute(state)
         assert result.step_id == 4
         assert result.step_name == "TEMA Geometry Selection"
 
-    def test_state_not_mutated(self):
+    async def test_state_not_mutated(self):
         """execute() must not modify the input DesignState."""
         step = Step04TEMAGeometry()
         state = _make_state()
         state_before = state.model_dump_json()
-        step.execute(state)
+        await step.execute(state)
         state_after = state.model_dump_json()
         assert state_before == state_after
 
-    def test_geometry_is_valid_spec(self):
+    async def test_geometry_is_valid_spec(self):
         """Output geometry passes GeometrySpec validators."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        result = step.execute(state)
+        result = await step.execute(state)
         geom = result.outputs["geometry"]
         # Re-validate
         validated = GeometrySpec.model_validate(geom.model_dump())
         assert validated.tube_id_m < validated.tube_od_m
 
-    def test_water_water_clean_service(self):
+    async def test_water_water_clean_service(self):
         """Water both sides → BEM + triangular pitch."""
         step = Step04TEMAGeometry()
         state = _make_state(
@@ -120,7 +120,7 @@ class TestStep04Execute:
             T_hot_in_C=80, T_hot_out_C=60,
             T_cold_in_C=30, T_cold_out_C=50,
         )
-        result = step.execute(state)
+        result = await step.execute(state)
         assert result.outputs["tema_type"] == "BEM"
         assert result.outputs["geometry"].pitch_layout == "triangular"
 

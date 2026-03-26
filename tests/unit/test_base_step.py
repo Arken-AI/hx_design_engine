@@ -21,7 +21,7 @@ class DummyStep(BaseStep):
     step_name = "Dummy"
     ai_mode = AIModeEnum.NONE
 
-    def execute(self, state: DesignState) -> StepResult:
+    async def execute(self, state: DesignState) -> StepResult:
         return StepResult(step_id=self.step_id, step_name=self.step_name, outputs={"val": 42})
 
 
@@ -30,7 +30,7 @@ class FullAIStep(BaseStep):
     step_name = "FullAI"
     ai_mode = AIModeEnum.FULL
 
-    def execute(self, state: DesignState) -> StepResult:
+    async def execute(self, state: DesignState) -> StepResult:
         return StepResult(step_id=self.step_id, step_name=self.step_name, outputs={"val": 1})
 
 
@@ -42,7 +42,7 @@ class ConditionalStep(BaseStep):
     def _conditional_ai_trigger(self, state: DesignState) -> bool:
         return False
 
-    def execute(self, state: DesignState) -> StepResult:
+    async def execute(self, state: DesignState) -> StepResult:
         return StepResult(step_id=self.step_id, step_name=self.step_name)
 
 
@@ -90,17 +90,17 @@ class TestShouldCallAI:
 # --- Review loop tests ---
 
 class TestRunWithReviewLoop:
-    def test_proceed(self):
+    async def test_proceed(self):
         step = FullAIStep()
         state = DesignState()
         ai = AIEngineer()  # stub: always PROCEED
-        result = step.run_with_review_loop(state, ai)
+        result = await step.run_with_review_loop(state, ai)
         assert result.ai_review.decision == AIDecisionEnum.PROCEED
         assert len(state.step_records) == 1
 
-    def test_warn_records_warning(self):
+    async def test_warn_records_warning(self):
         class WarnAI:
-            def review(self, step, state, result):
+            async def review(self, step, state, result):
                 return AIReview(
                     decision=AIDecisionEnum.WARN,
                     confidence=0.9,
@@ -110,12 +110,12 @@ class TestRunWithReviewLoop:
 
         step = FullAIStep()
         state = DesignState()
-        result = step.run_with_review_loop(state, WarnAI())
+        result = await step.run_with_review_loop(state, WarnAI())
         assert "Watch out" in state.warnings
 
-    def test_low_confidence_escalates(self):
+    async def test_low_confidence_escalates(self):
         class LowConfAI:
-            def review(self, step, state, result):
+            async def review(self, step, state, result):
                 return AIReview(
                     decision=AIDecisionEnum.PROCEED,
                     confidence=0.3,
@@ -124,14 +124,14 @@ class TestRunWithReviewLoop:
 
         step = FullAIStep()
         state = DesignState()
-        result = step.run_with_review_loop(state, LowConfAI())
+        result = await step.run_with_review_loop(state, LowConfAI())
         assert result.ai_review.decision == AIDecisionEnum.ESCALATE
 
-    def test_correct_then_proceed(self):
+    async def test_correct_then_proceed(self):
         call_count = 0
 
         class CorrectOnceAI:
-            def review(self, step, state, result):
+            async def review(self, step, state, result):
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
@@ -151,12 +151,12 @@ class TestRunWithReviewLoop:
 
         step = FullAIStep()
         state = DesignState()
-        result = step.run_with_review_loop(state, CorrectOnceAI())
+        result = await step.run_with_review_loop(state, CorrectOnceAI())
         assert result.ai_review.decision == AIDecisionEnum.PROCEED
 
-    def test_3_corrections_then_escalate(self):
+    async def test_3_corrections_then_escalate(self):
         class AlwaysCorrectAI:
-            def review(self, step, state, result):
+            async def review(self, step, state, result):
                 return AIReview(
                     decision=AIDecisionEnum.CORRECT,
                     confidence=0.9,
@@ -168,12 +168,12 @@ class TestRunWithReviewLoop:
 
         step = FullAIStep()
         state = DesignState()
-        result = step.run_with_review_loop(state, AlwaysCorrectAI())
+        result = await step.run_with_review_loop(state, AlwaysCorrectAI())
         assert result.ai_review.decision == AIDecisionEnum.ESCALATE
 
-    def test_no_ai_when_mode_none(self):
+    async def test_no_ai_when_mode_none(self):
         step = DummyStep()
         state = DesignState()
         ai = AIEngineer()
-        result = step.run_with_review_loop(state, ai)
+        result = await step.run_with_review_loop(state, ai)
         assert result.ai_review is None  # AI not called

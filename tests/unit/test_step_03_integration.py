@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,14 +51,14 @@ def _make_benchmark_state() -> DesignState:
 class TestIntegration:
     """Eight integration tests — all pieces wired together."""
 
-    def test_full_benchmark(self):
+    async def test_full_benchmark(self):
         """50 kg/s crude oil 150→90°C + ethanol 30→60°C — full pipeline.
 
         Both FluidProperties populated, validation passes.
         """
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         hot = result.outputs["hot_fluid_props"]
         cold = result.outputs["cold_fluid_props"]
@@ -73,7 +73,7 @@ class TestIntegration:
         assert result.validation_passed is True
         assert result.step_id == 3
 
-    def test_water_water_different_temps(self):
+    async def test_water_water_different_temps(self):
         """Water on both sides at different temps → two different FluidProperties."""
 
         def _mock(fluid_name, T_mean_C, pressure_Pa=None):
@@ -94,13 +94,13 @@ class TestIntegration:
             "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
             side_effect=_mock,
         ):
-            result = step.execute(state)
+            result = await step.execute(state)
 
         hot = result.outputs["hot_fluid_props"]
         cold = result.outputs["cold_fluid_props"]
         assert hot.density_kg_m3 != cold.density_kg_m3
 
-    def test_ethanol_ethylene_glycol(self):
+    async def test_ethanol_ethylene_glycol(self):
         """Ethanol 80→40°C + ethylene glycol 20→55°C — real adapter paths."""
         state = DesignState(
             hot_fluid_name="ethanol",
@@ -111,18 +111,18 @@ class TestIntegration:
             T_cold_out_C=55.0,
         )
         step = Step03FluidProperties()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         hot = result.outputs["hot_fluid_props"]
         cold = result.outputs["cold_fluid_props"]
         assert hot.cp_J_kgK is not None and hot.cp_J_kgK > 0
         assert cold.cp_J_kgK is not None and cold.cp_J_kgK > 0
 
-    def test_step_result_round_trip(self):
+    async def test_step_result_round_trip(self):
         """Execute, serialize outputs to JSON, verify all fields serialize."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         # StepResult is a Pydantic model — should serialize cleanly
         json_data = result.model_dump()
@@ -130,7 +130,7 @@ class TestIntegration:
         assert json_data["step_id"] == 3
         assert json_data["step_name"] == "Fluid Properties"
 
-    def test_immutability(self):
+    async def test_immutability(self):
         """Execute does not mutate the original state."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
@@ -138,7 +138,7 @@ class TestIntegration:
         assert state.hot_fluid_props is None
         assert state.cold_fluid_props is None
 
-        step.execute(state)
+        await step.execute(state)
 
         # State must remain unmodified
         assert state.hot_fluid_props is None
@@ -151,12 +151,12 @@ class TestIntegration:
         assert step.step_id == 3
         assert step.step_name == "Fluid Properties"
 
-    def test_run_with_review_loop_proceed(self):
+    async def test_run_with_review_loop_proceed(self):
         """run_with_review_loop with AI stub returning PROCEED."""
         step = Step03FluidProperties()
         state = _make_benchmark_state()
 
-        ai_engineer = MagicMock()
+        ai_engineer = AsyncMock()
         ai_engineer.review.return_value = AIReview(
             decision=AIDecisionEnum.PROCEED,
             confidence=0.9,
@@ -166,21 +166,21 @@ class TestIntegration:
 
         # Force AI to be called by temporarily setting ai_mode to FULL
         step.ai_mode = AIModeEnum.FULL
-        result = step.run_with_review_loop(state, ai_engineer)
+        result = await step.run_with_review_loop(state, ai_engineer)
 
         assert result.step_id == 3
         assert result.ai_review is not None
         assert result.ai_review.decision == AIDecisionEnum.PROCEED
         assert result.outputs["hot_fluid_props"] is not None
 
-    def test_validation_rules_pass_on_real_output(self):
+    async def test_validation_rules_pass_on_real_output(self):
         """Step 3 output passes all registered Layer 2 validation rules."""
         validation_rules.clear_rules()
         register_step3_rules()
 
         step = Step03FluidProperties()
         state = _make_benchmark_state()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         vr = validation_rules.check(3, result)
         assert vr.passed is True, f"Validation errors: {vr.errors}"

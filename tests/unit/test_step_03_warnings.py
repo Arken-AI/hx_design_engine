@@ -35,7 +35,7 @@ _HIGH_VISC_OIL = FluidProperties(
 class TestCornerCases:
     """Six tests guarding corner-case warnings."""
 
-    def test_crude_no_api_warning(self):
+    async def test_crude_no_api_warning(self):
         """crude oil → warning about generic API assumption."""
         state = DesignState(
             hot_fluid_name="crude oil",
@@ -46,13 +46,13 @@ class TestCornerCases:
             T_cold_out_C=60.0,
         )
         step = Step03FluidProperties()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         api_warnings = [w for w in result.warnings if "API" in w]
         assert len(api_warnings) >= 1
         assert "generic" in api_warnings[0].lower() or "API" in api_warnings[0]
 
-    def test_water_near_boiling_warning(self):
+    async def test_water_near_boiling_warning(self):
         """Water at T_mean=98°C, P=1 atm → phase change warning."""
 
         def _mock_adapter(fluid_name, T_mean_C, pressure_Pa=None):
@@ -75,12 +75,12 @@ class TestCornerCases:
             "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
             side_effect=_mock_adapter,
         ):
-            result = step.execute(state)
+            result = await step.execute(state)
 
         boiling_warnings = [w for w in result.warnings if "boiling" in w.lower()]
         assert len(boiling_warnings) >= 1
 
-    def test_water_below_5C_warning(self):
+    async def test_water_below_5C_warning(self):
         """Water at T_mean=3°C → freezing/phase change warning."""
 
         def _mock_adapter(fluid_name, T_mean_C, pressure_Pa=None):
@@ -100,12 +100,12 @@ class TestCornerCases:
             "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
             side_effect=_mock_adapter,
         ):
-            result = step.execute(state)
+            result = await step.execute(state)
 
         freeze_warnings = [w for w in result.warnings if "freezing" in w.lower()]
         assert len(freeze_warnings) >= 1
 
-    def test_high_viscosity_sieder_tate_warning(self):
+    async def test_high_viscosity_sieder_tate_warning(self):
         """Heavy oil with μ > 0.1 → Sieder-Tate warning."""
 
         def _mock_adapter(fluid_name, T_mean_C, pressure_Pa=None):
@@ -126,12 +126,12 @@ class TestCornerCases:
             "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
             side_effect=_mock_adapter,
         ):
-            result = step.execute(state)
+            result = await step.execute(state)
 
         visc_warnings = [w for w in result.warnings if "Sieder-Tate" in w]
         assert len(visc_warnings) >= 1
 
-    def test_normal_case_no_warnings(self):
+    async def test_normal_case_no_warnings(self):
         """Ethanol + thermal oil at typical temps → no corner-case warnings."""
         state = DesignState(
             hot_fluid_name="thermal oil",
@@ -144,12 +144,12 @@ class TestCornerCases:
             P_cold_Pa=101325.0,
         )
         step = Step03FluidProperties()
-        result = step.execute(state)
+        result = await step.execute(state)
 
         # Should have no warnings (no crude, no water, no high viscosity)
         assert len(result.warnings) == 0
 
-    def test_unknown_fluid_error_is_helpful(self):
+    async def test_unknown_fluid_error_is_helpful(self):
         """'unobtanium' → CalculationError message contains fluid name."""
         state = DesignState(
             hot_fluid_name="unobtanium",
@@ -161,7 +161,7 @@ class TestCornerCases:
         )
         step = Step03FluidProperties()
         with pytest.raises(CalculationError) as exc_info:
-            step.execute(state)
+            await step.execute(state)
 
         assert "unobtanium" in exc_info.value.message
         assert exc_info.value.step_id == 3

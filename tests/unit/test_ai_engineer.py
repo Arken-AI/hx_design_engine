@@ -11,22 +11,22 @@ class _DummyStep(BaseStep):
     step_name = "Dummy"
     ai_mode = AIModeEnum.NONE
 
-    def execute(self, state):
+    async def execute(self, state):
         return StepResult(step_id=1, step_name="Dummy")
 
 
 class TestAIEngineerStub:
-    def test_returns_proceed(self):
+    async def test_returns_proceed(self):
         ai = AIEngineer()
-        review = ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
+        review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.decision == AIDecisionEnum.PROCEED
 
-    def test_confidence_is_0_85(self):
+    async def test_confidence_is_0_85(self):
         ai = AIEngineer()
-        review = ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
+        review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.confidence == 0.85
 
-    def test_ai_called_false(self):
+    async def test_ai_called_false(self):
         ai = AIEngineer()
-        review = ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
+        review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.ai_called is False

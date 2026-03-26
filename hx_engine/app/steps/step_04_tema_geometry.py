@@ -715,15 +715,19 @@ class Step04TEMAGeometry(BaseStep):
                     resolved = await resolve_fouling_factor(
                         fluid_name, T_mean,
                     )
-                    fouling_metadata[side_label] = {
-                        "rf": resolved["rf"],
-                        "source": resolved["source"],
-                        "confidence": resolved["confidence"],
-                        "needs_ai": False,  # already resolved
-                        "needs_user_confirmation": resolved["needs_user_confirmation"],
-                        "reason": resolved["reasoning"],
-                        "ai_suggestion": resolved.get("ai_suggestion"),
-                    }
+                    if resolved["source"] == "fallback":
+                        # AI was unavailable — keep original table info
+                        fouling_metadata[side_label] = table_info
+                    else:
+                        fouling_metadata[side_label] = {
+                            "rf": resolved["rf"],
+                            "source": resolved["source"],
+                            "confidence": resolved["confidence"],
+                            "needs_ai": False,  # successfully resolved
+                            "needs_user_confirmation": resolved["needs_user_confirmation"],
+                            "reason": resolved["reasoning"],
+                            "ai_suggestion": resolved.get("ai_suggestion"),
+                        }
                     if resolved["needs_user_confirmation"]:
                         all_warnings.append(
                             f"Fouling factor for '{fluid_name}' has low AI confidence "
