@@ -12,9 +12,9 @@ from hx_engine.app.models.step_result import (
 from hx_engine.app.models.sse_events import (
     SSE_EVENT_TYPES,
     DesignCompleteEvent,
-    StepCompletedEvent,
+    StepApprovedEvent,
     StepEscalatedEvent,
-    StepFailedEvent,
+    StepErrorEvent,
     StepStartedEvent,
 )
 
@@ -81,9 +81,9 @@ class TestSSEEvents:
 
     def test_event_types_match_frontend(self):
         expected = {
-            "step_started", "step_progress", "step_completed",
-            "step_failed", "step_escalated", "ai_review",
-            "warning", "design_complete",
+            "step_started", "step_approved", "step_corrected",
+            "step_warning", "step_escalated", "step_error",
+            "iteration_progress", "design_complete",
         }
         assert set(SSE_EVENT_TYPES) == expected
 

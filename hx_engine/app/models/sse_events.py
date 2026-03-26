@@ -27,26 +27,34 @@ class StepStartedEvent(SSEBaseEvent):
     step_name: str
 
 
-class StepProgressEvent(SSEBaseEvent):
-    event_type: str = "step_progress"
-    step_id: int
-    message: str = ""
-    progress_pct: Optional[float] = None
+class IterationProgressEvent(SSEBaseEvent):
+    event_type: str = "iteration_progress"
+    iteration_number: int
+    max_iterations: int = 20
+    current_U: Optional[float] = None
+    delta_U_pct: Optional[float] = None
+    constraints_met: bool = False
 
 
-class StepCompletedEvent(SSEBaseEvent):
-    event_type: str = "step_completed"
+class StepApprovedEvent(SSEBaseEvent):
+    event_type: str = "step_approved"
     step_id: int
     step_name: str
+    confidence: float = 0.0
+    reasoning: str = ""
+    user_summary: str = ""
+    duration_ms: int = 0
     outputs: dict[str, Any] = Field(default_factory=dict)
-    validation_passed: bool = True
 
 
-class StepFailedEvent(SSEBaseEvent):
-    event_type: str = "step_failed"
+class StepErrorEvent(SSEBaseEvent):
+    event_type: str = "step_error"
     step_id: int
     step_name: str
-    errors: list[str] = Field(default_factory=list)
+    message: str = ""
+    observation: Optional[str] = None
+    recommendation: Optional[str] = None
+    options: Optional[list[str]] = None
 
 
 class StepEscalatedEvent(SSEBaseEvent):
@@ -57,18 +65,30 @@ class StepEscalatedEvent(SSEBaseEvent):
     options: list[str] = Field(default_factory=list)
 
 
-class AIReviewEvent(SSEBaseEvent):
-    event_type: str = "ai_review"
+class StepCorrectedEvent(SSEBaseEvent):
+    event_type: str = "step_corrected"
     step_id: int
-    decision: str
-    confidence: float
+    step_name: str = ""
+    confidence: float = 0.0
     reasoning: str = ""
+    user_summary: str = ""
+    correction: dict[str, Any] = Field(default_factory=dict)
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+    duration_ms: int = 0
+    outputs: dict[str, Any] = Field(default_factory=dict)
 
 
-class WarningEvent(SSEBaseEvent):
-    event_type: str = "warning"
+class StepWarningEvent(SSEBaseEvent):
+    event_type: str = "step_warning"
     step_id: int
-    message: str
+    step_name: str = ""
+    confidence: float = 0.0
+    reasoning: str = ""
+    user_summary: str = ""
+    warning_message: str = ""
+    duration_ms: int = 0
+    outputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class DesignCompleteEvent(SSEBaseEvent):
@@ -79,11 +99,11 @@ class DesignCompleteEvent(SSEBaseEvent):
 # All 8 SSE event types for contract testing
 SSE_EVENT_TYPES = [
     "step_started",
-    "step_progress",
-    "step_completed",
-    "step_failed",
+    "step_approved",
+    "step_corrected",
+    "step_warning",
     "step_escalated",
-    "ai_review",
-    "warning",
+    "step_error",
+    "iteration_progress",
     "design_complete",
 ]
