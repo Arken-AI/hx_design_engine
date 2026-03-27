@@ -101,9 +101,10 @@ _RE_PRESSURE = re.compile(
     re.IGNORECASE,
 )
 
-# TEMA preference keywords
+# TEMA preference keywords — descriptive terms OR 3-letter TEMA codes (AES, BEM, AEU…)
 _RE_TEMA = re.compile(
-    r"(floating\s+head|fixed\s+tube\s*sheet|u[- ]?tube|pull[- ]?through)",
+    r"(floating\s+head|fixed\s+tube\s*sheet|u[- ]?tube|pull[- ]?through"
+    r"|AES|BEM|AEU|AEP|AEL|AEW)",
     re.IGNORECASE,
 )
 
@@ -304,9 +305,17 @@ class Step01Requirements(BaseStep):
         outputs["P_cold_Pa"] = p_cold_pa
 
         # --- Optional: TEMA preference ---
+        # Normalise descriptive terms to canonical 3-letter TEMA codes
+        _TEMA_NORMALISE = {
+            "floating head": "AES",
+            "u-tube": "AEU", "u tube": "AEU", "utube": "AEU",
+            "fixed tubesheet": "BEM", "fixed tube sheet": "BEM",
+            "pull-through": "AEP", "pull through": "AEP",
+        }
         tema_match = _RE_TEMA.search(text)
         if tema_match:
-            outputs["tema_preference"] = tema_match.group(1).lower()
+            raw_pref = tema_match.group(1).lower()
+            outputs["tema_preference"] = _TEMA_NORMALISE.get(raw_pref, raw_pref.upper())
 
         # --- Mark missing fields ---
         outputs.setdefault("T_cold_out_C", None)

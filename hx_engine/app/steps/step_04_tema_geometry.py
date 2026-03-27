@@ -306,19 +306,24 @@ def _select_tema_type(
                     f"P={max_pressure/1e5:.0f} bar requires externally sealed "
                     f"floating head → AEW"
                 )
-            elif tube_clean:
+            elif (
+                tube_clean
+                and shell_fouling in ("clean", "moderate")
+                and not any(oil in shell_fluid.lower() for oil in _SHELL_SIDE_CRUDE_OILS)
+            ):
+                # Both sides genuinely clean and no crude/heavy oil — U-tube cheapest
                 tema_type = "AEU"
                 reasoning = (
                     f"ΔT={delta_T_max:.0f}°C requires expansion compensation; "
-                    f"tube-side fluid is {tube_fouling} → U-tube (AEU) is "
-                    f"cheapest floating option"
+                    f"both fluids clean/moderate → U-tube (AEU) cheapest option"
                 )
             else:
+                # Shell fouls, or shell-side is crude/heavy oil (industry standard = AES)
                 tema_type = "AES"
                 reasoning = (
                     f"ΔT={delta_T_max:.0f}°C requires expansion compensation; "
-                    f"tube-side fluid fouls ({tube_fouling}) → floating head "
-                    f"(AES) needed for tube access"
+                    f"shell-side fluid '{shell_fluid}' ({shell_fouling}) → "
+                    f"floating head AES for bundle removal and mechanical cleaning"
                 )
         else:
             # Fixed tubesheet viable
@@ -554,6 +559,7 @@ def _build_escalation_hints(
     tema_type: str,
     shell_side: str,
     tema_reasoning: str,
+    fouling_metadata: dict | None = None,
 ) -> list[dict[str, str]]:
     """Build escalation hints for AI review.
 
@@ -636,28 +642,41 @@ def _build_escalation_hints(
             ),
         })
 
-    # --- Fouling factor uncertainty (AI should refine) ---
+    # --- Fouling factor uncertainty ---
+    # Use already-resolved fouling_metadata (from 3-tier async lookup) when available.
+    # Only flag as uncertain if the resolved value still needs_ai=True or confidence<0.5.
+    resolved_fm = fouling_metadata or {}
     for side_label, fluid_name, T_mean in [
         ("hot", state.hot_fluid_name or "", T_hot_mean),
         ("cold", state.cold_fluid_name or "", T_cold_mean),
     ]:
         if not fluid_name:
             continue
-        info = get_fouling_factor_with_source(fluid_name, T_mean)
-        if info["needs_ai"]:
-            hints.append({
-                "trigger": "fouling_factor_uncertain",
-                "recommendation": (
-                    f"{side_label.title()} fluid '{fluid_name}': {info['reason']} "
-                    f"Current R_f={info['rf']:.6f} m²·K/W (source: {info['source']}). "
-                    f"Please provide the correct fouling resistance for this fluid "
-                    f"given the operating temperature (~{T_mean:.0f}°C) "
-                    if T_mean is not None else
-                    f"{side_label.title()} fluid '{fluid_name}': {info['reason']} "
-                    f"Current R_f={info['rf']:.6f} m²·K/W (source: {info['source']}). "
-                    f"Please provide the correct fouling resistance for this fluid."
-                ),
-            })
+        resolved = resolved_fm.get(side_label)
+        if resolved is not None:
+            # Already resolved via MongoDB/AI — only flag if still uncertain
+            if resolved.get("needs_ai") or resolved.get("confidence", 1.0) < 0.5:
+                hints.append({
+                    "trigger": "fouling_factor_uncertain",
+                    "recommendation": (
+                        f"{side_label.title()} fluid '{fluid_name}': low confidence "
+                        f"R_f={resolved['rf']:.6f} m²·K/W (confidence={resolved.get('confidence', 0):.0%}). "
+                        f"Please confirm or provide the correct fouling resistance."
+                    ),
+                })
+        else:
+            # Fall back to sync table check for unknown fluids
+            info = get_fouling_factor_with_source(fluid_name, T_mean)
+            if info["needs_ai"]:
+                hints.append({
+                    "trigger": "fouling_factor_uncertain",
+                    "recommendation": (
+                        f"{side_label.title()} fluid '{fluid_name}': {info['reason']} "
+                        f"Current R_f={info['rf']:.6f} m²·K/W (source: {info['source']}). "
+                        f"Please provide the correct fouling resistance for this fluid "
+                        + (f"given the operating temperature (~{T_mean:.0f}°C)." if T_mean is not None else ".")
+                    ),
+                })
 
     return hints
 
@@ -725,12 +744,8 @@ class Step04TEMAGeometry(BaseStep):
         )
         all_warnings.extend(geom_warnings)
 
-        # --- Escalation hints (Piece 9) ---
-        escalation_hints = _build_escalation_hints(
-            state, tema_type, shell_side, reasoning,
-        )
-
         # --- Fouling factor metadata for AI review ---
+        # Resolved BEFORE escalation hints so hints can use confirmed values.
         # Use 3-tier resolution: Table → MongoDB → Claude AI.
         # If state already holds a corrected R_f (from a prior AI correction),
         # skip the lookup entirely — this breaks the CORRECT→re-run→same-hint loop.
@@ -790,6 +805,11 @@ class Step04TEMAGeometry(BaseStep):
                     )
             else:
                 fouling_metadata[side_label] = table_info
+
+        # --- Escalation hints (built after fouling_metadata is resolved) ---
+        escalation_hints = _build_escalation_hints(
+            state, tema_type, shell_side, reasoning, fouling_metadata,
+        )
 
         # --- Build StepResult ---
         # Expose resolved R_f values as outputs so the AI can correct them

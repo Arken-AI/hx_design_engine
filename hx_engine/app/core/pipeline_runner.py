@@ -238,6 +238,7 @@ class PipelineRunner:
             "P_hot_Pa": "P_hot_Pa",
             "P_cold_Pa": "P_cold_Pa",
             "tema_type": "tema_type",
+            "tema_preference": "tema_preference",
             "shell_side_fluid": "shell_side_fluid",
             "R_f_hot_m2KW": "R_f_hot_m2KW",
             "R_f_cold_m2KW": "R_f_cold_m2KW",
