@@ -347,8 +347,8 @@ class Step01Requirements(BaseStep):
         for fluid in sorted(_KNOWN_FLUIDS, key=len, reverse=True):
             if fluid in text_lower:
                 found.append(fluid)
-                # Remove from text_lower to avoid double-matching
-                text_lower = text_lower.replace(fluid, "", 1)
+                # Remove ALL occurrences to avoid ambiguous-bare-word false positives
+                text_lower = text_lower.replace(fluid, "")
 
         # Check for ambiguous bare words
         remaining = text_lower
