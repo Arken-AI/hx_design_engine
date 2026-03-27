@@ -1,19 +1,18 @@
 """AI Engineer — Claude Sonnet 4.6 integration for step review.
 
-When ANTHROPIC_API_KEY is set, makes real LLM calls for step review.
-When not set, falls back to auto-approve behavior (stub mode) so the
-pipeline can still run without an LLM for testing and development.
+Uses ANTHROPIC_API_KEY from .env (loaded via HXEngineSettings) to make
+real LLM calls for every step review.  Pass stub_mode=True only in tests.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING
 
 from anthropic import AsyncAnthropic
 
+from hx_engine.app.config import settings
 from hx_engine.app.models.step_result import (
     AICorrection,
     AIDecisionEnum,
@@ -27,7 +26,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MODEL = "claude-sonnet-4-6"
+_MODEL = settings.ai_model
 _MAX_TOKENS = 2048
 _TEMPERATURE = 0.1
 
@@ -79,19 +78,21 @@ Do NOT include any text outside the JSON object.\
 class AIEngineer:
     """AI engineer using Claude Sonnet 4.6 for step review.
 
-    Falls back to auto-approve (stub mode) when:
-    - ANTHROPIC_API_KEY is not set
-    - stub_mode=True is passed to constructor
+    In production, ANTHROPIC_API_KEY must be set in .env.
+    Pass stub_mode=True only in tests to skip real API calls.
     """
 
     def __init__(self, *, stub_mode: bool = False):
         self._stub_mode = stub_mode
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key or api_key == "your_anthropic_api_key_here":
-            self._stub_mode = True
-            self._client = None
+        if not stub_mode:
+            api_key = settings.anthropic_api_key
+            if not api_key:
+                raise ValueError(
+                    "ANTHROPIC_API_KEY is not set — add it to your .env file."
+                )
+            self._client: AsyncAnthropic | None = AsyncAnthropic(api_key=api_key)
         else:
-            self._client = AsyncAnthropic(api_key=api_key)
+            self._client = None
 
     async def review(
         self,
