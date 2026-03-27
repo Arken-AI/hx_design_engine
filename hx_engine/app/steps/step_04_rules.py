@@ -216,3 +216,6 @@ def register_step4_rules() -> None:
     register_rule(4, _rule_pitch_ratio_range)
     register_rule(4, _rule_n_tubes_positive)
     register_rule(4, _rule_bem_delta_t)
+
+
+register_step4_rules()

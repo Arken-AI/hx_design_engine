@@ -46,6 +46,7 @@ class AIReview(BaseModel):
     confidence: float = 0.85
     corrections: list[AICorrection] = Field(default_factory=list)
     reasoning: str = ""
+    observation: str = ""
     ai_called: bool = False
 
 

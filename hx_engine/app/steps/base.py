@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import copy
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, runtime_checkable, Protocol
 
+from hx_engine.app.core import validation_rules
 from hx_engine.app.models.step_result import (
     AIDecisionEnum,
     AIModeEnum,
@@ -65,7 +65,7 @@ class BaseStep(ABC):
             return False
         return self._conditional_ai_trigger(state)
 
-    def _conditional_ai_trigger(self, state: "DesignState") -> bool:
+    def _conditional_ai_trigger(self, state: "DesignState") -> bool:  # noqa: ARG002
         """Override in subclasses to define when CONDITIONAL triggers AI."""
         return False
 
@@ -97,11 +97,13 @@ class BaseStep(ABC):
                 return result
 
             if review.decision == AIDecisionEnum.PROCEED:
+                self._append_review_note(state, review)
                 self._record(state, result, start)
                 return result
 
             if review.decision == AIDecisionEnum.WARN:
                 state.warnings.append(review.reasoning)
+                self._append_review_note(state, review)
                 self._record(state, result, start)
                 return result
 
@@ -111,9 +113,29 @@ class BaseStep(ABC):
 
             if review.decision == AIDecisionEnum.CORRECT:
                 corrections += 1
+                # Snapshot fields that will be modified so we can roll back
+                # if the corrected values fail Layer 2 validation.
+                affected = [c.field for c in review.corrections if hasattr(state, c.field)]
+                snapshot = state.snapshot_fields(affected)
+
+                # Apply corrections to both result.outputs AND state so the
+                # re-executed step reads the corrected values.
                 for c in review.corrections:
                     result.outputs[c.field] = c.new_value
+                    if hasattr(state, c.field):
+                        setattr(state, c.field, c.new_value)
+
+                # Re-run Layer 1 with corrected state
                 result = await self.execute(state)
+                result.ai_review = review
+
+                # Layer 2 check: roll back if hard rules still fail
+                vr = validation_rules.check(self.step_id, result)
+                if not vr.passed:
+                    state.restore(snapshot)
+                    result.validation_passed = False
+                    result.validation_errors = vr.errors
+                continue
 
         # Max corrections exhausted — escalate
         result.ai_review = AIReview(
@@ -128,6 +150,19 @@ class BaseStep(ABC):
     # ------------------------------------------------------------------
     # Audit record
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _append_review_note(state: "DesignState", review: AIReview) -> None:
+        """Append the AI's forward-looking observation to state.review_notes.
+
+        Uses the dedicated ``observation`` field when present, falling back to
+        ``reasoning``. Only appended when non-empty and ≤ 200 chars so downstream
+        prompts stay concise.
+        """
+        note_text = review.observation or review.reasoning
+        if note_text and len(note_text) <= 200:
+            note = f"[Step {review.decision.value}] {note_text}"
+            state.review_notes.append(note)
 
     @staticmethod
     def _record(
@@ -152,7 +187,7 @@ class BaseStep(ABC):
             validation_errors=list(result.validation_errors),
             outputs_snapshot=dict(result.outputs),
         )
-        state.step_records.append(rec.model_dump())
+        state.step_records.append(rec)
 
     # ------------------------------------------------------------------
     # Abstract execute

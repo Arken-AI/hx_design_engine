@@ -92,3 +92,6 @@ def register_step1_rules() -> None:
     register_rule(1, _rule_flow_rates_positive)
     register_rule(1, _rule_hot_inlet_gt_outlet)
     register_rule(1, _rule_cold_out_lt_hot_in)
+
+
+register_step1_rules()

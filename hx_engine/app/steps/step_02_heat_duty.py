@@ -166,9 +166,232 @@ class Step02HeatDuty(BaseStep):
         return result
 
     # ------------------------------------------------------------------
-    # Placeholder — later pieces will fill these in
+    # Piece 4: Conditional AI trigger
+    # ------------------------------------------------------------------
+
+    def _conditional_ai_trigger(self, state: "DesignState") -> bool:
+        """Trigger AI review when energy balance imbalance > 2%."""
+        imbalance = getattr(self, "_imbalance_pct", None)
+        return imbalance is not None and imbalance > 2.0
+
+    # ------------------------------------------------------------------
+    # Piece 7: Full execute
     # ------------------------------------------------------------------
 
     async def execute(self, state: "DesignState") -> StepResult:
-        """Full execute — wired in Piece 7."""
-        raise NotImplementedError("Step02 execute() not yet assembled (Piece 7)")
+        """Compute heat duty and resolve any missing 4th temperature.
+
+        Flow:
+          1. Pre-condition check — need fluid names, T_hot_in, ≥1 flow rate,
+             ≥1 cold-side temperature.
+          2. Estimate mean temperatures for initial Cp lookup.
+          3. Retrieve Cp via thermo adapter for both fluids.
+          4. Resolve the missing temperature (if any) via energy balance.
+          5. Refine Cp with corrected mean temperatures.
+          6. Compute Q from both sides; verify energy balance closure.
+          7. Collect corner-case warnings.
+          8. Return StepResult (does NOT mutate state directly).
+        """
+        from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
+        from hx_engine.app.core.exceptions import CalculationError
+
+        warnings: list[str] = []
+
+        # --- Pre-condition check ---
+        missing_fields: list[str] = []
+        if not state.hot_fluid_name:
+            missing_fields.append("hot_fluid_name")
+        if not state.cold_fluid_name:
+            missing_fields.append("cold_fluid_name")
+        if state.T_hot_in_C is None:
+            missing_fields.append("T_hot_in_C")
+        if state.m_dot_hot_kg_s is None and state.m_dot_cold_kg_s is None:
+            missing_fields.append("m_dot_hot_kg_s or m_dot_cold_kg_s")
+        if state.T_cold_in_C is None and state.T_cold_out_C is None:
+            missing_fields.append("T_cold_in_C or T_cold_out_C")
+        if missing_fields:
+            raise CalculationError(
+                2,
+                f"Step 2 requires the following from Step 1: "
+                f"{', '.join(missing_fields)}",
+            )
+
+        # --- Estimate mean temperatures for initial Cp lookup ---
+        T_hot_estimate: float = (
+            (state.T_hot_in_C + state.T_hot_out_C) / 2.0
+            if state.T_hot_out_C is not None
+            else state.T_hot_in_C  # type: ignore[assignment]
+        )
+        cold_known = [t for t in (state.T_cold_in_C, state.T_cold_out_C) if t is not None]
+        T_cold_estimate: float = sum(cold_known) / len(cold_known)
+
+        # --- Get Cp from thermo adapter ---
+        try:
+            _hot = get_fluid_properties(
+                state.hot_fluid_name, T_hot_estimate, state.P_hot_Pa
+            )
+            cp_hot = _hot.cp_J_kgK
+        except Exception as exc:
+            raise CalculationError(
+                2,
+                f"Could not get Cp for '{state.hot_fluid_name}' "
+                f"at {T_hot_estimate:.1f}°C: {exc}",
+            ) from exc
+
+        try:
+            _cold = get_fluid_properties(
+                state.cold_fluid_name, T_cold_estimate, state.P_cold_Pa
+            )
+            cp_cold = _cold.cp_J_kgK
+        except Exception as exc:
+            raise CalculationError(
+                2,
+                f"Could not get Cp for '{state.cold_fluid_name}' "
+                f"at {T_cold_estimate:.1f}°C: {exc}",
+            ) from exc
+
+        # Attempt to resolve the missing temperature via energy balance.
+        # This may not always be possible — e.g. if T_cold_out is missing AND
+        # m_dot_cold is unknown, the system is underdetermined for that unknown.
+        # In that case we skip the back-calculation and compute Q from whichever
+        # side is fully determined.
+        m_hot_sentinel = state.m_dot_hot_kg_s if state.m_dot_hot_kg_s is not None else 1.0
+
+        try:
+            temp_result = self._calculate_missing_temp(
+                T_hot_in_C=state.T_hot_in_C,
+                T_hot_out_C=state.T_hot_out_C,
+                T_cold_in_C=state.T_cold_in_C,
+                T_cold_out_C=state.T_cold_out_C,
+                m_dot_hot_kg_s=m_hot_sentinel,
+                m_dot_cold_kg_s=state.m_dot_cold_kg_s,
+                cp_hot_J_kgK=cp_hot,
+                cp_cold_J_kgK=cp_cold,
+            )
+        except CalculationError:
+            # Underdetermined — build a minimal temp_result from what we know
+            temp_result = {
+                "calculated_field": None,
+                "T_hot_in_C": state.T_hot_in_C,
+                "T_hot_out_C": state.T_hot_out_C,
+                "T_cold_in_C": state.T_cold_in_C,
+                "T_cold_out_C": state.T_cold_out_C,
+                "Q_known_side_W": None,
+                "m_dot_cold_kg_s": state.m_dot_cold_kg_s,
+            }
+
+        T_hot_in: float = temp_result["T_hot_in_C"]
+        T_hot_out: float = temp_result["T_hot_out_C"]
+        T_cold_in: float = temp_result["T_cold_in_C"]
+        T_cold_out: float = temp_result["T_cold_out_C"]
+
+        # --- Refine Cp with better mean temperatures after solving ---
+        if (
+            temp_result["calculated_field"] is not None
+            and T_hot_out is not None
+            and T_cold_in is not None
+            and T_cold_out is not None
+        ):
+            T_hot_mean_new = (T_hot_in + T_hot_out) / 2.0
+            T_cold_mean_new = (T_cold_in + T_cold_out) / 2.0
+            try:
+                cp_hot = get_fluid_properties(
+                    state.hot_fluid_name, T_hot_mean_new, state.P_hot_Pa
+                ).cp_J_kgK
+                cp_cold = get_fluid_properties(
+                    state.cold_fluid_name, T_cold_mean_new, state.P_cold_Pa
+                ).cp_J_kgK
+            except Exception:
+                pass  # Keep original Cp estimates — non-fatal
+
+        # --- Compute Q from each side ---
+        m_dot_hot = state.m_dot_hot_kg_s
+        m_dot_cold = temp_result.get("m_dot_cold_kg_s") or state.m_dot_cold_kg_s
+
+        Q_hot: float | None = None
+        if m_dot_hot is not None and T_hot_in is not None and T_hot_out is not None:
+            Q_hot = self._compute_Q(m_dot_hot, cp_hot, T_hot_in, T_hot_out)
+
+        Q_cold: float | None = None
+        if m_dot_cold is not None and T_cold_in is not None and T_cold_out is not None:
+            Q_cold = self._compute_Q(m_dot_cold, cp_cold, T_cold_out, T_cold_in)
+
+        # Determine final Q and imbalance
+        imbalance_pct: float | None = None
+        if Q_hot is not None and Q_cold is not None:
+            Q = (Q_hot + Q_cold) / 2.0
+            denom = max(abs(Q_hot), abs(Q_cold))
+            imbalance_pct = abs(Q_hot - Q_cold) / denom * 100 if denom > 0 else 0.0
+        elif Q_hot is not None:
+            Q = Q_hot
+        elif Q_cold is not None:
+            Q = Q_cold
+        else:
+            raise CalculationError(
+                2,
+                "Cannot compute Q — insufficient flow rate and temperature data.",
+            )
+
+        # --- Validate Q ---
+        if Q <= 0:
+            raise CalculationError(
+                2,
+                f"Q={Q:.1f} W is not positive — "
+                "verify that the hot stream cools and the cold stream gains heat.",
+            )
+        if Q > 500e6:
+            warnings.append(
+                f"Q={Q / 1e6:.1f} MW is very large — verify flow rates and temperatures."
+            )
+
+        # Store for conditional AI trigger
+        self._imbalance_pct = imbalance_pct
+
+        # Energy balance warning (> 5% implies a data inconsistency)
+        if imbalance_pct is not None and imbalance_pct > 5.0:
+            warnings.append(
+                f"Energy balance imbalance {imbalance_pct:.1f}% — "
+                "hot and cold Q values differ significantly. "
+                "Check flow rates, temperatures, and Cp assumptions."
+            )
+
+        # Corner case: very small hot-side ΔT → small LMTD ahead
+        if T_hot_in is not None and T_hot_out is not None:
+            dT_hot = T_hot_in - T_hot_out
+            if 0 < dT_hot < 5.0:
+                warnings.append(
+                    f"Hot-side ΔT={dT_hot:.1f}°C is very small — "
+                    "LMTD will be small; large exchanger area expected."
+                )
+
+        # Corner case: tight approach temperature
+        if T_cold_out is not None and T_hot_out is not None:
+            approach = T_hot_out - T_cold_out
+            if 0 < approach < 5.0:
+                warnings.append(
+                    f"Approach temperature={approach:.1f}°C is very small — "
+                    "may not be thermodynamically achievable; review temperatures."
+                )
+
+        outputs: dict = {
+            "Q_W": Q,
+            "T_hot_in_C": T_hot_in,
+            "T_hot_out_C": T_hot_out,
+            "T_cold_in_C": T_cold_in,
+            "T_cold_out_C": T_cold_out,
+        }
+        if temp_result["calculated_field"] is not None:
+            outputs["calculated_field"] = temp_result["calculated_field"]
+        if imbalance_pct is not None:
+            outputs["energy_balance_imbalance_pct"] = round(imbalance_pct, 2)
+        # Expose solved m_dot_cold if it was back-calculated
+        if m_dot_cold is not None and state.m_dot_cold_kg_s is None:
+            outputs["m_dot_cold_kg_s"] = m_dot_cold
+
+        return StepResult(
+            step_id=self.step_id,
+            step_name=self.step_name,
+            outputs=outputs,
+            validation_passed=True,
+            warnings=warnings,
+        )

@@ -331,7 +331,14 @@ def get_fluid_properties(
                     return _get_props_coolprop("Water", temperature_C, pressure_Pa)
                 except CalculationError:
                     pass
-            # Fall through to thermo / other backends
+            # Neither iapws nor CoolProp available — try thermo with canonical
+            # "water" name (the user alias like "cooling water" is unknown to thermo)
+            if _Chemical is not None:
+                try:
+                    return _get_props_thermo("water", temperature_C, pressure_Pa)
+                except CalculationError:
+                    pass
+            # Fall through to other backends
 
     # 2. CoolProp — mapped pure fluids
     cp_name = _COOLPROP_MAP.get(normalised)

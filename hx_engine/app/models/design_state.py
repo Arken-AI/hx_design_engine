@@ -12,6 +12,10 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Imported at runtime (not just TYPE_CHECKING) because DesignState stores
+# StepRecord instances in step_records.
+from hx_engine.app.models.step_result import StepRecord  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # FluidProperties
@@ -261,10 +265,18 @@ class DesignState(BaseModel):
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
-    step_records: list[dict[str, Any]] = Field(default_factory=list)
+    step_records: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     waiting_for_user: bool = False
     in_convergence_loop: bool = False
+
+    # --- AI cross-step observations (populated by base.py after each review) ---
+    # Each entry is a short note from the AI engineer, forwarded to downstream
+    # steps so the reviewer can reason across multiple steps.
+    review_notes: list[str] = Field(default_factory=list)
+
+    # --- confidence breakdown (populated by Step 16) ---
+    confidence_breakdown: Optional[dict[str, float]] = None
 
     # --- TEMA type & allocation (populated by Step 4) ---
     tema_type: Optional[str] = None
@@ -273,3 +285,25 @@ class DesignState(BaseModel):
     # --- optional preferences ---
     tema_class: Optional[str] = None
     tema_preference: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # State snapshot / restore helpers (used by correction loop in base.py)
+    # ------------------------------------------------------------------
+
+    def snapshot_fields(self, field_names: list[str]) -> dict[str, Any]:
+        """Return {field: current_value} for the listed fields.
+
+        Called before apply_correction() so the state can be rolled back
+        if the corrected values fail Layer 2 validation.
+        """
+        return {f: getattr(self, f, None) for f in field_names}
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Write snapshot values back to DesignState fields.
+
+        Called when a correction causes a Layer 2 hard fail, so state is
+        never left partially mutated.
+        """
+        for field_name, value in snapshot.items():
+            if hasattr(self, field_name):
+                setattr(self, field_name, value)

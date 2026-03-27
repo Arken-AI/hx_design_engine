@@ -115,3 +115,6 @@ def register_step3_rules() -> None:
     register_rule(3, _rule_k_bounds)
     register_rule(3, _rule_cp_bounds)
     register_rule(3, _rule_pr_consistency)
+
+
+register_step3_rules()
