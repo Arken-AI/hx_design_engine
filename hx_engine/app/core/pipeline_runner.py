@@ -239,6 +239,8 @@ class PipelineRunner:
             "P_cold_Pa": "P_cold_Pa",
             "tema_type": "tema_type",
             "shell_side_fluid": "shell_side_fluid",
+            "R_f_hot_m2KW": "R_f_hot_m2KW",
+            "R_f_cold_m2KW": "R_f_cold_m2KW",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:

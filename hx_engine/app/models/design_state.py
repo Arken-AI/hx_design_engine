@@ -278,6 +278,12 @@ class DesignState(BaseModel):
     # --- confidence breakdown (populated by Step 16) ---
     confidence_breakdown: Optional[dict[str, float]] = None
 
+    # --- fouling resistances (populated by Step 4; AI can correct these) ---
+    # When set, Step 4 skips the lookup and uses these values directly,
+    # breaking the correction loop caused by unresolvable fouling uncertainty.
+    R_f_hot_m2KW: Optional[float] = None   # m²·K/W, hot-side fouling resistance
+    R_f_cold_m2KW: Optional[float] = None  # m²·K/W, cold-side fouling resistance
+
     # --- TEMA type & allocation (populated by Step 4) ---
     tema_type: Optional[str] = None
     shell_side_fluid: Optional[str] = None

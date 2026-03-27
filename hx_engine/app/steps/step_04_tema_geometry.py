@@ -731,48 +731,70 @@ class Step04TEMAGeometry(BaseStep):
         )
 
         # --- Fouling factor metadata for AI review ---
-        # Use 3-tier resolution: Table → MongoDB → Claude AI
+        # Use 3-tier resolution: Table → MongoDB → Claude AI.
+        # If state already holds a corrected R_f (from a prior AI correction),
+        # skip the lookup entirely — this breaks the CORRECT→re-run→same-hint loop.
         fouling_metadata = {}
+        _rf_overrides = {
+            "hot": state.R_f_hot_m2KW,
+            "cold": state.R_f_cold_m2KW,
+        }
         for side_label, fluid_name, T_field_in, T_field_out in [
             ("hot", state.hot_fluid_name, state.T_hot_in_C, state.T_hot_out_C),
             ("cold", state.cold_fluid_name, state.T_cold_in_C, state.T_cold_out_C),
         ]:
-            if fluid_name:
-                T_mean = (
-                    (T_field_in + T_field_out) / 2.0
-                    if T_field_in is not None and T_field_out is not None
-                    else None
+            if not fluid_name:
+                continue
+
+            # If AI (or user) already corrected this value, use it directly
+            if _rf_overrides[side_label] is not None:
+                fouling_metadata[side_label] = {
+                    "rf": _rf_overrides[side_label],
+                    "source": "state_override",
+                    "confidence": 1.0,
+                    "needs_ai": False,
+                    "needs_user_confirmation": False,
+                }
+                continue
+
+            T_mean = (
+                (T_field_in + T_field_out) / 2.0
+                if T_field_in is not None and T_field_out is not None
+                else None
+            )
+            # Quick table check first (sync, no I/O)
+            table_info = get_fouling_factor_with_source(fluid_name, T_mean)
+            if table_info["needs_ai"]:
+                # 3-tier async resolution
+                resolved = await resolve_fouling_factor(
+                    fluid_name, T_mean,
                 )
-                # Quick table check first (sync, no I/O)
-                table_info = get_fouling_factor_with_source(fluid_name, T_mean)
-                if table_info["needs_ai"]:
-                    # 3-tier async resolution
-                    resolved = await resolve_fouling_factor(
-                        fluid_name, T_mean,
-                    )
-                    if resolved["source"] == "fallback":
-                        # AI was unavailable — keep original table info
-                        fouling_metadata[side_label] = table_info
-                    else:
-                        fouling_metadata[side_label] = {
-                            "rf": resolved["rf"],
-                            "source": resolved["source"],
-                            "confidence": resolved["confidence"],
-                            "needs_ai": False,  # successfully resolved
-                            "needs_user_confirmation": resolved["needs_user_confirmation"],
-                            "reason": resolved["reasoning"],
-                            "ai_suggestion": resolved.get("ai_suggestion"),
-                        }
-                    if resolved["needs_user_confirmation"]:
-                        all_warnings.append(
-                            f"Fouling factor for '{fluid_name}' has low AI confidence "
-                            f"({resolved['confidence']:.0%}). R_f={resolved['rf']:.6f} m²·K/W. "
-                            f"Please confirm or provide your own value."
-                        )
-                else:
+                if resolved["source"] == "fallback":
+                    # AI was unavailable — keep original table info
                     fouling_metadata[side_label] = table_info
+                else:
+                    fouling_metadata[side_label] = {
+                        "rf": resolved["rf"],
+                        "source": resolved["source"],
+                        "confidence": resolved["confidence"],
+                        "needs_ai": False,  # successfully resolved
+                        "needs_user_confirmation": resolved["needs_user_confirmation"],
+                        "reason": resolved["reasoning"],
+                        "ai_suggestion": resolved.get("ai_suggestion"),
+                    }
+                if resolved["needs_user_confirmation"]:
+                    all_warnings.append(
+                        f"Fouling factor for '{fluid_name}' has low AI confidence "
+                        f"({resolved['confidence']:.0%}). R_f={resolved['rf']:.6f} m²·K/W. "
+                        f"Please confirm or provide your own value."
+                    )
+            else:
+                fouling_metadata[side_label] = table_info
 
         # --- Build StepResult ---
+        # Expose resolved R_f values as outputs so the AI can correct them
+        # (corrections land on DesignState via pipeline_runner._apply_outputs,
+        # and are read back on the next execute() call, breaking the loop).
         outputs = {
             "tema_type": tema_type,
             "geometry": geometry,
@@ -780,6 +802,8 @@ class Step04TEMAGeometry(BaseStep):
             "tema_reasoning": reasoning,
             "escalation_hints": escalation_hints,
             "fouling_metadata": fouling_metadata,
+            "R_f_hot_m2KW": fouling_metadata.get("hot", {}).get("rf"),
+            "R_f_cold_m2KW": fouling_metadata.get("cold", {}).get("rf"),
         }
 
         return StepResult(
