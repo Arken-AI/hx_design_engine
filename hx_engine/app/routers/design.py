@@ -144,7 +144,7 @@ async def get_design_status(
         session_id=state.session_id,
         current_step=state.current_step,
         waiting_for_user=state.waiting_for_user,
-        step_records=state.step_records,
+        step_records=[r.model_dump() for r in state.step_records],
         warnings=state.warnings,
     )
 
