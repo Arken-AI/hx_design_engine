@@ -10,12 +10,13 @@ User overrides are stored with accepted_by="user" and always preferred.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+
+from hx_engine.app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,12 @@ async def get_db() -> AsyncIOMotorDatabase | None:
     if _db is not None:
         return _db
 
-    url = os.environ.get("HX_MONGODB_URI") or os.environ.get("MONGODB_URI")
+    url = settings.mongodb_uri
     if not url:
         logger.info("MONGODB_URL not set — fouling cache disabled")
         return None
 
-    db_name = os.environ.get("HX_MONGODB_DB_NAME") or os.environ.get("MONGODB_DB_NAME", "arken_process_db")
+    db_name = settings.mongodb_db_name
     try:
         _client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=3000)
         # Ping to verify connectivity

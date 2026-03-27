@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 
 from anthropic import AsyncAnthropic
+
+from hx_engine.app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ async def get_fouling_from_ai(
 
     On API failure, returns a fallback with error message and confidence=0.
     """
-    api_key = os.environ.get("HX_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    api_key = settings.anthropic_api_key
     if not api_key or api_key == "your_anthropic_api_key_here":
         logger.warning("ANTHROPIC_API_KEY not configured — cannot call AI")
         return {
