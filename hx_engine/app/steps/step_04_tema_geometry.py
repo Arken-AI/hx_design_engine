@@ -455,9 +455,22 @@ def _select_initial_geometry(
         or cold_fouling in ("heavy", "severe")
     )
 
-    if any_heavy_fouling:
+    # Shell-side crude/heavy oil needs square pitch for mechanical cleaning access
+    shell_fluid_name = (
+        state.hot_fluid_name if shell_side == "hot" else state.cold_fluid_name
+    ) or ""
+    shell_needs_cleaning = any(
+        oil in shell_fluid_name.lower() for oil in _SHELL_SIDE_CRUDE_OILS
+    )
+
+    if any_heavy_fouling or shell_needs_cleaning:
         pitch_layout = "square"
         pitch_ratio = 1.25
+        if shell_needs_cleaning and not any_heavy_fouling:
+            warnings.append(
+                f"Shell-side fluid '{shell_fluid_name}' requires mechanical cleaning — "
+                f"using square pitch (90°) for lane access."
+            )
     else:
         pitch_layout = "triangular"
         pitch_ratio = 1.25
@@ -528,9 +541,13 @@ def _select_initial_geometry(
         )
 
     # --- Baffle spacing ---
-    # Start at 0.4 × shell diameter (within TEMA range)
-    baffle_spacing_m = 0.4 * shell_diameter_m
-    # Clamp to TEMA validator range
+    # Viscous shell-side fluids (crude oil, heavy oils) need wider spacing
+    # to keep shell-side ΔP in range. Start at 0.5× shell ID instead of 0.4×.
+    shell_mu = mu_hot if shell_side == "hot" else mu_cold
+    if shell_mu > 0.001 or shell_needs_cleaning:
+        baffle_spacing_m = 0.5 * shell_diameter_m
+    else:
+        baffle_spacing_m = 0.4 * shell_diameter_m
     baffle_spacing_m = max(0.05, min(2.0, baffle_spacing_m))
 
     geometry = GeometrySpec(
