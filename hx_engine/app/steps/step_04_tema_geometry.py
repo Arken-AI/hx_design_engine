@@ -49,6 +49,10 @@ _VERY_HIGH_PRESSURE_PA = 70e5  # 70 bar
 # Temperature difference threshold for thermal expansion
 _DT_EXPANSION_THRESHOLD = 50.0  # °C
 
+# Fluids that should go shell-side with floating-head (AES/AEU) geometry
+# for mechanical cleaning access — standard refinery practice
+_SHELL_SIDE_CRUDE_OILS = {"crude oil", "crude", "heavy hydrocarbon", "heavy hydrocarbons", "fuel oil"}
+
 # Duty thresholds for warnings
 _SMALL_DUTY_W = 50_000       # 50 kW
 _LARGE_DUTY_W = 50_000_000   # 50 MW
@@ -121,6 +125,37 @@ def _allocate_fluids(state: "DesignState") -> tuple[str, list[str]]:
         else:
             tube_side = "cold"
             reason = f"high-pressure cold fluid ({P_cold/1e5:.0f} bar) → tube-side"
+
+    # --- Rule 2.5: Crude/heavy oil with floating-head geometry → shell-side ---
+    # AES/floating-head is specifically designed for shell-side mechanical cleaning
+    # of fouling hydrocarbons — standard refinery practice (TEMA Sec. 7)
+    elif any(
+        oil in (state.hot_fluid_name or "").lower()
+        for oil in _SHELL_SIDE_CRUDE_OILS
+    ) and (
+        not (state.tema_preference) or
+        "aes" in (state.tema_preference or "").lower() or
+        "float" in (state.tema_preference or "").lower()
+    ):
+        tube_side = "cold"
+        reason = (
+            f"crude/heavy oil hot fluid → shell-side "
+            f"(AES floating-head enables mechanical cleaning)"
+        )
+
+    elif any(
+        oil in (state.cold_fluid_name or "").lower()
+        for oil in _SHELL_SIDE_CRUDE_OILS
+    ) and (
+        not (state.tema_preference) or
+        "aes" in (state.tema_preference or "").lower() or
+        "float" in (state.tema_preference or "").lower()
+    ):
+        tube_side = "hot"
+        reason = (
+            f"crude/heavy oil cold fluid → shell-side "
+            f"(AES floating-head enables mechanical cleaning)"
+        )
 
     # --- Rule 3: Fouling (overridden by pressure if both apply) ---
     elif hot_fouls or cold_fouls:

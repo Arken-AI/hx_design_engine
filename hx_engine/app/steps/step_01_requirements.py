@@ -280,16 +280,28 @@ class Step01Requirements(BaseStep):
             self._assign_flows(text, flows, outputs)
 
         # --- Optional: pressure ---
-        pressure_match = _RE_PRESSURE.search(text)
-        if pressure_match:
-            p_val = float(pressure_match.group(1))
-            p_unit = pressure_match.group(2)
+        # Start from any values already set on the state (e.g. passed from MCP/API)
+        p_hot_pa: float = state.P_hot_Pa or 101325.0
+        p_cold_pa: float = state.P_cold_Pa or 101325.0
+        pressure_matches = list(_RE_PRESSURE.finditer(text))
+        for m in pressure_matches:
+            p_val = float(m.group(1))
+            p_unit = m.group(2)
             p_pa = detect_and_convert_pressure(p_val, p_unit)
-            outputs["P_hot_Pa"] = p_pa
-            outputs["P_cold_Pa"] = p_pa
-        else:
-            outputs["P_hot_Pa"] = 101325.0
-            outputs["P_cold_Pa"] = 101325.0
+            # Inspect up to 100 chars before match for side context
+            ctx = text[max(0, m.start() - 100):m.end()].lower()
+            if "cold" in ctx or "tube" in ctx or "cool" in ctx:
+                p_cold_pa = p_pa
+            elif "hot" in ctx or "shell" in ctx or "heat" in ctx:
+                p_hot_pa = p_pa
+            else:
+                # No side context — apply to both only if state had no pre-set values
+                if state.P_hot_Pa is None:
+                    p_hot_pa = p_pa
+                if state.P_cold_Pa is None:
+                    p_cold_pa = p_pa
+        outputs["P_hot_Pa"] = p_hot_pa
+        outputs["P_cold_Pa"] = p_cold_pa
 
         # --- Optional: TEMA preference ---
         tema_match = _RE_TEMA.search(text)
