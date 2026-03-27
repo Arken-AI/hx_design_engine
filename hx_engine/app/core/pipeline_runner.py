@@ -17,6 +17,15 @@ from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.models.design_state import DesignState
+from hx_engine.app.models.sse_events import (
+    DesignCompleteEvent,
+    StepApprovedEvent,
+    StepCorrectedEvent,
+    StepErrorEvent,
+    StepEscalatedEvent,
+    StepStartedEvent,
+    StepWarningEvent,
+)
 from hx_engine.app.models.step_result import AIDecisionEnum, StepResult
 from hx_engine.app.steps.step_01_requirements import Step01Requirements
 from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
@@ -73,12 +82,14 @@ class PipelineRunner:
                 await self.session_store.heartbeat(session_id)
 
                 # --- emit step_started ---
-                await self.sse_manager.emit(session_id, {
-                    "event_type": "step_started",
-                    "session_id": session_id,
-                    "step_id": step.step_id,
-                    "step_name": step.step_name,
-                })
+                await self.sse_manager.emit(
+                    session_id,
+                    StepStartedEvent(
+                        session_id=session_id,
+                        step_id=step.step_id,
+                        step_name=step.step_name,
+                    ).model_dump(),
+                )
 
                 # --- execute step with AI review loop ---
                 start_ms = time.monotonic()
@@ -136,24 +147,28 @@ class PipelineRunner:
                 await self.session_store.save(session_id, state)
 
             # --- pipeline complete ---
-            await self.sse_manager.emit(session_id, {
-                "event_type": "design_complete",
-                "session_id": session_id,
-                "summary": self._build_summary(state),
-            })
+            await self.sse_manager.emit(
+                session_id,
+                DesignCompleteEvent(
+                    session_id=session_id,
+                    summary=self._build_summary(state),
+                ).model_dump(),
+            )
 
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
         except Exception:
             logger.exception("Pipeline failed for session %s", session_id)
-            await self.sse_manager.emit(session_id, {
-                "event_type": "step_error",
-                "session_id": session_id,
-                "step_id": state.current_step,
-                "step_name": "pipeline",
-                "message": "Internal pipeline error",
-                "recommendation": "Please try again.",
-            })
+            await self.sse_manager.emit(
+                session_id,
+                StepErrorEvent(
+                    session_id=session_id,
+                    step_id=state.current_step,
+                    step_name="pipeline",
+                    message="Internal pipeline error",
+                    recommendation="Please try again.",
+                ).model_dump(),
+            )
         finally:
             await self.session_store.save(session_id, state)
 
@@ -225,53 +240,59 @@ class PipelineRunner:
         review = result.ai_review
         decision = review.decision if review else AIDecisionEnum.PROCEED
 
-        base = {
-            "session_id": session_id,
-            "step_id": step.step_id,
-            "step_name": step.step_name,
-            "duration_ms": duration_ms,
-            "outputs": result.outputs,
-        }
-
         if decision == AIDecisionEnum.PROCEED:
-            await self.sse_manager.emit(session_id, {
-                **base,
-                "event_type": "step_approved",
-                "confidence": review.confidence if review else 0.85,
-                "reasoning": review.reasoning if review else "",
-                "user_summary": f"Step {step.step_id} ({step.step_name}) completed.",
-            })
+            event = StepApprovedEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                confidence=review.confidence if review else 0.85,
+                reasoning=review.reasoning if review else "",
+                user_summary=f"Step {step.step_id} ({step.step_name}) completed.",
+                duration_ms=duration_ms,
+                outputs=result.outputs,
+            )
 
         elif decision == AIDecisionEnum.CORRECT:
-            await self.sse_manager.emit(session_id, {
-                **base,
-                "event_type": "step_corrected",
-                "confidence": review.confidence if review else 0.0,
-                "reasoning": review.reasoning if review else "",
-                "user_summary": f"Step {step.step_id} corrected by AI engineer.",
-                "correction": {
+            event = StepCorrectedEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                confidence=review.confidence if review else 0.0,
+                reasoning=review.reasoning if review else "",
+                user_summary=f"Step {step.step_id} corrected by AI engineer.",
+                correction={
                     c.field: {"old": c.old_value, "new": c.new_value}
                     for c in (review.corrections if review else [])
                 },
-            })
+                duration_ms=duration_ms,
+                outputs=result.outputs,
+            )
 
         elif decision == AIDecisionEnum.WARN:
-            await self.sse_manager.emit(session_id, {
-                **base,
-                "event_type": "step_warning",
-                "confidence": review.confidence if review else 0.0,
-                "reasoning": review.reasoning if review else "",
-                "user_summary": f"Step {step.step_id} approved with warning.",
-                "warning_message": review.reasoning if review else "",
-            })
+            event = StepWarningEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                confidence=review.confidence if review else 0.0,
+                reasoning=review.reasoning if review else "",
+                user_summary=f"Step {step.step_id} approved with warning.",
+                warning_message=review.reasoning if review else "",
+                duration_ms=duration_ms,
+                outputs=result.outputs,
+            )
 
         elif decision == AIDecisionEnum.ESCALATE:
-            await self.sse_manager.emit(session_id, {
-                **base,
-                "event_type": "step_escalated",
-                "message": review.reasoning if review else "AI requests user input.",
-                "options": [],
-            })
+            event = StepEscalatedEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                message=review.reasoning if review else "AI requests user input.",
+            )
+
+        else:
+            return
+
+        await self.sse_manager.emit(session_id, event.model_dump())
 
     async def _emit_step_error(
         self,
@@ -281,14 +302,16 @@ class PipelineRunner:
         *,
         recommendation: str = "",
     ) -> None:
-        await self.sse_manager.emit(session_id, {
-            "event_type": "step_error",
-            "session_id": session_id,
-            "step_id": step.step_id,
-            "step_name": step.step_name,
-            "message": message,
-            "recommendation": recommendation,
-        })
+        await self.sse_manager.emit(
+            session_id,
+            StepErrorEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+                message=message,
+                recommendation=recommendation,
+            ).model_dump(),
+        )
 
     async def _wait_for_user(
         self,
@@ -313,13 +336,15 @@ class PipelineRunner:
                 session_id,
                 step.step_id,
             )
-            await self.sse_manager.emit(session_id, {
-                "event_type": "step_error",
-                "session_id": session_id,
-                "step_id": step.step_id,
-                "step_name": step.step_name,
-                "message": "User response timeout — aborting pipeline.",
-            })
+            await self.sse_manager.emit(
+                session_id,
+                StepErrorEvent(
+                    session_id=session_id,
+                    step_id=step.step_id,
+                    step_name=step.step_name,
+                    message="User response timeout — aborting pipeline.",
+                ).model_dump(),
+            )
         return state
 
     @staticmethod
