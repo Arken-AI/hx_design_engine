@@ -40,12 +40,12 @@ async def get_db() -> AsyncIOMotorDatabase | None:
     if _db is not None:
         return _db
 
-    url = os.environ.get("MONGODB_URI")
+    url = os.environ.get("HX_MONGODB_URI") or os.environ.get("MONGODB_URI")
     if not url:
         logger.info("MONGODB_URL not set — fouling cache disabled")
         return None
 
-    db_name = os.environ.get("MONGODB_DB_NAME", "arken_process_db")
+    db_name = os.environ.get("HX_MONGODB_DB_NAME") or os.environ.get("MONGODB_DB_NAME", "arken_process_db")
     try:
         _client = AsyncIOMotorClient(url, serverSelectionTimeoutMS=3000)
         # Ping to verify connectivity
