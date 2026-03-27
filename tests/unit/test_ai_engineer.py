@@ -17,16 +17,16 @@ class _DummyStep(BaseStep):
 
 class TestAIEngineerStub:
     async def test_returns_proceed(self):
-        ai = AIEngineer()
+        ai = AIEngineer(stub_mode=True)
         review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.decision == AIDecisionEnum.PROCEED
 
     async def test_confidence_is_0_85(self):
-        ai = AIEngineer()
+        ai = AIEngineer(stub_mode=True)
         review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.confidence == 0.85
 
     async def test_ai_called_false(self):
-        ai = AIEngineer()
+        ai = AIEngineer(stub_mode=True)
         review = await ai.review(_DummyStep(), DesignState(), StepResult(step_id=1, step_name="T"))
         assert review.ai_called is False

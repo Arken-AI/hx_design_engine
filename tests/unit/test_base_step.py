@@ -93,7 +93,7 @@ class TestRunWithReviewLoop:
     async def test_proceed(self):
         step = FullAIStep()
         state = DesignState()
-        ai = AIEngineer()  # stub: always PROCEED
+        ai = AIEngineer(stub_mode=True)  # stub: always PROCEED
         result = await step.run_with_review_loop(state, ai)
         assert result.ai_review.decision == AIDecisionEnum.PROCEED
         assert len(state.step_records) == 1
@@ -174,6 +174,6 @@ class TestRunWithReviewLoop:
     async def test_no_ai_when_mode_none(self):
         step = DummyStep()
         state = DesignState()
-        ai = AIEngineer()
+        ai = AIEngineer(stub_mode=True)
         result = await step.run_with_review_loop(state, ai)
         assert result.ai_review is None  # AI not called
