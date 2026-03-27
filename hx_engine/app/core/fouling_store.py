@@ -113,6 +113,8 @@ async def find_cached_fouling(
     if doc.get("accepted_by") != "user":
         created = doc.get("created_at")
         if created and isinstance(created, datetime):
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
             age = datetime.now(timezone.utc) - created
             if age > timedelta(days=_CACHE_TTL_DAYS):
                 logger.info(
