@@ -122,6 +122,9 @@ class PipelineRunner:
 
                 duration_ms = int((time.monotonic() - start_ms) * 1000)
 
+                # --- log step result ---
+                self._log_step_result(step, result, duration_ms)
+
                 # --- apply outputs to state ---
                 self._apply_outputs(state, result)
                 state.current_step = step.step_id
@@ -177,6 +180,44 @@ class PipelineRunner:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _log_step_result(step: Any, result: StepResult, duration_ms: int) -> None:
+        """Log a readable summary of each step's outputs and AI decision."""
+        review = result.ai_review
+        sep = "=" * 64
+
+        lines = [
+            sep,
+            f"STEP {step.step_id} COMPLETE — {step.step_name}  ({duration_ms} ms)",
+        ]
+
+        # AI call indicator
+        if review is None:
+            lines.append("AI called    : NO  (threshold not met / convergence loop)")
+        else:
+            lines.append(f"AI called    : YES")
+            lines.append(f"  decision   : {review.decision.value}")
+            lines.append(f"  confidence : {review.confidence:.2f}")
+            if review.reasoning:
+                lines.append(f"  reasoning  : {review.reasoning[:160]}")
+
+        # Outputs
+        lines.append(f"Outputs ({len(result.outputs)}):")
+        for key, val in result.outputs.items():
+            display = repr(val)
+            if len(display) > 80:
+                display = display[:77] + "..."
+            lines.append(f"  {key:<36} = {display}")
+
+        # Validation errors (if any)
+        if result.validation_errors:
+            lines.append("Validation errors:")
+            for err in result.validation_errors:
+                lines.append(f"  ✗ {err}")
+
+        lines.append(sep)
+        logger.info("\n" + "\n".join(lines))
 
     def _apply_outputs(self, state: DesignState, result: StepResult) -> None:
         """Apply step outputs to DesignState fields."""
