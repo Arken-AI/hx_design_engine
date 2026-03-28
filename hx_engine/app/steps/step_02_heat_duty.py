@@ -364,9 +364,9 @@ class Step02HeatDuty(BaseStep):
                     "LMTD will be small; large exchanger area expected."
                 )
 
-        # Corner case: tight approach temperature
-        if T_cold_out is not None and T_hot_out is not None:
-            approach = T_hot_out - T_cold_out
+        # Corner case: tight approach temperature (minimum terminal approach for countercurrent)
+        if T_cold_out is not None and T_hot_out is not None and T_hot_in is not None and T_cold_in is not None:
+            approach = min(T_hot_in - T_cold_out, T_hot_out - T_cold_in)
             if 0 < approach < 5.0:
                 warnings.append(
                     f"Approach temperature={approach:.1f}°C is very small — "
