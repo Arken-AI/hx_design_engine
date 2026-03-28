@@ -253,12 +253,13 @@ class TestStep05AITrigger:
 
     @pytest.mark.asyncio
     async def test_ai_trigger_temp_cross_risk(self, step):
-        """F = 0.95, R = 2.0, approach = 2°C → AI triggered."""
+        """F = 0.95, R = 2.0, minimum terminal approach = 2°C → AI triggered."""
         step._F_factor = 0.95
         step._R = 2.0
         step._auto_corrected = False
-        # approach = T_hot_out - T_cold_out = 92 - 90 = 2°C
-        state = _make_state(T_hot_out=92, T_cold_out=90)
+        # min(T_hot_in - T_cold_out, T_hot_out - T_cold_in)
+        # = min(150 - 55, 32 - 30) = min(95, 2) = 2°C → triggers
+        state = _make_state(T_hot_out=32, T_cold_in=30)
         assert step._conditional_ai_trigger(state) is True
 
 

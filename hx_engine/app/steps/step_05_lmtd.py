@@ -218,9 +218,14 @@ class Step05LMTD(BaseStep):
                 ),
             })
         if (
-            state.T_cold_out_C is not None
+            state.T_hot_in_C is not None
             and state.T_hot_out_C is not None
-            and (state.T_hot_out_C - state.T_cold_out_C) < 3.0
+            and state.T_cold_in_C is not None
+            and state.T_cold_out_C is not None
+            and min(
+                state.T_hot_in_C - state.T_cold_out_C,
+                state.T_hot_out_C - state.T_cold_in_C,
+            ) < 3.0
         ):
             escalation_hints.append({
                 "trigger": "temperature_cross_risk",
@@ -273,12 +278,17 @@ class Step05LMTD(BaseStep):
         if R is not None and R > 4.0:
             return True
 
-        # Trigger 3: Temperature cross risk (approach < 3°C)
+        # Trigger 3: Temperature cross risk (minimum terminal approach < 3°C)
         if (
-            state.T_cold_out_C is not None
+            state.T_hot_in_C is not None
             and state.T_hot_out_C is not None
+            and state.T_cold_in_C is not None
+            and state.T_cold_out_C is not None
         ):
-            approach = state.T_hot_out_C - state.T_cold_out_C
+            approach = min(
+                state.T_hot_in_C - state.T_cold_out_C,
+                state.T_hot_out_C - state.T_cold_in_C,
+            )
             if approach < 3.0:
                 return True
 
