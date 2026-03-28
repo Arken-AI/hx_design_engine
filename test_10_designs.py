@@ -1,6 +1,9 @@
 """
-Run 10 diverse HX design test cases against the running engine.
+Run 10 single-phase liquid–liquid HX design test cases against the running engine.
 Polls each to completion and writes a markdown report.
+
+All designs are single-phase (no gas, no vapour, no phase-change) — matching
+the engine's current scope: TEMA shell-and-tube liquid heat exchangers.
 
 Usage:
     cd /Users/akashnikam/workspace/hx_design_engine
@@ -19,7 +22,7 @@ import httpx
 
 ENGINE = "http://localhost:8100"
 POLL_INTERVAL = 2       # seconds between status polls
-MAX_WAIT = 120          # seconds before giving up
+MAX_WAIT = 180          # seconds before giving up (5 steps × AI calls)
 TIMEOUT = 30
 
 # ---------------------------------------------------------------------------
@@ -27,112 +30,126 @@ TIMEOUT = 30
 # ---------------------------------------------------------------------------
 
 DESIGNS = [
+    # ── All 10 cases are SINGLE-PHASE LIQUID–LIQUID heat exchangers ──
+    # Only the hot-side flow rate is specified; cold-side flow is left
+    # for Step 2 to calculate from the energy balance (avoids overdetermined
+    # Q_hot ≠ Q_cold mismatch that triggers ESCALATE).
     {
         "id": 1,
-        "label": "Crude Oil / Water (baseline)",
+        "label": "Crude Oil / Cooling Water (baseline)",
         "payload": {
             "raw_request": (
                 "Cool crude oil from 180°C to 80°C using cooling water "
-                "(25°C to 50°C). Hot side flow 15 kg/s, pressure 8 bar shell, 4 bar tube."
+                "25°C to 50°C. Crude oil flow rate 15 kg/s. "
+                "Hot side pressure 8 bar, cold side pressure 4 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 2,
-        "label": "Steam Condenser (steam → water)",
+        "label": "Lube Oil / Cooling Water",
         "payload": {
             "raw_request": (
-                "Condense saturated steam at 120°C (outlet 119°C, 5% subcooling) "
-                "using cooling water 20°C to 45°C. Steam flow 3 kg/s, 2 bar steam side, 3 bar water side."
+                "Cool lubricating oil from 90°C to 55°C using cooling water "
+                "20°C to 40°C. Oil flow rate 6 kg/s. "
+                "Hot side pressure 6 bar, cold side pressure 4 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 3,
-        "label": "Gas Cooler (air → cooling water)",
+        "label": "Diesel / Cooling Water",
         "payload": {
             "raw_request": (
-                "Cool compressed air from 200°C to 60°C with cooling water 30°C to 55°C. "
-                "Air flow 8 kg/s at 10 bar. Water pressure 4 bar."
+                "Cool diesel from 120°C to 60°C with cooling water "
+                "25°C to 48°C. Diesel flow rate 7 kg/s. "
+                "Hot side pressure 5 bar, cold side pressure 3.5 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 4,
-        "label": "Lube Oil / Water",
+        "label": "Kerosene / Cooling Water",
         "payload": {
             "raw_request": (
-                "Cool lube oil from 90°C to 55°C using cooling water 20°C to 40°C. "
-                "Oil flow 6 kg/s at 6 bar, water flow 12 kg/s at 4 bar."
+                "Cool kerosene from 160°C to 70°C using cooling water "
+                "25°C to 45°C. Kerosene flow rate 10 kg/s. "
+                "Hot side pressure 5 bar, cold side pressure 3 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 5,
-        "label": "Ammonia / Brine Refrigerant",
+        "label": "Ethylene Glycol / Hot Water (heating)",
         "payload": {
             "raw_request": (
-                "Cool ammonia vapour from 60°C to 30°C using brine (-5°C to 10°C). "
-                "Ammonia flow 2 kg/s at 15 bar, brine flow 10 kg/s at 5 bar."
+                "Heat ethylene glycol from 10°C to 50°C using hot water "
+                "80°C to 55°C. Hot water flow rate 5 kg/s. "
+                "Hot side pressure 4 bar, cold side pressure 3 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 6,
-        "label": "High-Temp Heat Recovery (flue gas → steam)",
+        "label": "Naphtha / Cooling Water",
         "payload": {
             "raw_request": (
-                "Recover heat from flue gas (400°C to 200°C) to generate steam "
-                "(feed water 100°C to 180°C). Gas flow 20 kg/s at 1.05 bar, water 5 kg/s at 15 bar."
+                "Cool naphtha from 140°C to 50°C using cooling water "
+                "25°C to 45°C. Naphtha flow rate 8 kg/s. "
+                "Hot side pressure 4 bar, cold side pressure 3 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 7,
-        "label": "Glycol / Water (cold climate)",
+        "label": "Heavy Fuel Oil / Seawater (high fouling)",
         "payload": {
             "raw_request": (
-                "Heat ethylene glycol from -10°C to 40°C using hot water 80°C to 55°C. "
-                "Glycol flow 4 kg/s at 3 bar, water flow 5 kg/s at 4 bar."
+                "Cool heavy fuel oil from 130°C to 70°C using seawater "
+                "20°C to 40°C. Heavy fuel oil flow rate 10 kg/s. "
+                "Hot side pressure 8 bar, cold side pressure 4 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 8,
-        "label": "Diesel Fuel / Water",
+        "label": "Ethanol / Cooling Water",
         "payload": {
             "raw_request": (
-                "Cool diesel fuel from 120°C to 60°C with cooling water 25°C to 48°C. "
-                "Diesel flow 7 kg/s at 5 bar, water flow 14 kg/s at 3.5 bar."
+                "Cool ethanol from 70°C to 35°C using cooling water "
+                "20°C to 35°C. Ethanol flow rate 5 kg/s. "
+                "Hot side pressure 3 bar, cold side pressure 3 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 9,
-        "label": "Hydrogen / Nitrogen (gas-gas)",
+        "label": "Thermal Oil / Cooling Water (high temp)",
         "payload": {
             "raw_request": (
-                "Cool hydrogen gas from 250°C to 80°C using nitrogen 30°C to 100°C. "
-                "Hydrogen 1 kg/s at 50 bar, nitrogen 3 kg/s at 45 bar."
+                "Cool thermal oil from 250°C to 150°C using cooling water "
+                "30°C to 60°C. Thermal oil flow rate 12 kg/s. "
+                "Hot side pressure 6 bar, cold side pressure 5 bar."
             ),
             "user_id": "test-runner",
         },
     },
     {
         "id": 10,
-        "label": "Heavy Fuel Oil / Water (high fouling)",
+        "label": "Gasoline / Cooling Water",
         "payload": {
             "raw_request": (
-                "Cool heavy fuel oil from 150°C to 80°C using seawater 20°C to 40°C. "
-                "HFO flow 10 kg/s at 8 bar, seawater flow 20 kg/s at 4 bar."
+                "Cool gasoline from 80°C to 40°C using cooling water "
+                "from 20°C to 35°C. Gasoline flow rate 6 kg/s. "
+                "Hot side pressure 3 bar, cold side pressure 3 bar."
             ),
             "user_id": "test-runner",
         },

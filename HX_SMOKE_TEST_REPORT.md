@@ -1,197 +1,1124 @@
-# HX Engine — 10-Design Smoke Test Report
+# HX Engine — 10-Design Smoke-Test Report (Detailed)
 
-**Date:** 2026-03-27
-**Engine:** http://localhost:8100
-**Test runner:** `test_10_designs.py`
-
----
-
-## Summary
-
-| Result | Count |
-|--------|-------|
-| ✅ Passed | 1 |
-| ❌ Failed | 9 |
-| **Total** | **10** |
+**Date:** 2026-03-28  
+**Engine:** http://localhost:8100  
+**Scope:** Single-phase liquid–liquid shell-and-tube heat exchangers (Steps 1–5)
 
 ---
 
-## Results Table
+## Summary Overview
 
-| # | Design | Steps Done | Step Decisions | ESCALATE at | Root Cause |
-|---|--------|-----------|----------------|-------------|------------|
-| ✅ 1 | Crude Oil / Water (baseline) | 1→2→3→4→5 | 1:PROCEED, 4:WARN | — | — |
-| ❌ 2 | Steam Condenser | 1 only | 1:WARN | — | `FluidProperties` density validator rejects steam gas (0.57 kg/m³ < min 50) |
-| ❌ 3 | Gas Cooler (air / water) | 1 only | 1:PROCEED | — | `FluidProperties` density validator rejects air at 10 bar (8.6 kg/m³ < min 50) |
-| ❌ 4 | Lube Oil / Water | 1, 2 | 1:WARN, 2:ESCALATE | Step 2 | Step 1 AI renames "lube oil" → "cooling water"; Step 2 sees >12% energy imbalance → AI ESCALATE |
-| ❌ 5 | Ammonia / Brine | 1 only | 1:PROCEED | — | `FluidProperties` density validator rejects ammonia gas (11.2 kg/m³ < min 50) |
-| ❌ 6 | Flue Gas / Steam (heat recovery) | 1 only | 1:WARN | — | `FluidProperties` density validator rejects flue gas density; pipeline stops silently |
-| ❌ 7 | Glycol / Water cold climate | 1, 2 | 1:WARN, 2:ESCALATE | Step 2 | Water inlet at −10°C is frozen; large energy imbalance → AI correctly ESCALATEs |
-| ❌ 8 | Diesel Fuel / Water | 1, 2 | 1:PROCEED, 2:ESCALATE | Step 2 | "diesel fuel" not in petroleum alias table — fluid lookup fails or AI reviews inconsistent data |
-| ❌ 9 | Hydrogen / Nitrogen (gas-gas) | 1 only | 1:PROCEED | — | `FluidProperties` density AND cp validators reject hydrogen (ρ=2.7 kg/m³, cp=14 548 J/kg·K) |
-| ❌ 10 | Heavy Fuel Oil / Seawater | 1 | 1:ESCALATE | Step 1 | Step 1 AI immediately ESCALATEs — HFO + seawater triggers over-cautious behaviour |
+| # | Hot Fluid | Cold Fluid | Q (kW) | TEMA | LMTD (°C) | F | Eff. LMTD (°C) | ṁ_cold (kg/s) | N_tubes | Result |
+|---|-----------|-----------|--------|------|-----------|-------|-----------------|----------------|---------|--------|
+| 01 | Crude Oil | Cooling Water | 3 535 | AES | 87.19 | 0.9402 | 81.97 | 33.80 | 372 | ✅ PASS |
+| 02 | Lube Oil | Cooling Water | 436 | AEU | 42.06 | 0.9296 | 39.10 | 6.95 | 138 | ✅ PASS |
+| 03 | Diesel | Cooling Water | 927 | AEU | 51.29 | 0.9025 | 46.29 | 14.78 | 138 | ✅ PASS |
+| 04 | Kerosene | Cooling Water | 2 136 | AEU | 74.61 | 0.9408 | 70.19 | 17.06 | 224 | ✅ PASS |
+| 05 | Ethylene Glycol | Hot Water | 327 | AEU | 37.00 | 0.8619 | 31.89 | 4.53 | 138 | ✅ PASS |
+| 06 | Naphtha | Cooling Water | 1 728 | AEU | 52.43 | 0.8652 | 45.37 | 13.78 | 224 | ✅ PASS |
+| 07 | Heavy Fuel Oil | Seawater | 1 221 | AES | 68.05 | 0.9544 | 64.95 | 12.18 | 138 | ✅ PASS |
+| 08 | Ethanol | Cooling Water | 468 | BEM | 23.60 | 0.8066 | 19.04 | 7.47 | 224 | ✅ PASS |
+| 09 | Thermal Oil | Cooling Water | 2 592 | AEU | 152.33 | 0.9778 | 148.95 | 20.68 | 224 | ✅ PASS |
+| 10 | Gasoline | Cooling Water | 536 | AEU | 30.83 | 0.8793 | 27.11 | 8.54 | 138 | ✅ PASS |
 
----
-
-## Root Cause Analysis
-
-### Bug 1 — `FluidProperties` density validator too strict (HIGH PRIORITY)
-
-**File:** `hx_engine/app/models/design_state.py` ~line 39
-**Validator:** `_check_density` enforces range `[50, 2000]` kg/m³
-
-The range was written for liquids only. Every gas and vapour falls well below the 50 kg/m³ floor:
-
-| Fluid | T (°C) | P (Pa) | Actual density (kg/m³) | Validator |
-|-------|--------|--------|------------------------|-----------|
-| Steam | 120 | 101 325 | 0.57 | ❌ FAIL |
-| Air | 130 | 1 000 000 | 8.6 | ❌ FAIL |
-| Ammonia (gas) | 45 | 1 500 000 | 11.2 | ❌ FAIL |
-| Flue gas | 300 | 105 000 | ~0.6 | ❌ FAIL |
-| Hydrogen | 165 | 5 000 000 | 2.7 | ❌ FAIL |
-| Nitrogen | 65 | 4 500 000 | 44.6 | ❌ FAIL (just under 50) |
-
-**What happens in the pipeline:**
-
-`FluidProperties(density_kg_m3=8.6, ...)` raises a pydantic `ValidationError`. This error propagates **outside** the `try/except CalculationError` block in the thermo adapter because `FluidProperties(...)` is constructed after the try block, not inside it. The result:
-
-1. The iapws/CoolProp fallback chain does NOT catch it — only catches `CalculationError`.
-2. Step 2 `execute` broad `except Exception` catches it → wraps into `CalculationError`.
-3. Pipeline runner catches `CalculationError` → emits `step_error` → returns early.
-4. State stays at `current_step=1`. Test polls indefinitely, times out at 120 s.
-
-**Fix:** Change the density lower bound to `0.1` kg/m³:
-```python
-# models/design_state.py  line ~39
-if v is not None and (v < 0.1 or v > 2000):
-    raise ValueError(f"density_kg_m3={v} outside physical range [0.1, 2000]")
-```
+**Overall: 10 / 10 PASSED** ✅
 
 ---
 
-### Bug 2 — `FluidProperties` cp validator too strict (HIGH PRIORITY)
+## ✅ Design 01 — Crude Oil / Cooling Water (baseline)
 
-**File:** `hx_engine/app/models/design_state.py` ~line 57
-**Validator:** `_check_cp` enforces range `[500, 10000]` J/kg·K
+> **Input:** *"Cool crude oil from 180°C to 80°C using cooling water 25°C to 50°C. Crude oil flow rate 15 kg/s. Hot side pressure 8 bar, cold side pressure 4 bar."*
 
-Hydrogen (molar mass 2 g/mol) has Cp = 14 548 J/kg·K — above the 10 000 ceiling.
-This blocks the hydrogen/nitrogen gas-gas design (Design 9) at Step 2.
+| Property | Value |
+|----------|-------|
+| Session ID | `ae3acf75-0eaf-43bc-8ad5-605ebfdd3fa3` |
+| Result | **PASS** |
+| Total duration | ~24s |
 
-**Fix:**
-```python
-# models/design_state.py  line ~57
-if v is not None and (v < 100 or v > 50000):
-    raise ValueError(f"cp_J_kgK={v} outside physical range [100, 50000]")
-```
+### Step 1 — Process Requirements
 
----
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.95 | 6.54s |
 
-### Bug 3 — Missing fluid name aliases in the thermo adapter (HIGH PRIORITY)
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Crude Oil | Cooling Water |
+| T_in (°C) | 180.0 | 25.0 |
+| T_out (°C) | 80.0 | 50.0 |
+| ṁ (kg/s) | 15.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 8.0 | 4.0 |
 
-**File:** `hx_engine/app/adapters/thermo_adapter.py`
+### Step 2 — Heat Duty
 
-Several common engineering fluid names are not recognised by any backend:
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.03s |
 
-| Input name (Step 1 NL output) | Expected resolution | Actual result |
-|-------------------------------|--------------------|--------------||
-| `"diesel fuel"` | → petroleum `"diesel"` | ❌ Unknown fluid |
-| `"lube oil"` | → petroleum `"lubricating oil"` | ❌ Unknown fluid |
-| `"light oil"` | → petroleum `"gas oil"` | ❌ Unknown fluid |
-| `"flue gas"` | → air approximation | ❌ Fails density check after thermo lookup |
-| `"exhaust gas"` | → air approximation | ❌ Fails density check |
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **3,535,366 W (3,535.4 kW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 33.85 kg/s |
+| Energy balance error | 0.0% |
 
-Working names: `"diesel"`, `"lubricating oil"`, `"fuel oil"`, `"gas oil"`.
+### Step 3 — Fluid Properties
 
-**Fix:** Add a normalisation alias map applied before property lookup:
-```python
-_FLUID_ALIAS_MAP: dict[str, str] = {
-    "diesel fuel":    "diesel",
-    "lube oil":       "lubricating oil",
-    "light oil":      "gas oil",
-    "flue gas":       "air",        # approximation — log warning
-    "exhaust gas":    "air",
-}
-# In get_fluid_properties():
-normalised = _FLUID_ALIAS_MAP.get(normalised, normalised)
-```
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
 
----
+| Property | Hot (Crude Oil @ 130°C) | Cold (Water @ 37.5°C) |
+|----------|------------------------|----------------------|
+| ρ (kg/m³) | 784.8 | 993.3 |
+| μ (Pa·s) | 0.001241 | 0.000685 |
+| Cp (J/kg·K) | 2,356.9 | 4,177.9 |
+| k (W/m·K) | 0.1290 | 0.6253 |
+| Pr | 22.68 | 4.57 |
 
-### Bug 4 — pydantic `ValidationError` not caught in thermo adapter fallback chain (MEDIUM)
+### Step 4 — TEMA Type & Geometry
 
-**File:** `hx_engine/app/adapters/thermo_adapter.py`
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.91 | 15.91s |
 
-The iapws fallback only catches `CalculationError`:
-```python
-try:
-    return _get_props_iapws(temperature_C, pressure_Pa)
-except CalculationError:        # ← misses pydantic ValidationError!
-    ...
-```
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AES** (floating head) |
+| Rationale | ΔT=155°C requires expansion compensation; crude oil (heavy) → shell side → AES for bundle removal & mechanical cleaning |
+| Shell-side fluid | **Crude Oil** (hot) |
+| Tube-side fluid | **Cooling Water** (cold) |
 
-If iapws returns valid floats but `FluidProperties(...)` construction fails validation, the `ValidationError` escapes the entire fallback chain. This means CoolProp and thermo fallbacks are never tried.
+**Geometry:**
 
-**Fix:** Broaden the catch to `Exception` in the water/steam fallback block:
-```python
-except Exception:   # catches both CalculationError and ValidationError
-    ...
-```
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 736.6 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 4.877 m |
+| No. of tubes | 466 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Square |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 368.3 mm |
+| Baffle cut | 0.25 |
 
----
+**Fouling Factors:**
 
-### Bug 5 — Step 1 AI renames fluid incorrectly (MEDIUM)
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Crude Oil) | 0.000352 | mongodb_cache (AI-derived, TEMA 120–175°C band) | 0.82 |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
 
-**Affects:** Design 4 (Lube Oil / Water)
+### Step 5 — LMTD & F-Factor
 
-Step 1 AI changed `hot_fluid_name = "lube oil"` to `"cooling water"`. Step 2 then runs with both fluids as water-family, producing a ~12.7% energy imbalance (different Cp at different T). Step 2 AI ESCALATEs.
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.0003s |
 
-**Root cause:** The Step 1 prompt allows AI corrections to fluid names without constraining the correction to the same fluid family.
-
-**Fix:** Add a Step 1 Layer 2 rule that rejects any AI correction that changes an oil/solvent fluid name to a water alias.
-
----
-
-### Bug 6 — Step 1 ESCALATE for HFO / Seawater (MEDIUM)
-
-**Affects:** Design 10
-
-Step 1 AI immediately ESCALATEs (no outputs generated) for a valid offshore/marine design. HFO + seawater is a well-known combination in marine heat exchangers.
-
-**Fix:** Add explicit examples of heavy hydrocarbon + seawater to the Step 1 prompt (`engineer_review_step01.txt`). Ensure the AI only ESCALATEs when it cannot extract any process data, not when the fluid combination seems unusual.
-
----
-
-### Bug 7 — Sub-zero pure water not caught at Step 1 (LOW — AI handles it correctly)
-
-**Affects:** Design 7 (Glycol / −10°C "water")
-
-Pure water at −10°C is frozen. The Step 2 AI correctly identifies this and ESCALATEs. This is intended behaviour. The test case was deliberately adversarial.
-
-**Recommendation:** Add a Step 1 Layer 2 hard rule: `T_cold_in_C < 0` with `cold_fluid_name in {"water", "cooling water", "chilled water"}` → validation error "Pure water below 0°C — specify fluid as brine or glycol-water mix."
-
----
-
-## Fix Priority List
-
-| Priority | Bug | File | Line | Designs Unblocked |
-|----------|-----|------|------|-------------------|
-| 🔴 HIGH | Density lower bound: `50` → `0.1` kg/m³ | `models/design_state.py` | ~39 | #2, #3, #5, #6 (steam, air, ammonia, flue gas) |
-| 🔴 HIGH | cp upper bound: `10000` → `50000` J/kg·K | `models/design_state.py` | ~57 | #9 (hydrogen) |
-| 🔴 HIGH | Add fluid aliases: diesel fuel, lube oil, flue gas | `adapters/thermo_adapter.py` | top | #8 (diesel), partially #4, #6 |
-| 🟡 MEDIUM | Catch `Exception` in iapws fallback (not just `CalculationError`) | `adapters/thermo_adapter.py` | ~327 | Defensive — prevents silent pipeline stops |
-| 🟡 MEDIUM | Prevent oil→water fluid name rename in Step 1 AI corrections | `steps/step_01_requirements.py` | — | #4 (lube oil) |
-| 🟡 MEDIUM | Step 1 prompt: allow HFO + seawater without ESCALATE | `prompts/engineer_review_step01.txt` | — | #10 (HFO/seawater) |
-| 🟢 LOW | Step 1 rule: sub-zero pure water → hard validation error | `steps/step_01_rules.py` | — | Better UX for #7 |
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **87.19 °C** |
+| **F-factor** | **0.9402** |
+| **Effective LMTD** (F × LMTD) | **81.97 °C** |
+| R (capacity ratio) | 4.00 |
+| P (effectiveness) | 0.1613 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
 
 ---
 
-## Pass / Fail by Fluid Category
+## ✅ Design 02 — Lube Oil / Cooling Water
 
-| Fluid category | Examples | Tested | Status |
-|---------------|----------|--------|--------|
-| Petroleum liquid vs cooling water | Crude oil, fuel oil, HFO | ✅ 1, partial 10 | ✅ Pass |
-| Any **gas or vapour** on either side | Steam, air, ammonia, H₂, N₂, flue gas | ❌ 2, 3, 5, 6, 9 | ❌ ALL FAIL — Bug 1+2 |
-| Compound petroleum names | "diesel fuel", "lube oil", "light oil" | ❌ 4, 8 | ❌ FAIL — Bug 3 |
-| Specialty liquids (glycol, ethylene glycol) | Glycol | ✅ (adapter OK) | ⚠ AI may escalate for edge-case inputs |
-| Physically impossible inputs | −10°C pure water | ❌ 7 | ❌ AI ESCALATE — **correct behaviour** |
-| Unusual industrial combos | HFO + seawater | ❌ 10 | ❌ Over-cautious AI — Bug 6 |
+> **Input:** *"Cool lubricating oil from 90°C to 55°C using cooling water 20°C to 40°C. Oil flow rate 6 kg/s. Hot side pressure 6 bar, cold side pressure 4 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `7314409b-01f6-438a-88f1-a8cec7ac167f` |
+| Result | **PASS** |
+| Total duration | ~22s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.95 | 6.22s |
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Lubricating Oil | Cooling Water |
+| T_in (°C) | 90.0 | 20.0 |
+| T_out (°C) | 55.0 | 40.0 |
+| ṁ (kg/s) | 6.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 6.0 | 4.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.02s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **436,258 W (436.3 kW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 5.22 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.002s |
+
+| Property | Hot (Lube Oil @ 72.5°C) | Cold (Water @ 30°C) |
+|----------|------------------------|---------------------|
+| ρ (kg/m³) | 848.2 | 995.8 |
+| μ (Pa·s) | 0.005092 | 0.000797 |
+| Cp (J/kg·K) | 2,077.4 | 4,179.2 |
+| k (W/m·K) | 0.1293 | 0.6146 |
+| Pr | 81.83 | 5.42 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 14.03s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** (U-tube) |
+| Rationale | ΔT=70°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+| Shell-side fluid | **Cooling Water** (cold) |
+| Tube-side fluid | **Lubricating Oil** (hot) |
+
+**⚠️ AI Warning:** AEU + fouling fluid on tube-side is a maintenance concern — U-tube bends are inaccessible for mechanical cleaning; chemical cleaning only.
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 438.2 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 3.660 m |
+| No. of tubes | 178 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 175.3 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Lube Oil) | 0.000176 | mongodb_cache (TEMA standard, <120°C) | 0.82 |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **42.06 °C** |
+| **F-factor** | **0.9296** |
+| **Effective LMTD** (F × LMTD) | **39.10 °C** |
+| R (capacity ratio) | 1.75 |
+| P (effectiveness) | 0.2857 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+---
+
+## ✅ Design 03 — Diesel / Cooling Water
+
+> **Input:** *"Cool diesel from 120°C to 60°C with cooling water 25°C to 48°C. Diesel flow rate 7 kg/s. Hot side pressure 5 bar, cold side pressure 3.5 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `eb77b9eb-e1a7-4648-8459-de6ff887abe6` |
+| Result | **PASS** |
+| Total duration | ~22s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.95 | 8.79s |
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Diesel | Cooling Water |
+| T_in (°C) | 120.0 | 25.0 |
+| T_out (°C) | 60.0 | 48.0 |
+| ṁ (kg/s) | 7.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 5.0 | 3.5 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.01s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **926,716 W (926.7 kW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 9.64 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Property | Hot (Diesel @ 90°C) | Cold (Water @ 36.5°C) |
+|----------|---------------------|----------------------|
+| ρ (kg/m³) | 801.0 | 993.6 |
+| μ (Pa·s) | 0.001890 | 0.000698 |
+| Cp (J/kg·K) | 2,206.5 | 4,178.1 |
+| k (W/m·K) | 0.1336 | 0.6239 |
+| Pr | 31.22 | 4.67 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 13.25s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** (U-tube) |
+| Rationale | ΔT=95°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+| Shell-side fluid | **Cooling Water** (cold) |
+| Tube-side fluid | **Diesel** (hot) |
+
+**⚠️ AI Warning:** AEU U-tube bundles cannot be mechanically cleaned on tube side (U-bends inaccessible). Diesel at R_f=0.000352 is a moderate fouler — if quality degrades, tube-side cleaning access becomes important.
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 387.3 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 4.877 m |
+| No. of tubes | 138 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 154.9 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Diesel) | 0.000352 | exact (TEMA standard table) | — |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.0003s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **51.29 °C** |
+| **F-factor** | **0.9025** |
+| **Effective LMTD** (F × LMTD) | **46.30 °C** |
+| R (capacity ratio) | 2.61 |
+| P (effectiveness) | 0.2421 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+---
+
+## ✅ Design 04 — Kerosene / Cooling Water
+
+> **Input:** *"Cool kerosene from 160°C to 70°C using cooling water 25°C to 45°C. Kerosene flow rate 10 kg/s. Hot side pressure 5 bar, cold side pressure 3 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `fa656c7f-8e2a-45d1-ab75-35fdcced870c` |
+| Result | **PASS** |
+| Total duration | ~28s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.95 | 7.04s |
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Kerosene | Cooling Water |
+| T_in (°C) | 160.0 | 25.0 |
+| T_out (°C) | 70.0 | 45.0 |
+| ṁ (kg/s) | 10.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 5.0 | 3.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.01s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **2,135,876 W (2,135.9 kW / 2.136 MW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 25.56 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Property | Hot (Kerosene @ 115°C) | Cold (Water @ 35°C) |
+|----------|----------------------|---------------------|
+| ρ (kg/m³) | 748.3 | 994.1 |
+| μ (Pa·s) | 0.000775 | 0.000719 |
+| Cp (J/kg·K) | 2,373.2 | 4,178.4 |
+| k (W/m·K) | 0.1380 | 0.6218 |
+| Pr | 13.32 | 4.83 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 11.17s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** (U-tube) |
+| Rationale | ΔT=135°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+| Shell-side fluid | **Cooling Water** (cold) |
+| Tube-side fluid | **Kerosene** (hot) |
+
+**⚠️ AI Warning:** U-tube/kerosene-tube-side — U-bend region requires careful baffle placement; n_passes=2 appropriate for U-tube geometry.
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 489.0 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 4.877 m |
+| No. of tubes | 224 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 195.6 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Kerosene) | 0.000176 | exact (TEMA standard table) | — |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.91 | 10.19s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **74.61 °C** |
+| **F-factor** | **0.9408** |
+| **Effective LMTD** (F × LMTD) | **70.19 °C** |
+| R (capacity ratio) | 4.50 |
+| P (effectiveness) | 0.1481 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+**⚠️ Escalation hint:** `high_R_sensitivity` — F-factor is sensitive to small P changes at R=4.5. Verify temperature spec accuracy.
+
+---
+
+## ✅ Design 05 — Ethylene Glycol / Hot Water (heating)
+
+> **Input:** *"Heat ethylene glycol from 10°C to 50°C using hot water 80°C to 55°C. Hot water flow rate 5 kg/s. Hot side pressure 4 bar, cold side pressure 3 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `bfc83666-4b35-4ac5-8863-8c94446a30c5` |
+| Result | **PASS** |
+| Total duration | ~26s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 9.80s |
+
+**⚠️ Note:** AI flagged "hot water" as a potentially misleading cold-fluid name (it enters at 10°C). Engine treated ethylene glycol as hot side correctly.
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Ethylene Glycol | Hot Water |
+| T_in (°C) | 80.0 | 10.0 |
+| T_out (°C) | 55.0 | 50.0 |
+| ṁ (kg/s) | 5.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 4.0 | 3.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 1.32s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **326,956 W (327.0 kW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 1.96 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.008s |
+
+| Property | Hot (Ethylene Glycol @ 67.5°C) | Cold (Water @ 30°C) |
+|----------|-------------------------------|---------------------|
+| ρ (kg/m³) | 1,079.7 | 995.7 |
+| μ (Pa·s) | 0.004285 | 0.000797 |
+| Cp (J/kg·K) | 2,615.6 | 4,179.5 |
+| k (W/m·K) | 0.2490 | 0.6145 |
+| Pr | 45.02 | 5.42 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 14.76s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** (U-tube) |
+| Rationale | ΔT=70°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+| Shell-side fluid | **Hot Water** (cold) |
+| Tube-side fluid | **Ethylene Glycol** (hot) |
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 387.3 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 3.660 m |
+| No. of tubes | 138 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 154.9 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Ethylene Glycol) | 0.000352 | exact (TEMA standard table) | — |
+| Cold (Hot Water) | 0.000352 | partial_match (TEMA table) | — |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.0003s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **37.00 °C** |
+| **F-factor** | **0.8619** |
+| **Effective LMTD** (F × LMTD) | **31.89 °C** |
+| R (capacity ratio) | 0.625 |
+| P (effectiveness) | 0.5714 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+---
+
+## ✅ Design 06 — Naphtha / Cooling Water
+
+> **Input:** *"Cool naphtha from 140°C to 50°C using cooling water 25°C to 45°C. Naphtha flow rate 8 kg/s. Hot side pressure 4 bar, cold side pressure 3 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `485d8a5c-86ce-43bf-9737-4f2527e7ea9b` |
+| Result | **PASS** |
+| Total duration | ~28s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.92 | 8.04s |
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Naphtha | Cooling Water |
+| T_in (°C) | 140.0 | 25.0 |
+| T_out (°C) | 50.0 | 45.0 |
+| ṁ (kg/s) | 8.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 4.0 | 3.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.02s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **1,727,498 W (1,727.5 kW / 1.727 MW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 20.67 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Property | Hot (Naphtha @ 95°C) | Cold (Water @ 35°C) |
+|----------|---------------------|---------------------|
+| ρ (kg/m³) | 692.3 | 994.1 |
+| μ (Pa·s) | 0.000369 | 0.000719 |
+| Cp (J/kg·K) | 2,399.3 | 4,178.4 |
+| k (W/m·K) | 0.1532 | 0.6218 |
+| Pr | 5.78 | 4.83 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 10.69s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** (U-tube) |
+| Rationale | ΔT=115°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+| Shell-side fluid | **Cooling Water** (cold) |
+| Tube-side fluid | **Naphtha** (hot) |
+
+**⚠️ AI Warning:** Naphtha at 140°C may be near its bubble point — single-phase liquid assumption must be confirmed. U-tube bundles limit tube-side mechanical cleaning, but naphtha R_f=0.0002 is moderate so chemical cleaning is acceptable.
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 635.0 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 4.877 m |
+| No. of tubes | 394 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 254.0 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Naphtha) | 0.000200 | mongodb_cache (AI-derived, TEMA refined petroleum) | 0.82 |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.91 | 7.98s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **52.43 °C** |
+| **F-factor** | **0.8652** |
+| **Effective LMTD** (F × LMTD) | **45.36 °C** |
+| R (capacity ratio) | 4.50 |
+| P (effectiveness) | 0.1739 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+**⚠️ Escalation hint:** `high_R_sensitivity` — F-factor is sensitive to small P changes at R=4.5. Verify temperature spec accuracy.
+
+---
+
+## ✅ Design 07 — Heavy Fuel Oil / Seawater (high fouling)
+
+> **Input:** *"Cool heavy fuel oil from 130°C to 70°C using seawater 20°C to 40°C. Heavy fuel oil flow rate 10 kg/s. Hot side pressure 8 bar, cold side pressure 4 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `6b6f8298-78a3-478e-8ba5-630e59e4d3be` |
+| Result | **PASS** |
+| Total duration | ~20s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** | 0.95 | 7.35s |
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Heavy Fuel Oil | Seawater |
+| T_in (°C) | 130.0 | 20.0 |
+| T_out (°C) | 70.0 | 40.0 |
+| ṁ (kg/s) | 10.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 8.0 | 4.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.02s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **1,221,385 W (1,221.4 kW / 1.221 MW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 14.61 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Property | Hot (Heavy Fuel Oil @ 100°C) | Cold (Seawater @ 30°C) |
+|----------|----------------------------|----------------------|
+| ρ (kg/m³) | 923.6 | 995.8 |
+| μ (Pa·s) | 0.01536 | 0.000797 |
+| Cp (J/kg·K) | 2,035.6 | 4,179.2 |
+| k (W/m·K) | 0.1145 | 0.6146 |
+| Pr | **273.02** | 5.42 |
+
+> **Note:** Heavy fuel oil Pr=273 indicates very viscous fluid — heat transfer will be viscosity-limited on the hot side.
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.88 | 11.52s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AES** (floating head) |
+| Rationale | ΔT=110°C requires expansion compensation; heavy fuel oil → shell side → AES for bundle removal & mechanical cleaning |
+| Shell-side fluid | **Heavy Fuel Oil** (hot) |
+| Tube-side fluid | **Seawater** (cold) |
+
+**⚠️ AI Warning:** Heavy fuel oil R_f=0.000528 from partial_match may be underestimated — TEMA typically specifies 0.0009–0.002 for heavy fuel oil. Seawater R_f=8.8e-05 is technically defensible per TEMA but on the optimistic end.
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 539.8 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 4.877 m |
+| No. of tubes | 240 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | **Square** (for shell-side cleaning access) |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 269.9 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Heavy Fuel Oil) | 0.000528 | partial_match (TEMA table) | — |
+| Cold (Seawater) | 0.000088 | mongodb_cache (TEMA seawater <52°C) | 0.90 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.001s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **68.05 °C** |
+| **F-factor** | **0.9544** |
+| **Effective LMTD** (F × LMTD) | **64.95 °C** |
+| R (capacity ratio) | 3.00 |
+| P (effectiveness) | 0.1818 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+---
+
+## ✅ Design 08 — Ethanol / Cooling Water
+
+> **Input:** *"Cool ethanol from 70°C to 35°C using cooling water 20°C to 35°C. Ethanol flow rate 5 kg/s. Hot side pressure 3 bar, cold side pressure 3 bar."*
+
+| Property | Value |
+|----------|-------|
+| Session ID | `a1732a35-660f-4172-9acf-fc28a86ca0cc` |
+| Result | **PASS** |
+| Total duration | ~32s |
+
+### Step 1 — Process Requirements
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.85 | 12.25s |
+
+**⚠️ Note:** T_cold_out (35°C) = T_hot_out (35°C) — zero approach temperature at the cold end, thermodynamically limiting.
+
+| Parameter | Hot Side | Cold Side |
+|-----------|----------|-----------|
+| Fluid | Ethanol | Cooling Water |
+| T_in (°C) | 70.0 | 20.0 |
+| T_out (°C) | 35.0 | 35.0 |
+| ṁ (kg/s) | 5.0 | *(missing — calc by Step 2)* |
+| Pressure (bar) | 3.0 | 3.0 |
+
+### Step 2 — Heat Duty
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.05s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q** | **467,504 W (467.5 kW)** |
+| Calculated field | m_dot_cold_kg_s |
+| ṁ_cold (solved) | 7.46 kg/s |
+| Energy balance error | 0.0% |
+
+### Step 3 — Fluid Properties
+
+| AI Decision | AI Called | Duration |
+|-------------|----------|----------|
+| None (deterministic) | No | 0.004s |
+
+| Property | Hot (Ethanol @ 52.5°C) | Cold (Water @ 27.5°C) |
+|----------|----------------------|----------------------|
+| ρ (kg/m³) | 761.1 | 996.5 |
+| μ (Pa·s) | 0.000662 | 0.000842 |
+| Cp (J/kg·K) | 2,671.5 | 4,180.3 |
+| k (W/m·K) | 0.1586 | 0.6106 |
+| Pr | 11.14 | 5.76 |
+
+### Step 4 — TEMA Type & Geometry
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.88 | 12.38s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **BEM** (fixed tubesheet) |
+| Rationale | ΔT=50°C ≤ 50°C threshold and both fluids clean → fixed tubesheet BEM (cheapest) |
+| Shell-side fluid | **Cooling Water** (cold) |
+| Tube-side fluid | **Ethanol** (hot) |
+
+**Geometry:**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 489.0 mm |
+| Tube OD × ID | 19.05 mm × 14.83 mm |
+| Tube length | 3.660 m |
+| No. of tubes | 224 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch layout | Triangular |
+| Pitch ratio | 1.25 |
+| Baffle spacing | 195.6 mm |
+| Baffle cut | 0.25 |
+
+**Fouling Factors:**
+
+| Side | R_f (m²·K/W) | Source | Confidence |
+|------|--------------|--------|------------|
+| Hot (Ethanol) | 0.000176 | exact (TEMA standard table) | — |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (TEMA treated CW ≤52°C) | 0.85 |
+
+### Step 5 — LMTD & F-Factor
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 7.68s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **23.60 °C** |
+| **F-factor** | **0.8066** |
+| **Effective LMTD** (F × LMTD) | **19.04 °C** |
+| R (capacity ratio) | 2.33 |
+| P (effectiveness) | 0.300 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+**⚠️ Escalation hints:**
+- `F_factor_borderline` — F=0.807 in the 0.80–0.85 marginal range. Consider 2 shell passes to improve thermal efficiency.
+- `temperature_cross_risk` — Minimum approach is 15°C (T_hot_out − T_cold_in), which is actually comfortable. The deterministic hint is overly conservative here.
+
+---
+
+## ✅ Design 09 — Thermal Oil / Cooling Water
+
+| Field | Value |
+|-------|-------|
+| **Session ID** | `7c6ac8d6-ae98-45c1-a446-dd1af3cd4b53` |
+| **Result** | ✅ **PASS** |
+| **Input quote** | Cool thermal oil from 250 °C to 150 °C using cooling water 30 °C to 60 °C. Thermal oil flow rate 12 kg/s. Hot side pressure 6 bar, cold side pressure 5 bar. |
+
+### Step 1 — Process Requirements (AI)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** ✅ | 0.95 | 7.44s |
+
+| Parameter | Value |
+|-----------|-------|
+| Hot fluid | Thermal Oil |
+| Cold fluid | Cooling Water |
+| T_hot_in | 250.0 °C |
+| T_hot_out | 150.0 °C |
+| T_cold_in | 30.0 °C |
+| T_cold_out | 60.0 °C |
+| ṁ_hot | 12.0 kg/s |
+| P_hot | 600 000 Pa (6 bar) |
+| P_cold | 500 000 Pa (5 bar) |
+| Missing T_cold_out? | No |
+| Missing ṁ_cold? | Yes (calculated in Step 2) |
+
+### Step 2 — Heat Duty (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | 0.024s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q (Heat duty)** | **2 592 000 W (2 592 kW)** |
+| Calculated field | ṁ_cold |
+| **ṁ_cold** | **20.68 kg/s** |
+| Energy-balance imbalance | 0.00 % |
+
+### Step 3 — Fluid Properties (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | 0.001s |
+
+**Hot side (Thermal Oil @ T_mean = 200.0 °C)**
+
+| Property | Value |
+|----------|-------|
+| ρ (density) | 904.0 kg/m³ |
+| μ (viscosity) | 1.011 × 10⁻³ Pa·s |
+| Cp (specific heat) | 2 160.0 J/(kg·K) |
+| k (conductivity) | 0.0880 W/(m·K) |
+| Pr (Prandtl) | 24.81 |
+
+**Cold side (Cooling Water @ T_mean = 45.0 °C)**
+
+| Property | Value |
+|----------|-------|
+| ρ (density) | 990.40 kg/m³ |
+| μ (viscosity) | 5.958 × 10⁻⁴ Pa·s |
+| Cp (specific heat) | 4 177.8 J/(kg·K) |
+| k (conductivity) | 0.6350 W/(m·K) |
+| Pr (Prandtl) | 3.92 |
+
+### Step 4 — TEMA & Geometry Selection (AI)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 14.44s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** |
+| Shell-side fluid | Cold (Cooling Water) |
+| TEMA reasoning | ΔT=220°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+
+**Geometry**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 0.48895 m |
+| Tube OD / ID | 19.05 / 14.834 mm |
+| Tube length | 4.877 m |
+| Number of tubes | 224 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch ratio | 1.25 (triangular) |
+| Baffle spacing | 0.19558 m |
+| Baffle cut | 25 % |
+
+**Fouling factors**
+
+| Side | R_f (m²·K/W) | Source | Needs AI? |
+|------|---------------|--------|-----------|
+| Hot (Thermal Oil) | 0.000176 | exact (standard table) | No |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (AI-cached) | No |
+
+### Step 5 — LMTD & F-Factor (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | < 0.001s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **152.33 °C** |
+| **F-factor** | **0.9778** |
+| **Effective LMTD** (F × LMTD) | **148.95 °C** |
+| R (capacity ratio) | 3.33 |
+| P (effectiveness) | 0.136 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+**⚠️ Warnings:**
+- TEMA type AEU (U-tube) correctly selected for ΔT=220°C with clean/moderate fouling fluids — satisfies expansion compensation requirement. Fluid allocation places hot thermal oil on tube side (hot→tube rule), acceptable.
+
+---
+
+## ✅ Design 10 — Gasoline / Cooling Water
+
+| Field | Value |
+|-------|-------|
+| **Session ID** | `e40f15be-22b0-4d0c-9597-d101242e3f36` |
+| **Result** | ✅ **PASS** |
+| **Input quote** | Cool gasoline from 80 °C to 40 °C using cooling water from 20 °C to 35 °C. Gasoline flow rate 6 kg/s. Hot side pressure 3 bar, cold side pressure 3 bar. |
+
+### Step 1 — Process Requirements (AI)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **PROCEED** ✅ | 0.92 | 8.97s |
+
+| Parameter | Value |
+|-----------|-------|
+| Hot fluid | Gasoline |
+| Cold fluid | Cooling Water |
+| T_hot_in | 80.0 °C |
+| T_hot_out | 40.0 °C |
+| T_cold_in | 20.0 °C |
+| T_cold_out | 35.0 °C |
+| ṁ_hot | 6.0 kg/s |
+| P_hot | 300 000 Pa (3 bar) |
+| P_cold | 300 000 Pa (3 bar) |
+| Missing T_cold_out? | No |
+| Missing ṁ_cold? | Yes (calculated in Step 2) |
+
+### Step 2 — Heat Duty (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | 0.022s |
+
+| Parameter | Value |
+|-----------|-------|
+| **Q (Heat duty)** | **535 804 W (536 kW)** |
+| Calculated field | ṁ_cold |
+| **ṁ_cold** | **8.54 kg/s** |
+| Energy-balance imbalance | 0.00 % |
+
+### Step 3 — Fluid Properties (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | 0.001s |
+
+**Hot side (Gasoline @ T_mean = 60.0 °C)**
+
+| Property | Value |
+|----------|-------|
+| ρ (density) | 720.10 kg/m³ |
+| μ (viscosity) | 7.011 × 10⁻⁴ Pa·s |
+| Cp (specific heat) | 2 232.5 J/(kg·K) |
+| k (conductivity) | 0.1547 W/(m·K) |
+| Pr (Prandtl) | 10.12 |
+
+**Cold side (Cooling Water @ T_mean = 27.5 °C)**
+
+| Property | Value |
+|----------|-------|
+| ρ (density) | 996.47 kg/m³ |
+| μ (viscosity) | 8.415 × 10⁻⁴ Pa·s |
+| Cp (specific heat) | 4 180.3 J/(kg·K) |
+| k (conductivity) | 0.6106 W/(m·K) |
+| Pr (Prandtl) | 5.76 |
+
+### Step 4 — TEMA & Geometry Selection (AI)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| **WARN** ⚠️ | 0.82 | 13.62s |
+
+| Parameter | Value |
+|-----------|-------|
+| **TEMA type** | **AEU** |
+| Shell-side fluid | Cold (Cooling Water) |
+| TEMA reasoning | ΔT=60°C requires expansion compensation; both fluids clean/moderate → U-tube (AEU) cheapest option |
+
+**Geometry**
+
+| Parameter | Value |
+|-----------|-------|
+| Shell diameter | 0.38735 m |
+| Tube OD / ID | 19.05 / 14.834 mm |
+| Tube length | 4.877 m |
+| Number of tubes | 138 |
+| Tube passes | 2 |
+| Shell passes | 1 |
+| Pitch ratio | 1.25 (triangular) |
+| Baffle spacing | 0.15494 m |
+| Baffle cut | 25 % |
+
+**Fouling factors**
+
+| Side | R_f (m²·K/W) | Source | Needs AI? |
+|------|---------------|--------|-----------|
+| Hot (Gasoline) | 0.000176 | exact (standard table) | No |
+| Cold (Cooling Water) | 0.000176 | mongodb_cache (AI-cached) | No |
+
+### Step 5 — LMTD & F-Factor (Deterministic)
+
+| AI Decision | Confidence | Duration |
+|-------------|------------|----------|
+| — | — | < 0.001s |
+
+| Parameter | Value |
+|-----------|-------|
+| **LMTD** | **30.83 °C** |
+| **F-factor** | **0.8793** |
+| **Effective LMTD** (F × LMTD) | **27.11 °C** |
+| R (capacity ratio) | 2.67 |
+| P (effectiveness) | 0.250 |
+| Shell passes | 1 |
+| Auto-corrected to 2-pass? | No |
+
+**⚠️ Warnings:**
+- TEMA type AEU selected based on ΔT=60°C. Modest shell-side ΔT (15°C cold span). A fixed-tubesheet (BEM) could also work at this ΔT, but AEU provides expansion margin and is acceptable.
+
+---
