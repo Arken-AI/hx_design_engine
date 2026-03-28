@@ -156,10 +156,26 @@ class TestEscalationHints:
         assert "needs_ai" in meta["hot"]
 
     async def test_fouling_metadata_flags_unknown(self):
-        """Unknown fluid in execute → fouling_metadata needs_ai=True."""
+        """Unknown fluid in execute → fouling_metadata flags uncertainty.
+
+        When the AI is available, the 3-tier resolver succeeds with
+        source='ai' and needs_ai=False but needs_user_confirmation=True
+        (confidence < 0.7). When the AI is NOT available, the fallback
+        preserves needs_ai=True from the table lookup.
+        Either way, the metadata must indicate uncertainty.
+        """
         step = Step04TEMAGeometry()
         state = _make_state(hot_fluid_name="molten polymer resin")
         result = await step.execute(state)
         meta = result.outputs["fouling_metadata"]
-        assert meta["hot"]["needs_ai"] is True
-        assert meta["hot"]["source"] == "ai_recommended"
+        hot_meta = meta["hot"]
+        # The fluid is unknown — uncertainty must be flagged one way or another
+        is_uncertain = (
+            hot_meta.get("needs_ai") is True
+            or hot_meta.get("needs_user_confirmation") is True
+        )
+        assert is_uncertain, (
+            f"Expected uncertainty flag for unknown fluid, got: {hot_meta}"
+        )
+        # Source should be either 'ai_recommended' (no API) or 'ai' (API worked)
+        assert hot_meta["source"] in ("ai_recommended", "ai")

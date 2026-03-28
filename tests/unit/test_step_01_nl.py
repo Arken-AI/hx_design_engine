@@ -101,7 +101,8 @@ class TestNLParser:
             "Cool 50 kg/s of crude oil from 150°C to 90°C "
             "using cooling water at 30°C prefer floating head design"
         )
-        assert "floating head" in result.outputs.get("tema_preference", "")
+        # "floating head" is normalised to the canonical TEMA code "AES"
+        assert result.outputs.get("tema_preference") == "AES"
 
     async def test_heating_not_cooling(self):
         result, _ = await _run_nl(

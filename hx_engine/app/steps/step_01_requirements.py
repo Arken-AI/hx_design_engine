@@ -291,18 +291,20 @@ class Step01Requirements(BaseStep):
             p_val = float(m.group(1))
             p_unit = m.group(2)
             p_pa = detect_and_convert_pressure(p_val, p_unit)
-            # Inspect up to 100 chars before match for side context
-            ctx = text[max(0, m.start() - 100):m.end()].lower()
-            if "cold" in ctx or "tube" in ctx or "cool" in ctx:
+            # Inspect up to 30 chars before match for *side-specific* context.
+            # Use a narrow window so sentence-level verbs ("Cool", "cooling")
+            # don't accidentally match. Only explicit side indicators count.
+            ctx = text[max(0, m.start() - 30):m.end()].lower()
+            _COLD_P_KW = ("cold side", "cold fluid", "tube side", "tube-side")
+            _HOT_P_KW = ("hot side", "hot fluid", "shell side", "shell-side")
+            if any(kw in ctx for kw in _COLD_P_KW):
                 p_cold_pa = p_pa
-            elif "hot" in ctx or "shell" in ctx or "heat" in ctx:
+            elif any(kw in ctx for kw in _HOT_P_KW):
                 p_hot_pa = p_pa
             else:
-                # No side context — apply to both only if state had no pre-set values
-                if state.P_hot_Pa is None:
-                    p_hot_pa = p_pa
-                if state.P_cold_Pa is None:
-                    p_cold_pa = p_pa
+                # No side context — apply to both sides
+                p_hot_pa = p_pa
+                p_cold_pa = p_pa
         outputs["P_hot_Pa"] = p_hot_pa
         outputs["P_cold_Pa"] = p_cold_pa
 

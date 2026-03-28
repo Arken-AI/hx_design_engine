@@ -41,13 +41,14 @@ class TestFluidAllocation:
         assert shell_side == "cold"  # hot goes tube-side
 
     def test_fouling_to_tube(self):
-        """Hot=crude oil, Cold=water → crude tube-side → shell_side='cold'."""
+        """Hot=crude oil, Cold=water → crude shell-side (AES cleaning access)."""
         state = _make_state(
             hot_fluid_name="crude oil",
             T_hot_in_C=200, T_hot_out_C=100,
         )
         shell_side, warnings = _allocate_fluids(state)
-        assert shell_side == "cold"  # crude (hot) goes tube-side
+        # Crude/heavy oil → shell-side for AES bundle removal (Rule 2.5)
+        assert shell_side == "hot"
 
     def test_viscous_to_shell(self):
         """Hot μ=0.001, Cold μ=0.5 Pa·s → cold shell-side (for baffles)."""
@@ -64,7 +65,7 @@ class TestFluidAllocation:
         assert shell_side == "cold"
 
     def test_fouling_overrides_viscosity(self):
-        """Hot=crude(fouling+viscous), Cold=water → crude tube-side."""
+        """Hot=crude(fouling+viscous), Cold=water → crude shell-side (AES cleaning)."""
         state = _make_state(
             hot_fluid_name="crude oil",
             T_hot_in_C=200, T_hot_out_C=100,
@@ -74,7 +75,8 @@ class TestFluidAllocation:
             ),
         )
         shell_side, warnings = _allocate_fluids(state)
-        assert shell_side == "cold"  # crude (hot) on tube-side despite viscosity
+        # Crude/heavy oil → shell-side (AES cleaning, Rule 2.5 overrides viscosity)
+        assert shell_side == "hot"
 
     def test_high_pressure_overrides_fouling(self):
         """Hot: 100 bar+clean, Cold: 2 bar+fouling → hot tube-side."""
@@ -109,17 +111,23 @@ class TestFluidAllocation:
         assert shell_side == "cold"
 
     def test_returns_warnings_for_conflicts(self):
-        """Fouling says tube-side, viscosity says shell-side → warning."""
+        """Fouling fluid (non-crude) + viscous → conflict warning.
+
+        Use a non-crude heavy-fouling fluid so Rule 2.5 (crude→shell) does
+        not pre-empt Rule 3.  The fluid must be viscous enough (>0.01 Pa·s)
+        AND classified as heavy/severe fouling so the conflict path fires.
+        """
         state = _make_state(
-            hot_fluid_name="crude oil",
+            hot_fluid_name="vegetable oil",
+            cold_fluid_name="water",
             T_hot_in_C=200, T_hot_out_C=100,
             hot_fluid_props=FluidProperties(
-                density_kg_m3=850, viscosity_Pa_s=0.05,
-                cp_J_kgK=2000, k_W_mK=0.13, Pr=770.0,
+                density_kg_m3=920, viscosity_Pa_s=0.05,
+                cp_J_kgK=2000, k_W_mK=0.17, Pr=590.0,
             ),
         )
         _shell_side, warnings = _allocate_fluids(state)
-        conflict_warnings = [w for w in warnings if "Conflict" in w]
+        conflict_warnings = [w for w in warnings if "Conflict" in w or "conflict" in w]
         assert len(conflict_warnings) >= 1
 
     def test_extreme_pressure_difference(self):

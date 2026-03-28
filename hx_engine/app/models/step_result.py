@@ -47,6 +47,8 @@ class AIReview(BaseModel):
     corrections: list[AICorrection] = Field(default_factory=list)
     reasoning: str = ""
     observation: str = ""
+    recommendation: Optional[str] = None  # required when decision == ESCALATE
+    options: list[str] = Field(default_factory=list)  # choices for the user
     ai_called: bool = False
 
 
