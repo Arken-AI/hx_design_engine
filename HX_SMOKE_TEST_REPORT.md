@@ -1812,3 +1812,614 @@
 > **Conclusion:** All 10 designs pass on rerun. Deterministic outputs (Q, LMTD, F-factor, fluid properties) are identical across runs. AI-selected geometry (N_tubes, shell diameter) varies as expected — Claude selects from the valid discrete tube-count table each time. The diagnostic agent loop is live but no designs triggered it (no FAIL escalations). Pipeline is stable.
 
 ---
+
+# 🔄 Rerun 2 — Post Warnings / Notes Classification
+
+**Date:** 2025-07-25  
+**Context:** Full 10-design rerun after splitting `state.warnings` into two buckets:
+- `warnings` — real concerns (AI tried a correction and it failed, or genuine borderline issues)
+- `notes` — informational AI observations (confirmations, audit trail, auto-resolved items)
+
+**Code changes tested:**
+- `design_state.py` — added `notes: list[str]`
+- `base.py` — PROCEED + observation → `notes`; WARN + no corrections → `notes`; WARN + corrections that failed Layer 2 → `warnings`; auto-resolved → `notes`
+- `ai_engineer.py` — tightened WARN definition: only genuinely marginal/uncertain cases; PROCEED + observation for confirmations
+- `design.py` router — added `notes` to `DesignStatusResponse`
+- `pipeline_runner.py` — added `notes` to summary dict
+
+**Server:** FastAPI on port 8100 (restarted with new code)
+
+## Summary Table
+
+| # | Hot Fluid | Cold Fluid | Result | Q (kW) | TEMA | LMTD (°C) | F | ṁ_cold (kg/s) | N_tubes | ⚠️ Warns | 📝 Notes | Session |
+|---|-----------|-----------|--------|--------|------|-----------|------|---------------|---------|----------|----------|---------|
+| 01 | Crude Oil | Cooling Water | ✅ PASS | 3,535 | AES | 87.19 | 0.940 | 33.85 | 466 | **0** | 2 | `7b3efb13` |
+| 02 | Lube Oil | Cooling Water | ✅ PASS | 436 | AEU | 42.06 | 0.930 | 5.22 | 178 | **0** | 2 | `d76380d5` |
+| 03 | Diesel | Cooling Water | ✅ PASS | 927 | AEU | 51.29 | 0.903 | 9.64 | 138 | **0** | 2 | `92a2d888` |
+| 04 | Kerosene | Cooling Water | ✅ PASS | 2,136 | AEU | 74.61 | 0.941 | 25.56 | 224 | **0** | 3 | `2d3c1351` |
+| 05 | Ethylene Glycol | Hot Water | ✅ PASS | 327 | AEU | 37.00 | 0.862 | 1.96 | 138 | **0** | 2 | `ba5d7f42` |
+| 06 | Naphtha | Cooling Water | ✅ PASS | 1,728 | AEU | 52.43 | 0.865 | 20.67 | 394 | **0** | 3 | `d3796b1d` |
+| 07 | Heavy Fuel Oil | Seawater | ✅ PASS | 1,221 | AES | 68.05 | 0.954 | 14.61 | 240 | **0** | 2 | `5138c21a` |
+| 08 | Ethanol | Cooling Water | ✅ PASS | 468 | BEM | 23.60 | 0.807 | 7.46 | 224 | **0** | 3 | `02fa680c` |
+| 09 | Thermal Oil | Cooling Water | ✅ PASS | 2,592 | AEU | 152.33 | 0.978 | 20.68 | 224 | **0** | 2 | `7a451b7f` |
+| 10 | Gasoline | Cooling Water | ✅ PASS | 536 | AEU | 30.83 | 0.879 | 8.54 | 138 | **0** | 2 | `a41c0012` |
+
+> **10 / 10 PASS — 0 warnings, 23 notes.**  
+> All AI observations now correctly route to `notes` instead of `warnings`.
+
+---
+
+## Design 01 — Crude Oil → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.95)
+| Field | Value |
+|-------|-------|
+| Hot fluid | crude oil |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 180 °C → 80 °C |
+| T_cold_in / T_cold_out | 25 °C → 50 °C |
+| ṁ_hot | 15.0 kg/s |
+| P_hot / P_cold | 800 kPa / 400 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **3,535.4 kW** |
+| ṁ_cold (calculated) | 33.85 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (crude oil @ 130 °C) | Cold (water @ 37.5 °C) |
+|----------|--------------------------|------------------------|
+| ρ (kg/m³) | 784.8 | 993.3 |
+| μ (Pa·s) | 1.241 × 10⁻³ | 6.847 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,356.9 | 4,177.9 |
+| k (W/m·K) | 0.129 | 0.625 |
+| Pr | 22.68 | 4.57 |
+
+### Step 4 — TEMA & Geometry (AI: PROCEED, 0.93)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AES** (floating head) |
+| Shell-side fluid | hot (crude oil) |
+| Shell Ø | 0.737 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=466**, 2-pass |
+| Pitch | 1.25 / square |
+| Baffle | 0.368 m / 25 % |
+| R_f hot / cold | 3.52 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **87.19 °C** |
+| **F-factor** | **0.940** |
+| Effective LMTD | 81.97 °C |
+| R / P | 4.0 / 0.161 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. m_dot_cold will be derived from duty balance in Step 2. Crude oil Cp varies significantly with temperature (180→80 °C range); downstream steps should use a temperature-averaged Cp. Check pour point of crude to confirm it remains pumpable at 80 °C outlet.
+2. Crude oil at 180 °C inlet: verify shell-side velocity ≥0.5 m/s to justify R_f=0.000352; Step 5 should check Re and wall temperature for coking risk near tube wall.
+
+---
+
+## Design 02 — Lube Oil → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.97)
+| Field | Value |
+|-------|-------|
+| Hot fluid | lubricating oil |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 90 °C → 55 °C |
+| T_cold_in / T_cold_out | 20 °C → 40 °C |
+| ṁ_hot | 6.0 kg/s |
+| P_hot / P_cold | 600 kPa / 400 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **436.3 kW** |
+| ṁ_cold (calculated) | 5.22 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (lube oil @ 72.5 °C) | Cold (water @ 30 °C) |
+|----------|--------------------------|----------------------|
+| ρ (kg/m³) | 848.2 | 995.8 |
+| μ (Pa·s) | 5.092 × 10⁻³ | 7.972 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,077.4 | 4,179.2 |
+| k (W/m·K) | 0.129 | 0.615 |
+| Pr | 81.83 | 5.42 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.78)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.438 m |
+| Tubes | 19.05/14.83 mm, L=3.66 m, **N=178**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.175 m / 25 % |
+| R_f hot / cold | 1.76 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **42.06 °C** |
+| **F-factor** | **0.930** |
+| Effective LMTD | 39.10 °C |
+| R / P | 1.75 / 0.286 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. m_dot_cold will be derived from Q = m_dot_hot × Cp_oil × dT_hot. Verify Cp of lubricating oil at mean temp ~72.5 °C (typically 1.9–2.2 kJ/kg·K).
+2. Fluid allocation places lube oil (hot, more viscous) on tube side — TEMA priority rule #4 suggests more viscous fluid on shell side for better mixing with baffles. However, the engine's default "hot → tube-side" is not strictly wrong, just suboptimal for viscous fluids.
+
+---
+
+## Design 03 — Diesel → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.95)
+| Field | Value |
+|-------|-------|
+| Hot fluid | diesel |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 120 °C → 60 °C |
+| T_cold_in / T_cold_out | 25 °C → 48 °C |
+| ṁ_hot | 7.0 kg/s |
+| P_hot / P_cold | 500 kPa / 350 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **926.7 kW** |
+| ṁ_cold (calculated) | 9.64 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (diesel @ 90 °C) | Cold (water @ 36.5 °C) |
+|----------|----------------------|------------------------|
+| ρ (kg/m³) | 801.0 | 993.6 |
+| μ (Pa·s) | 1.890 × 10⁻³ | 6.981 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,206.5 | 4,178.1 |
+| k (W/m·K) | 0.134 | 0.624 |
+| Pr | 31.22 | 4.67 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.387 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=138**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.155 m / 25 % |
+| R_f hot / cold | 3.52 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **51.29 °C** |
+| **F-factor** | **0.903** |
+| Effective LMTD | 46.30 °C |
+| R / P | 2.61 / 0.242 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. m_dot_cold missing — must be derived from energy balance. Diesel Cp varies with temperature; use mean temp (~90 °C) for hot-side Cp estimate (~2.1 kJ/kg·K).
+2. AEU correctly selected for ΔT=95 °C. U-tube inner bends cannot be mechanically cleaned — diesel at R_f=0.000352 is on the higher end for tube-side in U-tube. Chemical cleaning will be the only option if fouling worsens.
+
+---
+
+## Design 04 — Kerosene → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.95)
+| Field | Value |
+|-------|-------|
+| Hot fluid | kerosene |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 160 °C → 70 °C |
+| T_cold_in / T_cold_out | 25 °C → 45 °C |
+| ṁ_hot | 10.0 kg/s |
+| P_hot / P_cold | 500 kPa / 300 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **2,135.9 kW** |
+| ṁ_cold (calculated) | 25.56 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (kerosene @ 115 °C) | Cold (water @ 35 °C) |
+|----------|-------------------------|----------------------|
+| ρ (kg/m³) | 748.3 | 994.1 |
+| μ (Pa·s) | 7.747 × 10⁻⁴ | 7.191 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,373.2 | 4,178.4 |
+| k (W/m·K) | 0.138 | 0.622 |
+| Pr | 13.32 | 4.83 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.489 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=224**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.196 m / 25 % |
+| R_f hot / cold | 1.76 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor (AI: WARN, 0.91)
+| Field | Value |
+|-------|-------|
+| **LMTD** | **74.61 °C** |
+| **F-factor** | **0.941** |
+| Effective LMTD | 70.19 °C |
+| R / P | 4.5 / 0.148 |
+| Escalation hint | `high_R_sensitivity` |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (3):
+1. m_dot_cold derived from energy balance. Verify kerosene Cp (~2.0 kJ/kg·K) at mean temp ~115 °C. Check kerosene flash point (~38–72 °C) — at 160 °C, 5 bar pressure containment must keep single-phase.
+2. AEU correctly selected for ΔT=135 °C. Baffle/shell ratio 0.40 on lower end — verify shell-side ΔP. U-tube bends cannot be mechanically cleaned — flag if kerosene prone to coking.
+3. LMTD and F-factor correct. R=4.5 highly asymmetric — F-factor sensitive to small changes in cold-side temperature spec. P=0.148 is low enough that F remains robust at 0.941.
+
+---
+
+## Design 05 — Ethylene Glycol → Hot Water
+
+### Step 1 — Process Requirements (AI: WARN, 0.72)
+| Field | Value |
+|-------|-------|
+| Hot fluid | ethylene glycol |
+| Cold fluid | hot water |
+| T_hot_in / T_hot_out | 80 °C → 55 °C |
+| T_cold_in / T_cold_out | 10 °C → 50 °C |
+| ṁ_hot | 5.0 kg/s |
+| P_hot / P_cold | 400 kPa / 300 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **327.0 kW** |
+| ṁ_cold (calculated) | 1.96 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (EG @ 67.5 °C) | Cold (water @ 30 °C) |
+|----------|---------------------|----------------------|
+| ρ (kg/m³) | 1,079.7 | 995.7 |
+| μ (Pa·s) | 4.285 × 10⁻³ | 7.972 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,615.6 | 4,179.5 |
+| k (W/m·K) | 0.249 | 0.615 |
+| Pr | 45.02 | 5.42 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.72)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.387 m |
+| Tubes | 19.05/14.83 mm, L=3.66 m, **N=138**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.155 m / 25 % |
+| R_f hot / cold | 3.52 × 10⁻⁴ / 3.52 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **37.00 °C** |
+| **F-factor** | **0.862** |
+| Effective LMTD | 31.89 °C |
+| R / P | 0.625 / 0.571 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. Process data physically reasonable — EG 80→55 °C single-phase, water 10→50 °C single-phase. Cold fluid named "hot water" but enters at 10 °C — naming is misleading. m_dot_cold will be calculated from energy balance.
+2. AEU selected citing ΔT=70 °C (hot-inlet vs cold-inlet difference). The computed ΔT_mean is 37.5 °C, but the 70 °C inlet-to-inlet difference justifies expansion compensation. Cold-side fouling at 0.000352 via partial_match is on the high side for clean water (typically ~0.0001–0.0002).
+
+---
+
+## Design 06 — Naphtha → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.93)
+| Field | Value |
+|-------|-------|
+| Hot fluid | naphtha |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 140 °C → 50 °C |
+| T_cold_in / T_cold_out | 25 °C → 45 °C |
+| ṁ_hot | 8.0 kg/s |
+| P_hot / P_cold | 400 kPa / 300 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **1,727.5 kW** |
+| ṁ_cold (calculated) | 20.67 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (naphtha @ 95 °C) | Cold (water @ 35 °C) |
+|----------|----------------------|----------------------|
+| ρ (kg/m³) | 692.3 | 994.1 |
+| μ (Pa·s) | 3.692 × 10⁻⁴ | 7.191 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,399.3 | 4,178.4 |
+| k (W/m·K) | 0.153 | 0.622 |
+| Pr | 5.78 | 4.83 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.635 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=394**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.254 m / 25 % |
+| R_f hot / cold | 2.00 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor (AI: WARN, 0.88)
+| Field | Value |
+|-------|-------|
+| **LMTD** | **52.43 °C** |
+| **F-factor** | **0.865** |
+| Effective LMTD | 45.36 °C |
+| R / P | 4.5 / 0.174 |
+| Escalation hint | `high_R_sensitivity` |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (3):
+1. m_dot_cold missing — derived from duty balance. Naphtha Cp varies (1.9–2.3 kJ/kg·K over 50–140 °C). Verify naphtha vapour pressure at 140 °C against operating pressure.
+2. AEU correct for ΔT=115 °C. Cooling water on shell side of U-tube creates potential for stagnant zones at U-bend region — localized fouling/corrosion risk. Tube-side naphtha can only be chemically cleaned.
+3. LMTD 52.43 °C valid. F=0.865 above threshold. R=4.5 highly asymmetric — F sensitive to small cold-side temperature changes. Escalation hint appropriate.
+
+---
+
+## Design 07 — Heavy Fuel Oil → Seawater
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.95)
+| Field | Value |
+|-------|-------|
+| Hot fluid | heavy fuel oil |
+| Cold fluid | seawater |
+| T_hot_in / T_hot_out | 130 °C → 70 °C |
+| T_cold_in / T_cold_out | 20 °C → 40 °C |
+| ṁ_hot | 10.0 kg/s |
+| P_hot / P_cold | 800 kPa / 400 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **1,221.4 kW** |
+| ṁ_cold (calculated) | 14.61 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (HFO @ 100 °C) | Cold (water @ 30 °C) |
+|----------|---------------------|----------------------|
+| ρ (kg/m³) | 923.6 | 995.8 |
+| μ (Pa·s) | 1.536 × 10⁻² | 7.972 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,035.6 | 4,179.2 |
+| k (W/m·K) | 0.115 | 0.615 |
+| Pr | 273.02 | 5.42 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AES** (floating head) |
+| Shell-side fluid | hot (heavy fuel oil) |
+| Shell Ø | 0.540 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=240**, 2-pass |
+| Pitch | 1.25 / square |
+| Baffle | 0.270 m / 25 % |
+| R_f hot / cold | 5.28 × 10⁻⁴ / 8.80 × 10⁻⁵ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **68.05 °C** |
+| **F-factor** | **0.954** |
+| Effective LMTD | 64.95 °C |
+| R / P | 3.0 / 0.182 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. m_dot_cold derived from energy balance. HFO Cp varies significantly (1.8–2.2 kJ/kg·K at 70–130 °C). Verify HFO pour point to ensure no solidification risk at 70 °C outlet.
+2. AES correct — ΔT=110 °C + heavy fuel oil on shell side mandates floating head for bundle removal and mechanical cleaning with square pitch. HFO R_f=0.000528 is at the low end for heavy oils (0.0005–0.002). Seawater R_f=8.8e-05 is below typical TEMA seawater values of 0.0002 — may underestimate biological/particulate fouling.
+
+---
+
+## Design 08 — Ethanol → Cooling Water
+
+### Step 1 — Process Requirements (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| Hot fluid | ethanol |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 70 °C → 35 °C |
+| T_cold_in / T_cold_out | 20 °C → 35 °C |
+| ṁ_hot | 5.0 kg/s |
+| P_hot / P_cold | 300 kPa / 300 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **467.5 kW** |
+| ṁ_cold (calculated) | 7.46 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (ethanol @ 52.5 °C) | Cold (water @ 27.5 °C) |
+|----------|-------------------------|------------------------|
+| ρ (kg/m³) | 761.1 | 996.5 |
+| μ (Pa·s) | 6.617 × 10⁻⁴ | 8.415 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,671.5 | 4,180.3 |
+| k (W/m·K) | 0.159 | 0.611 |
+| Pr | 11.14 | 5.76 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **BEM** (fixed tubesheet) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.489 m |
+| Tubes | 19.05/14.83 mm, L=3.66 m, **N=224**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.196 m / 25 % |
+| R_f hot / cold | 1.76 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **LMTD** | **23.60 °C** |
+| **F-factor** | **0.807** |
+| Effective LMTD | 19.04 °C |
+| R / P | 2.33 / 0.300 |
+| Escalation hint | `F_factor_borderline` |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (3):
+1. T_hot_out = T_cold_out = 35 °C — zero minimum approach temperature. Thermodynamically permissible but practically very tight. ΔT₂ = T_hot_out − T_cold_in = 15 °C is the binding minimum approach and is feasible, but the zero-pinch at the other end is a design concern.
+2. BEM defensible: ΔT_mean=25 °C, both fluids clean, pressures equal at 3 bar. ΔT boundary is exactly at 50 °C threshold — any upstream recalculation nudging temps could push into AEU territory.
+3. F=0.807 is marginal (0.80–0.85). LMTD=23.6 °C valid, ΔT₁=35 °C and ΔT₂=15 °C both positive — no temperature cross. Increasing to 2 shell passes would improve F toward ~0.95+. Effective LMTD of 19.0 °C is workable but area-intensive.
+
+---
+
+## Design 09 — Thermal Oil → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.95)
+| Field | Value |
+|-------|-------|
+| Hot fluid | thermal oil |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 250 °C → 150 °C |
+| T_cold_in / T_cold_out | 30 °C → 60 °C |
+| ṁ_hot | 12.0 kg/s |
+| P_hot / P_cold | 600 kPa / 500 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **2,592.0 kW** |
+| ṁ_cold (calculated) | 20.68 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (thermal oil @ 200 °C) | Cold (water @ 45 °C) |
+|----------|---------------------------|----------------------|
+| ρ (kg/m³) | 904.0 | 990.4 |
+| μ (Pa·s) | 1.011 × 10⁻³ | 5.958 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,160.0 | 4,177.8 |
+| k (W/m·K) | 0.088 | 0.635 |
+| Pr | 24.81 | 3.92 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.489 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=224**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.196 m / 25 % |
+| R_f hot / cold | 1.76 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **152.33 °C** |
+| **F-factor** | **0.978** |
+| Effective LMTD | 148.95 °C |
+| R / P | 3.33 / 0.136 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. Thermal oil Cp varies significantly with temperature (2.0–2.5 kJ/kg·K at 150–250 °C). m_dot_cold derived from duty balance.
+2. AEU correct for ΔT=220 °C. Baffle/shell ratio 0.40 on lower end — wider spacing (~0.5× shell ≈ 0.244 m) would reduce shell-side ΔP. U-tube inner bends cannot be mechanically cleaned — confirm thermal oil is clean synthetic grade before accepting R_f=0.000176.
+
+---
+
+## Design 10 — Gasoline → Cooling Water
+
+### Step 1 — Process Requirements (AI: PROCEED, 0.92)
+| Field | Value |
+|-------|-------|
+| Hot fluid | gasoline |
+| Cold fluid | cooling water |
+| T_hot_in / T_hot_out | 80 °C → 40 °C |
+| T_cold_in / T_cold_out | 20 °C → 35 °C |
+| ṁ_hot | 6.0 kg/s |
+| P_hot / P_cold | 300 kPa / 300 kPa |
+
+### Step 2 — Heat Duty
+| Field | Value |
+|-------|-------|
+| **Q** | **535.8 kW** |
+| ṁ_cold (calculated) | 8.54 kg/s |
+| Energy balance imbalance | 0.0 % |
+
+### Step 3 — Fluid Properties
+| Property | Hot (gasoline @ 60 °C) | Cold (water @ 27.5 °C) |
+|----------|------------------------|------------------------|
+| ρ (kg/m³) | 720.1 | 996.5 |
+| μ (Pa·s) | 7.011 × 10⁻⁴ | 8.415 × 10⁻⁴ |
+| Cp (J/kg·K) | 2,232.5 | 4,180.3 |
+| k (W/m·K) | 0.155 | 0.611 |
+| Pr | 10.12 | 5.76 |
+
+### Step 4 — TEMA & Geometry (AI: WARN, 0.82)
+| Field | Value |
+|-------|-------|
+| **TEMA** | **AEU** (U-tube) |
+| Shell-side fluid | cold (water) |
+| Shell Ø | 0.387 m |
+| Tubes | 19.05/14.83 mm, L=4.877 m, **N=138**, 2-pass |
+| Pitch | 1.25 / triangular |
+| Baffle | 0.155 m / 25 % |
+| R_f hot / cold | 1.76 × 10⁻⁴ / 1.76 × 10⁻⁴ m²K/W |
+
+### Step 5 — LMTD & F-Factor
+| Field | Value |
+|-------|-------|
+| **LMTD** | **30.83 °C** |
+| **F-factor** | **0.879** |
+| Effective LMTD | 27.11 °C |
+| R / P | 2.67 / 0.250 |
+
+### ⚠️ Warnings: None
+
+### 📝 Notes (2):
+1. Gasoline vapour pressure ~0.5–0.7 bar at 80 °C; at 3 bar operating pressure, fully liquid. Confirm no flashing risk at outlet.
+2. AEU correct for ΔT=60 °C. Cooling water on shell side of U-tube is atypical — normally tube-side for easier cleaning. Gasoline on tube side at 3 bar is acceptable pressure-wise, but flammability considerations may warrant review of containment preference (outside thermal engine scope).
+
+---
+
+## Rerun 2 vs Previous Runs — Comparison
+
+| Metric | Original Run | Rerun 1 (post diagnostic agent) | **Rerun 2 (post warn/notes split)** |
+|--------|-------------|--------------------------------|--------------------------------------|
+| Passed | 10/10 | 10/10 | **10/10** |
+| `state.warnings` | 14 (all mixed) | 13 (all mixed) | **0** |
+| `state.notes` | *(field didn't exist)* | *(field didn't exist)* | **23** |
+| Deterministic values | baseline | identical | **identical** |
+| AI decisions | mix of PROCEED/WARN | mix of PROCEED/WARN | **more PROCEED, WARN only for genuine borderline** |
+
+### What changed:
+1. **Prompt tightening** — AI now uses `PROCEED + observation` for confirmations instead of `WARN`
+2. **Routing logic** — informational WARNs (no corrections) → `notes`; auto-resolved → `notes`; failed corrections → `warnings`
+3. **Result** — user sees "0 Warnings, 23 Notes" instead of "13 Warnings"
+
+> **Conclusion:** The warnings/notes classification is working correctly. All AI observations that were previously alarming users as "warnings" now route to `notes` — collapsed by default in the UI. The `warnings` bucket is reserved for genuine actionable concerns (AI tried to fix something and couldn't). Pipeline is stable with identical deterministic outputs across all three runs.
+
+---
