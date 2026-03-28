@@ -268,6 +268,7 @@ class DesignState(BaseModel):
     completed_steps: list[int] = Field(default_factory=list)
     step_records: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     waiting_for_user: bool = False
     in_convergence_loop: bool = False
 

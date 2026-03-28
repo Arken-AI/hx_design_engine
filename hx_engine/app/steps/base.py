@@ -134,6 +134,8 @@ class BaseStep(ABC):
                 if review.decision == AIDecisionEnum.PROCEED:
                     review = review.model_copy(update={"attempts": attempts})
                     result.ai_review = review
+                    if review.observation:
+                        state.notes.append(review.observation)
                     self._append_review_note(state, review)
                     self._record(state, result, start)
                     return result
@@ -163,7 +165,7 @@ class BaseStep(ABC):
 
                         if layer2_passed:
                             result = new_result
-                            state.warnings.append(f"[auto-resolved] {review.reasoning}")
+                            state.notes.append(f"[auto-resolved] {review.reasoning}")
                             resolved = review.model_copy(update={
                                 "decision": AIDecisionEnum.CORRECT,
                                 "reasoning": f"[auto-resolved] {review.reasoning}",
@@ -180,9 +182,14 @@ class BaseStep(ABC):
                             state.applied_corrections.pop(c.field, None)
 
                     # Informational WARN (or rollback) — pass through, pipeline continues
+                    # Corrections were attempted but layer2 failed → real concern → warnings
+                    # No corrections at all → AI observation only → notes
                     review = review.model_copy(update={"attempts": attempts})
                     result.ai_review = review
-                    state.warnings.append(review.reasoning)
+                    if review.corrections:
+                        state.warnings.append(review.reasoning)
+                    else:
+                        state.notes.append(review.reasoning)
                     self._append_review_note(state, review)
                     self._record(state, result, start)
                     return result

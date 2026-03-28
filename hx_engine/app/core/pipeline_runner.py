@@ -313,14 +313,22 @@ class PipelineRunner:
             )
 
         elif decision == AIDecisionEnum.WARN:
+            # Mirror the routing rule in base.py: corrections present = real concern,
+            # no corrections = informational observation only.
+            severity = "warning" if (review and review.corrections) else "note"
             event = StepWarningEvent(
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=review.confidence if review else 0.0,
                 reasoning=review.reasoning if review else "",
-                user_summary=f"Step {step.step_id} approved with warning.",
+                user_summary=(
+                    f"Step {step.step_id} approved with warning."
+                    if severity == "warning"
+                    else f"Step {step.step_id} — AI note."
+                ),
                 warning_message=review.reasoning if review else "",
+                severity=severity,
                 duration_ms=duration_ms,
                 outputs=result.outputs,
             )
@@ -404,5 +412,6 @@ class PipelineRunner:
             "A_m2": state.A_m2,
             "tema_type": state.tema_type,
             "warnings": state.warnings,
+            "notes": state.notes,
             "geometry": state.geometry.model_dump() if state.geometry else None,
         }

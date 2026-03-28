@@ -84,8 +84,12 @@ Respond ONLY with a JSON object in this exact format — no text before or after
 }
 
 Decision guide:
-- "proceed": outputs look correct and physically reasonable
-- "warn": minor concern, but acceptable — add observation
+- "proceed": outputs are correct and physically reasonable. Use the "observation"
+  field for any forward-looking note (e.g. Cp variation, near-boiling condition,
+  downstream assumption). Do NOT use "warn" to confirm correctness.
+- "warn": something is genuinely marginal or uncertain — a human should consider
+  acting on it (e.g. borderline F-factor, ambiguous fluid, near-limit temperature).
+  Do NOT use "warn" just to echo that the calculation looks correct.
 - "correct": specific field(s) need adjustment — provide corrections array
 - "escalate": cannot resolve automatically — needs human judgment
 

@@ -87,6 +87,7 @@ class StepWarningEvent(SSEBaseEvent):
     reasoning: str = ""
     user_summary: str = ""
     warning_message: str = ""
+    severity: str = "warning"  # "warning" = actionable | "note" = informational
     duration_ms: int = 0
     outputs: dict[str, Any] = Field(default_factory=dict)
 
