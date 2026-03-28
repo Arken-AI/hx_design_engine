@@ -47,6 +47,26 @@ except ImportError:                            # pragma: no cover
 
 _STEP_ID = 2  # used in CalculationError
 
+# ── fluid name normalisation aliases ──────────────────────────────────────────
+# Maps common engineering names (as produced by NL parsing / AI) to names
+# that the lookup chain already recognises.  Applied once at the top of
+# get_fluid_properties() before any backend is tried.
+
+_FLUID_ALIAS_MAP: dict[str, str] = {
+    # Petroleum compound names → recognised fraction names
+    "diesel fuel":      "diesel",
+    "diesel oil":       "diesel",
+    "lube oil":         "lubricating oil",
+    "lube":             "lubricating oil",
+    "light oil":        "gas oil",
+    "heating oil":      "fuel oil",
+    "bunker fuel":      "heavy fuel oil",
+    "bunker oil":       "heavy fuel oil",
+    "bunker c":         "heavy fuel oil",
+    "residual fuel":    "heavy fuel oil",
+    "hfo":              "heavy fuel oil",
+}
+
 # ── water / steam name detection ──────────────────────────────────────────────
 
 _WATER_ALIASES: frozenset[str] = frozenset({
@@ -319,6 +339,9 @@ def get_fluid_properties(
         pressure_Pa = _DEFAULT_PRESSURE_PA
 
     normalised = fluid_name.strip().lower()
+
+    # Apply alias normalisation before any backend lookup
+    normalised = _FLUID_ALIAS_MAP.get(normalised, normalised)
 
     # 1. Water / steam → iapws
     if _is_water_or_steam(normalised):

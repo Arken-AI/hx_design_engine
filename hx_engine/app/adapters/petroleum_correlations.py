@@ -191,6 +191,15 @@ FRACTION_DATABASE: dict[str, PetroleumCharacterization] = {
     "fuel oil":         PetroleumCharacterization(15.0, 400),
     "heavy fuel oil":   PetroleumCharacterization(12.0, 420),
     "lubricating oil":  PetroleumCharacterization(28.0, 350),
+    # Common engineering aliases
+    "diesel fuel":      PetroleumCharacterization(35.0, 270),   # = diesel
+    "diesel oil":       PetroleumCharacterization(35.0, 270),   # = diesel
+    "lube oil":         PetroleumCharacterization(28.0, 350),   # = lubricating oil
+    "heating oil":      PetroleumCharacterization(15.0, 400),   # = fuel oil
+    "bunker fuel":      PetroleumCharacterization(12.0, 420),   # = heavy fuel oil
+    "bunker oil":       PetroleumCharacterization(12.0, 420),   # = heavy fuel oil
+    "hfo":              PetroleumCharacterization(12.0, 420),   # = heavy fuel oil
+    "residual fuel":    PetroleumCharacterization(12.0, 420),   # = heavy fuel oil
 }
 
 

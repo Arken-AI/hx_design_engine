@@ -67,6 +67,8 @@ _KNOWN_FLUIDS = [
     "water", "steam", "condensate",
     "ethanol", "methanol", "glycol", "ethylene glycol",
     "propylene glycol", "ammonia", "kerosene", "diesel",
+    "diesel fuel", "lube oil", "lubricating oil",
+    "heavy fuel oil", "hfo", "fuel oil", "bunker fuel",
     "naphtha", "gasoline", "toluene", "benzene", "xylene",
     "acetone", "hexane", "heptane", "pentane",
     "nitrogen", "air", "hydrogen", "oxygen",

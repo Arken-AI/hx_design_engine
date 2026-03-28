@@ -71,6 +71,25 @@ Decision guide:
 - "correct": specific field(s) need adjustment — provide corrections array
 - "escalate": cannot resolve automatically — needs human judgment
 
+FLUID NAME CORRECTION RULES:
+- NEVER rename a fluid to a different fluid family. For example:
+  • Do NOT change an oil/petroleum fluid (lube oil, diesel, crude oil, HFO) to water or cooling water.
+  • Do NOT change water/brine to an oil name.
+  • You MAY correct spelling or normalise within the same family
+    (e.g. "lube oil" → "lubricating oil", "diesel fuel" → "diesel").
+- If you are unsure about a fluid name, use "warn" — do NOT rename it.
+
+VALID INDUSTRIAL FLUID COMBINATIONS (do NOT escalate these):
+- Heavy fuel oil (HFO) + seawater — standard marine heat exchangers
+- Crude oil + cooling water — refinery process cooling
+- Lube oil + cooling water — machinery oil coolers
+- Diesel fuel + cooling water — engine fuel coolers
+- Any petroleum fraction + water/seawater — common industrial service
+
+SCOPE: This engine handles single-phase liquid heat exchangers only.
+Do NOT escalate simply because a fluid combination seems unusual —
+only escalate when you genuinely cannot extract valid process data.
+
 Do NOT include any text outside the JSON object.\
 """
 
