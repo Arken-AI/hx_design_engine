@@ -25,6 +25,8 @@ from hx_engine.app.models.step_result import (
     AICorrection,
     AIDecisionEnum,
     AIReview,
+    AttemptRecord,
+    FailureContext,
 )
 
 if TYPE_CHECKING:
@@ -611,11 +613,13 @@ class AIEngineer:
         step: "BaseStep",
         state: "DesignState",
         result: "StepResult",
+        failure_context: FailureContext | None = None,
     ) -> AIReview:
         """Review a step's outputs.
 
         In stub mode, always returns PROCEED.
         In real mode, calls Claude and parses the response.
+        Pass failure_context on retry calls so the AI sees what was already tried.
         """
         if self._stub_mode:
             return AIReview(
@@ -626,19 +630,20 @@ class AIEngineer:
                 ai_called=False,
             )
 
-        return await self._call_claude(step, state, result)
+        return await self._call_claude(step, state, result, failure_context)
 
     async def _call_claude(
         self,
         step: "BaseStep",
         state: "DesignState",
         result: "StepResult",
+        failure_context: FailureContext | None = None,
     ) -> AIReview:
         """Make the actual Claude API call."""
         assert self._client is not None
 
         # Build context for AI
-        user_prompt = self._build_review_prompt(step, state, result)
+        user_prompt = self._build_review_prompt(step, state, result, failure_context)
 
         # Assemble step-specific system prompt
         system_prompt = _build_system_prompt(step.step_id, step.step_name)
@@ -670,11 +675,43 @@ class AIEngineer:
                 ai_called=True,
             )
 
+    def _build_failure_context_prompt(self, ctx: FailureContext) -> str:
+        """Build the failure context block appended to retry prompts.
+
+        Tells the AI what failed on the previous attempt(s) so it does not
+        suggest the same correction again.
+        """
+        parts = ["### Failure Context (previous attempt failed — do NOT repeat it)"]
+
+        if ctx.layer2_failed and ctx.layer2_rule_description:
+            parts.append(f"Layer 2 validation FAILED: {ctx.layer2_rule_description}")
+
+        if ctx.layer1_exception:
+            parts.append(f"Layer 1 exception: {ctx.layer1_exception}")
+
+        if ctx.previous_attempts:
+            parts.append("")
+            parts.append("### Previous Attempts (do NOT repeat these)")
+            for a in ctx.previous_attempts:
+                approach_safe = a.approach[:200] if a.approach else ""
+                parts.append(
+                    f"Attempt {a.attempt_number}: {approach_safe} — "
+                    f"outcome={a.outcome}, "
+                    f"layer2={a.layer2_rule_failed or 'passed'}"
+                )
+                for c in a.corrections:
+                    parts.append(
+                        f"  Changed {c.field}: {c.old_value!r} → {c.new_value!r}"
+                    )
+
+        return "\n".join(parts)
+
     def _build_review_prompt(
         self,
         step: "BaseStep",
         state: "DesignState",
         result: "StepResult",
+        failure_context: FailureContext | None = None,
     ) -> str:
         """Build the review prompt with step context."""
         # Serialize outputs (handle non-serializable objects)
@@ -746,6 +783,12 @@ class AIEngineer:
         step_context = _build_step_context(step.step_id, state, result)
         if step_context:
             prompt_parts.extend(["", "### Computed Context", step_context])
+
+        # Append failure context on retry calls
+        if failure_context is not None:
+            failure_block = self._build_failure_context_prompt(failure_context)
+            if failure_block:
+                prompt_parts.extend(["", failure_block])
 
         prompt_parts.append(
             "\nReview these outputs and respond with the JSON decision object."

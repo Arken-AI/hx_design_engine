@@ -7,6 +7,7 @@ DesignState    — the state bag passed between pipeline steps
 
 from __future__ import annotations
 
+import copy
 import uuid
 from typing import Any, Optional
 
@@ -292,17 +293,24 @@ class DesignState(BaseModel):
     tema_class: Optional[str] = None
     tema_preference: Optional[str] = None
 
+    # --- correction loop overrides (cleared after each step completes) ---
+    # Populated by run_with_review_loop() before re-executing a step so that
+    # deterministic selection logic (e.g. TEMA type) respects the AI's correction
+    # instead of re-running its own decision tree and overriding it.
+    applied_corrections: dict[str, Any] = Field(default_factory=dict)
+
     # ------------------------------------------------------------------
     # State snapshot / restore helpers (used by correction loop in base.py)
     # ------------------------------------------------------------------
 
     def snapshot_fields(self, field_names: list[str]) -> dict[str, Any]:
-        """Return {field: current_value} for the listed fields.
+        """Return {field: deep-copied value} for the listed fields.
 
-        Called before apply_correction() so the state can be rolled back
-        if the corrected values fail Layer 2 validation.
+        Deep copy is required because some fields are Pydantic sub-models
+        (e.g. geometry: GeometrySpec). A shallow copy would store a reference
+        to the same mutable object, making rollback ineffective.
         """
-        return {f: getattr(self, f, None) for f in field_names}
+        return {f: copy.deepcopy(getattr(self, f, None)) for f in field_names}
 
     def restore(self, snapshot: dict[str, Any]) -> None:
         """Write snapshot values back to DesignState fields.

@@ -750,9 +750,17 @@ class Step04TEMAGeometry(BaseStep):
         all_warnings.extend(alloc_warnings)
 
         # --- TEMA type selection (Piece 5) ---
-        tema_type, reasoning, type_warnings = _select_tema_type(
-            state, shell_side,
-        )
+        # If the correction loop has already applied an AI override for tema_type,
+        # skip the deterministic decision tree — using it would re-select the
+        # original type and undo the correction, causing an infinite loop.
+        if "tema_type" in state.applied_corrections:
+            tema_type = state.applied_corrections["tema_type"]
+            reasoning = f"AI correction override: {tema_type}"
+            type_warnings = []
+        else:
+            tema_type, reasoning, type_warnings = _select_tema_type(
+                state, shell_side,
+            )
         all_warnings.extend(type_warnings)
 
         # --- Initial geometry (Piece 6) ---

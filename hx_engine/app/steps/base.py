@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, runtime_checkable, Protocol
+
+logger = logging.getLogger(__name__)
 
 from hx_engine.app.core import validation_rules
 from hx_engine.app.models.step_result import (
     AIDecisionEnum,
     AIModeEnum,
     AIReview,
+    AttemptRecord,
+    FailureContext,
     StepRecord,
     StepResult,
 )
@@ -78,7 +83,17 @@ class BaseStep(ABC):
         state: "DesignState",
         ai_engineer: "AIEngineer",
     ) -> StepResult:
-        """Execute the step and optionally loop through AI review."""
+        """Execute the step and optionally loop through AI review.
+
+        Diagnostic loop behaviour:
+        - PROCEED / WARN (informational): return immediately
+        - WARN (resolvable, corrections present): attempt fix; upgrade to CORRECT
+          on Layer 2 pass, rollback to informational WARN on fail
+        - CORRECT: apply corrections, re-run, track AttemptRecord; retry with
+          failure context if Layer 2 still fails
+        - ESCALATE / confidence gate: attach attempt trail and return
+        - Exhausted: build escalation with full diagnosis trail
+        """
         start = time.monotonic()
         result = await self.execute(state)
 
@@ -86,66 +101,187 @@ class BaseStep(ABC):
             self._record(state, result, start)
             return result
 
-        corrections = 0
-        while corrections < MAX_CORRECTIONS:
-            review: AIReview = await ai_engineer.review(self, state, result)
-            result.ai_review = review
+        attempts: list[AttemptRecord] = []
 
-            if review.confidence < MIN_AI_CONFIDENCE:
-                review.decision = AIDecisionEnum.ESCALATE
-                self._record(state, result, start)
-                return result
+        try:
+            for attempt_num in range(1, MAX_CORRECTIONS + 1):
 
-            if review.decision == AIDecisionEnum.PROCEED:
-                self._append_review_note(state, review)
-                self._record(state, result, start)
-                return result
+                # Build failure context from the previous failed attempt (None on first pass)
+                failure_ctx: FailureContext | None = None
+                if attempts:
+                    last = attempts[-1]
+                    failure_ctx = FailureContext(
+                        layer2_failed=last.outcome == "failed",
+                        layer2_rule_description=last.layer2_rule_failed,
+                        layer1_exception=last.layer1_exception,
+                        previous_attempts=list(attempts),
+                    )
 
-            if review.decision == AIDecisionEnum.WARN:
-                state.warnings.append(review.reasoning)
-                self._append_review_note(state, review)
-                self._record(state, result, start)
-                return result
+                review: AIReview = await ai_engineer.review(
+                    self, state, result, failure_context=failure_ctx
+                )
 
-            if review.decision == AIDecisionEnum.ESCALATE:
-                self._record(state, result, start)
-                return result
+                # Confidence gate — low confidence overrides any decision
+                if review.confidence < MIN_AI_CONFIDENCE:
+                    review = review.model_copy(update={
+                        "decision": AIDecisionEnum.ESCALATE,
+                        "attempts": attempts,
+                    })
+                    result.ai_review = review
+                    self._record(state, result, start)
+                    return result
 
-            if review.decision == AIDecisionEnum.CORRECT:
-                corrections += 1
-                # Snapshot fields that will be modified so we can roll back
-                # if the corrected values fail Layer 2 validation.
-                affected = [c.field for c in review.corrections if hasattr(state, c.field)]
-                snapshot = state.snapshot_fields(affected)
+                if review.decision == AIDecisionEnum.PROCEED:
+                    review = review.model_copy(update={"attempts": attempts})
+                    result.ai_review = review
+                    self._append_review_note(state, review)
+                    self._record(state, result, start)
+                    return result
 
-                # Apply corrections to both result.outputs AND state so the
-                # re-executed step reads the corrected values.
-                for c in review.corrections:
-                    result.outputs[c.field] = c.new_value
-                    if hasattr(state, c.field):
-                        setattr(state, c.field, c.new_value)
+                if review.decision == AIDecisionEnum.WARN:
+                    if review.corrections:
+                        # Resolvable WARN — attempt the fix before passing through
+                        affected = [c.field for c in review.corrections if hasattr(state, c.field)]
+                        snapshot = state.snapshot_fields(affected)
 
-                # Re-run Layer 1 with corrected state
-                result = await self.execute(state)
-                result.ai_review = review
+                        for c in review.corrections:
+                            state.applied_corrections[c.field] = c.new_value
+                            if hasattr(state, c.field):
+                                setattr(state, c.field, c.new_value)
 
-                # Layer 2 check: roll back if hard rules still fail
-                vr = validation_rules.check(self.step_id, result)
-                if not vr.passed:
+                        try:
+                            new_result = await self.execute(state)
+                            vr = validation_rules.check(self.step_id, new_result)
+                            layer2_passed = vr.passed
+                        except Exception:
+                            logger.warning(
+                                "WARN resolution re-execute failed for step %s (attempt %d)",
+                                self.step_name, attempt_num, exc_info=True,
+                            )
+                            new_result = result
+                            layer2_passed = False
+
+                        if layer2_passed:
+                            result = new_result
+                            state.warnings.append(f"[auto-resolved] {review.reasoning}")
+                            resolved = review.model_copy(update={
+                                "decision": AIDecisionEnum.CORRECT,
+                                "reasoning": f"[auto-resolved] {review.reasoning}",
+                                "attempts": attempts,
+                            })
+                            result.ai_review = resolved
+                            self._append_review_note(state, resolved)
+                            self._record(state, result, start)
+                            return result
+
+                        # Fix failed — rollback and fall through to informational WARN
+                        state.restore(snapshot)
+                        for c in review.corrections:
+                            state.applied_corrections.pop(c.field, None)
+
+                    # Informational WARN (or rollback) — pass through, pipeline continues
+                    review = review.model_copy(update={"attempts": attempts})
+                    result.ai_review = review
+                    state.warnings.append(review.reasoning)
+                    self._append_review_note(state, review)
+                    self._record(state, result, start)
+                    return result
+
+                if review.decision == AIDecisionEnum.ESCALATE:
+                    review = review.model_copy(update={"attempts": attempts})
+                    result.ai_review = review
+                    self._record(state, result, start)
+                    return result
+
+                if review.decision == AIDecisionEnum.CORRECT:
+                    affected = [c.field for c in review.corrections if hasattr(state, c.field)]
+                    snapshot = state.snapshot_fields(affected)
+
+                    # Write corrections — applied_corrections lets deterministic
+                    # step logic (e.g. TEMA selection) respect the AI's choice
+                    # instead of re-running its decision tree and overriding it.
+                    for c in review.corrections:
+                        # result.outputs is intentionally NOT rolled back on Layer 2 fail:
+                        # if the loop retries, result = new_result on the next iteration
+                        # replaces this object entirely, so the mutation is irrelevant.
+                        result.outputs[c.field] = c.new_value
+                        state.applied_corrections[c.field] = c.new_value
+                        if hasattr(state, c.field):
+                            setattr(state, c.field, c.new_value)
+
+                    layer1_exc: str | None = None
+                    try:
+                        new_result = await self.execute(state)
+                        vr = validation_rules.check(self.step_id, new_result)
+                        layer2_passed = vr.passed
+                        rule_failed = vr.errors[0] if vr.errors else None
+                    except Exception as exc:
+                        logger.warning(
+                            "CORRECT re-execute failed for step %s (attempt %d): %s",
+                            self.step_name, attempt_num, exc, exc_info=True,
+                        )
+                        new_result = result
+                        layer2_passed = False
+                        rule_failed = None
+                        layer1_exc = str(exc)
+
+                    approach = ", ".join(
+                        f"{c.field}: {c.old_value!r}→{c.new_value!r}"
+                        for c in review.corrections
+                    )
+                    record = AttemptRecord(
+                        attempt_number=attempt_num,
+                        diagnosis=review.reasoning,
+                        approach=approach,
+                        corrections=list(review.corrections),
+                        layer2_outcome="pass" if layer2_passed else "fail",
+                        layer2_rule_failed=rule_failed,
+                        layer1_exception=layer1_exc,
+                        outcome="success" if layer2_passed else "failed",
+                        confidence=review.confidence,
+                    )
+                    attempts.append(record)
+
+                    if layer2_passed:
+                        result = new_result
+                        review = review.model_copy(update={"attempts": attempts})
+                        result.ai_review = review
+                        self._append_review_note(state, review)
+                        self._record(state, result, start)
+                        return result
+
+                    # Layer 2 still failing — rollback and loop with failure context
                     state.restore(snapshot)
-                    result.validation_passed = False
-                    result.validation_errors = vr.errors
-                continue
+                    for c in review.corrections:
+                        state.applied_corrections.pop(c.field, None)
+                    result = new_result
 
-        # Max corrections exhausted — escalate
-        result.ai_review = AIReview(
-            decision=AIDecisionEnum.ESCALATE,
-            confidence=0.0,
-            reasoning=f"Exhausted {MAX_CORRECTIONS} correction attempts",
-            ai_called=True,
-        )
-        self._record(state, result, start)
-        return result
+            # Exhausted all attempts — escalate with full diagnosis trail
+            approach_summary = "; ".join(
+                f"#{a.attempt_number} {a.approach} → {a.outcome}" for a in attempts
+            )
+            exhaustion = AIReview(
+                decision=AIDecisionEnum.ESCALATE,
+                confidence=0.0,
+                reasoning=(
+                    f"Exhausted {MAX_CORRECTIONS} diagnostic attempts. "
+                    f"Trail: {approach_summary}"
+                ),
+                recommendation=(
+                    "All automatic correction strategies have been exhausted. "
+                    "Please review the attempt trail and correct the inputs manually."
+                ),
+                options=["Review inputs and correct manually", "Accept result with warnings"],
+                attempts=attempts,
+                ai_called=True,
+            )
+            result.ai_review = exhaustion
+            self._record(state, result, start)
+            return result
+
+        finally:
+            # Always clear correction overrides so they don't bleed into the next step
+            state.applied_corrections.clear()
 
     # ------------------------------------------------------------------
     # Audit record
