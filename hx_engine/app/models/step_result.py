@@ -116,4 +116,6 @@ class StepRecord(BaseModel):
     ai_called: bool = False
     validation_passed: bool = True
     validation_errors: list[str] = Field(default_factory=list)
-    outputs_snapshot: dict[str, Any] = Field(default_factory=dict)
+    outputs: dict[str, Any] = Field(default_factory=dict, alias="outputs_snapshot")
+
+    model_config = {"populate_by_name": True}

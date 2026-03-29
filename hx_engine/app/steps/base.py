@@ -25,6 +25,28 @@ if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
 
 
+def _serialize_outputs(outputs: dict) -> dict:
+    """Convert any Pydantic BaseModel values in outputs to plain dicts.
+
+    Ensures FluidProperties, GeometrySpec, etc. are JSON-serializable
+    when stored in StepRecord.outputs or passed to SSE events.
+    """
+    from pydantic import BaseModel as _BM
+
+    serialized: dict = {}
+    for key, val in outputs.items():
+        if isinstance(val, _BM):
+            serialized[key] = val.model_dump()
+        elif isinstance(val, list):
+            serialized[key] = [
+                item.model_dump() if isinstance(item, _BM) else item
+                for item in val
+            ]
+        else:
+            serialized[key] = val
+    return serialized
+
+
 # ---------------------------------------------------------------------------
 # Protocol — runtime-checkable structural typing
 # ---------------------------------------------------------------------------
@@ -328,7 +350,7 @@ class BaseStep(ABC):
             ),
             validation_passed=result.validation_passed,
             validation_errors=list(result.validation_errors),
-            outputs_snapshot=dict(result.outputs),
+            outputs=_serialize_outputs(result.outputs),
         )
         state.step_records.append(rec)
 

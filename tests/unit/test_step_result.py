@@ -67,7 +67,7 @@ class TestStepRecord:
             ai_decision=AIDecisionEnum.PROCEED,
             ai_confidence=0.9,
             ai_called=True,
-            outputs_snapshot={"T_hot_in_C": 150.0},
+            outputs={"T_hot_in_C": 150.0},
         )
         data = rec.model_dump()
         rec2 = StepRecord(**data)

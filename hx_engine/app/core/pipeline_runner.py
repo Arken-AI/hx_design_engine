@@ -27,6 +27,7 @@ from hx_engine.app.models.sse_events import (
     StepWarningEvent,
 )
 from hx_engine.app.models.step_result import AIDecisionEnum, StepResult
+from hx_engine.app.steps.base import _serialize_outputs
 from hx_engine.app.steps.step_01_requirements import Step01Requirements
 from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
 from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
@@ -283,6 +284,7 @@ class PipelineRunner:
         """Emit the right SSE event based on AI decision."""
         review = result.ai_review
         decision = review.decision if review else AIDecisionEnum.PROCEED
+        safe_outputs = _serialize_outputs(result.outputs)
 
         if decision == AIDecisionEnum.PROCEED:
             event = StepApprovedEvent(
@@ -293,7 +295,7 @@ class PipelineRunner:
                 reasoning=review.reasoning if review else "",
                 user_summary=f"Step {step.step_id} ({step.step_name}) completed.",
                 duration_ms=duration_ms,
-                outputs=result.outputs,
+                outputs=safe_outputs,
             )
 
         elif decision == AIDecisionEnum.CORRECT:
@@ -309,7 +311,7 @@ class PipelineRunner:
                     for c in (review.corrections if review else [])
                 },
                 duration_ms=duration_ms,
-                outputs=result.outputs,
+                outputs=safe_outputs,
             )
 
         elif decision == AIDecisionEnum.WARN:
@@ -330,7 +332,7 @@ class PipelineRunner:
                 warning_message=review.reasoning if review else "",
                 severity=severity,
                 duration_ms=duration_ms,
-                outputs=result.outputs,
+                outputs=safe_outputs,
             )
 
         elif decision == AIDecisionEnum.ESCALATE:
@@ -344,7 +346,7 @@ class PipelineRunner:
         else:
             return
 
-        await self.sse_manager.emit(session_id, event.model_dump())
+        await self.sse_manager.emit(session_id, event.model_dump(mode="json"))
 
     async def _emit_step_error(
         self,
