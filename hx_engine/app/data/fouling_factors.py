@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 # For temperature-dependent fluids, entries are (T_min_C, T_max_C, R_f).
 
 _FOULING_SIMPLE: dict[str, float] = {
-    "water":               0.000352,
+    "water":               0.000176,
     "cooling tower water": 0.000352,
-    "cooling water":       0.000352,
+    "cooling water":       0.000176,
     "river water":         0.000528,
-    "city water":          0.000352,
+    "city water":          0.000176,
     "boiler feedwater":    0.000088,
     "treated water":       0.000088,
     "distilled water":     0.000088,
