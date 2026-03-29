@@ -34,6 +34,10 @@ class FluidProperties(BaseModel):
     k_W_mK: Optional[float] = None
     Pr: Optional[float] = None
 
+    # --- Property provenance (populated by thermo adapter) ---
+    property_source: Optional[str] = None      # e.g. "iapws", "coolprop", "thermo", "petroleum-named", "petroleum-generic", "specialty"
+    property_confidence: Optional[float] = None  # 0.0–1.0; None = not assessed
+
     @field_validator("density_kg_m3")
     @classmethod
     def _check_density(cls, v: Optional[float]) -> Optional[float]:

@@ -13,7 +13,7 @@ Conductivity : Cragoe (1929) — API TDB §12A3.2
 Public API
 ----------
 get_petroleum_properties(char, temperature_C)  → FluidProperties
-resolve_petroleum_name(name)                   → PetroleumCharacterization | None
+resolve_petroleum_name(name)                   → (PetroleumCharacterization, source) | None
 """
 
 from __future__ import annotations
@@ -213,13 +213,15 @@ _STRIP_SUFFIXES = ("crude oil", "crude", "oil")
 
 def resolve_petroleum_name(
     name: str,
-) -> Optional[PetroleumCharacterization]:
+) -> Optional[tuple[PetroleumCharacterization, str]]:
     """Resolve a user-supplied fluid name to petroleum characterization data.
 
     Tries progressively stripped forms of the name against the crude
     database first, then the fraction database.
 
-    Returns ``None`` if no match is found.
+    Returns ``(characterization, source)`` where source is
+    ``"petroleum-named"`` for specific crudes or ``"petroleum-generic"``
+    for fraction types.  Returns ``None`` if no match is found.
     """
     normalised = name.strip().lower()
 
@@ -237,11 +239,11 @@ def resolve_petroleum_name(
 
     for key in candidates:
         if key in CRUDE_DATABASE:
-            return CRUDE_DATABASE[key]
+            return CRUDE_DATABASE[key], "petroleum-named"
 
     for key in candidates:
         if key in FRACTION_DATABASE:
-            return FRACTION_DATABASE[key]
+            return FRACTION_DATABASE[key], "petroleum-generic"
 
     return None
 
@@ -261,11 +263,16 @@ _PR_MIN, _PR_MAX = 0.5, 1000.0
 def get_petroleum_properties(
     char: PetroleumCharacterization,
     temperature_C: float,
+    source: str = "petroleum-generic",
 ) -> FluidProperties:
     """Compute all properties from correlations and return FluidProperties.
 
     Pre-validates each property against FluidProperties bounds and raises
     a descriptive ``CalculationError`` if any fall outside the range.
+
+    *source* is ``"petroleum-named"`` for specific crudes with published
+    API gravities (higher confidence) or ``"petroleum-generic"`` for
+    generic fraction types.
     """
     api = char.api_gravity
 
@@ -287,12 +294,18 @@ def get_petroleum_properties(
     _validate_range("Prandtl", Pr, _PR_MIN, _PR_MAX, "–",
                     api, temperature_C)
 
+    # Named crudes have published assay data → higher confidence.
+    # Generic fractions use assumed API gravity → lower confidence.
+    confidence = 0.85 if source == "petroleum-named" else 0.65
+
     return FluidProperties(
         density_kg_m3=rho,
         viscosity_Pa_s=mu,
         cp_J_kgK=cp,
         k_W_mK=k,
         Pr=Pr,
+        property_source=source,
+        property_confidence=confidence,
     )
 
 

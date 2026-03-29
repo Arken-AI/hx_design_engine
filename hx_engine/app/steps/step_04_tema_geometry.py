@@ -405,6 +405,72 @@ def _select_tema_type(
 
 
 # ===================================================================
+# Piece 5b — TEMA Class (R/C/B) Determination
+# ===================================================================
+
+# Fluid keywords that indicate refinery service → TEMA Class R
+_REFINERY_FLUIDS = frozenset({
+    "crude", "crude oil", "naphtha", "kerosene", "diesel", "gas oil",
+    "vacuum gas oil", "fuel oil", "heavy fuel oil", "bunker fuel",
+    "residual fuel", "heavy hydrocarbon", "heavy hydrocarbons",
+    "gasoline", "hfo", "lube oil", "lubricating oil", "heating oil",
+    "light gas oil", "heavy gas oil", "light naphtha", "heavy naphtha",
+})
+
+# Fluid keywords that indicate chemical service → TEMA Class C
+_CHEMICAL_FLUIDS = frozenset({
+    "acid", "caustic", "ammonia", "methanol", "ethanol", "toluene",
+    "benzene", "xylene", "acetone", "formaldehyde", "glycol",
+    "ethylene glycol", "propylene glycol", "molten salt",
+})
+
+
+def _determine_tema_class(
+    state: "DesignState",
+) -> tuple[str, str]:
+    """Determine TEMA mechanical class (R, C, or B).
+
+    Returns (tema_class, reasoning).
+
+    Rules (TEMA 10th Ed., Section 1):
+      R — Petroleum & related processing (refinery service).
+          Strictest: thicker tubes, tighter tolerances, higher nozzle ratings.
+      C — Chemical processing (moderate corrosion / toxicity).
+      B — General service (HVAC, comfort cooling, benign fluids).
+    """
+    hot_name = (state.hot_fluid_name or "").strip().lower()
+    cold_name = (state.cold_fluid_name or "").strip().lower()
+    all_names = {hot_name, cold_name}
+
+    # Check if any fluid is a refinery hydrocarbon
+    is_refinery = any(
+        name in _REFINERY_FLUIDS
+        or any(rf in name for rf in ("crude", "naphtha", "gas oil", "fuel oil"))
+        for name in all_names
+        if name
+    )
+
+    # Check if any fluid is a chemical-service fluid
+    is_chemical = any(
+        name in _CHEMICAL_FLUIDS
+        or any(cf in name for cf in ("acid", "caustic", "glycol", "ammonia"))
+        for name in all_names
+        if name
+    )
+
+    # Refinery takes priority (stricter requirements)
+    if is_refinery:
+        fluids_str = ", ".join(n for n in all_names if n)
+        return "R", f"Refinery service ({fluids_str}) → TEMA Class R (strictest mechanical requirements)"
+
+    if is_chemical:
+        fluids_str = ", ".join(n for n in all_names if n)
+        return "C", f"Chemical service ({fluids_str}) → TEMA Class C"
+
+    return "B", "General service (benign fluids) → TEMA Class B"
+
+
+# ===================================================================
 # Piece 6 — Initial Geometry Heuristics
 # ===================================================================
 
@@ -831,6 +897,10 @@ class Step04TEMAGeometry(BaseStep):
             else:
                 fouling_metadata[side_label] = table_info
 
+        # --- TEMA Class (R/C/B) determination ---
+        tema_class, class_reasoning = _determine_tema_class(state)
+        all_warnings.append(f"TEMA Class: {tema_class} — {class_reasoning}")
+
         # --- Escalation hints (built after fouling_metadata is resolved) ---
         escalation_hints = _build_escalation_hints(
             state, tema_type, shell_side, reasoning, fouling_metadata,
@@ -842,6 +912,8 @@ class Step04TEMAGeometry(BaseStep):
         # and are read back on the next execute() call, breaking the loop).
         outputs = {
             "tema_type": tema_type,
+            "tema_class": tema_class,
+            "tema_class_reasoning": class_reasoning,
             "geometry": geometry,
             "shell_side_fluid": shell_side,
             "tema_reasoning": reasoning,

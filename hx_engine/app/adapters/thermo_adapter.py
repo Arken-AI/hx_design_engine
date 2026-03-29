@@ -120,11 +120,12 @@ def _thermal_oil_props(T: float) -> FluidProperties:
     return FluidProperties(
         density_kg_m3=rho, viscosity_Pa_s=mu, cp_J_kgK=cp,
         k_W_mK=k, Pr=mu * cp / k,
+        property_source="specialty", property_confidence=0.80,
     )
 
 
 def _vegetable_oil_props(T: float) -> FluidProperties:
-    """Generic vegetable oil (soybean-representative)."""
+    """Generic vegetable oil."""
     rho = 930.0 - 0.60 * T
     cp = 1900.0 + 3.0 * T
     mu = 0.118 * math.exp(-0.027 * T)
@@ -132,11 +133,12 @@ def _vegetable_oil_props(T: float) -> FluidProperties:
     return FluidProperties(
         density_kg_m3=rho, viscosity_Pa_s=mu, cp_J_kgK=cp,
         k_W_mK=k, Pr=mu * cp / k,
+        property_source="specialty", property_confidence=0.75,
     )
 
 
 def _ethylene_glycol_props(T: float) -> FluidProperties:
-    """Pure ethylene glycol."""
+    """Pure ethylene glycol (not mixtures)."""
     rho = 1130.0 - 0.65 * T
     cp = 2350.0 + 2.0 * T
     mu = 0.032 * math.exp(-0.028 * T)
@@ -144,6 +146,7 @@ def _ethylene_glycol_props(T: float) -> FluidProperties:
     return FluidProperties(
         density_kg_m3=rho, viscosity_Pa_s=mu, cp_J_kgK=cp,
         k_W_mK=k, Pr=mu * cp / k,
+        property_source="specialty", property_confidence=0.80,
     )
 
 
@@ -156,6 +159,7 @@ def _propylene_glycol_props(T: float) -> FluidProperties:
     return FluidProperties(
         density_kg_m3=rho, viscosity_Pa_s=mu, cp_J_kgK=cp,
         k_W_mK=k, Pr=mu * cp / k,
+        property_source="specialty", property_confidence=0.80,
     )
 
 
@@ -168,6 +172,7 @@ def _molten_salt_props(T: float) -> FluidProperties:
     return FluidProperties(
         density_kg_m3=rho, viscosity_Pa_s=mu, cp_J_kgK=cp,
         k_W_mK=k, Pr=mu * cp / k,
+        property_source="specialty", property_confidence=0.85,
     )
 
 
@@ -212,6 +217,8 @@ def _get_props_iapws(
         cp_J_kgK=w.cp * 1000.0,
         k_W_mK=w.k,
         Pr=w.Prandt,
+        property_source="iapws",
+        property_confidence=1.0,
     )
 
 
@@ -252,6 +259,8 @@ def _get_props_coolprop(
         cp_J_kgK=cp,
         k_W_mK=k,
         Pr=Pr,
+        property_source="coolprop",
+        property_confidence=0.95,
     )
 
 
@@ -311,6 +320,8 @@ def _get_props_thermo(
         cp_J_kgK=cp,
         k_W_mK=k,
         Pr=Pr,
+        property_source="thermo",
+        property_confidence=0.90,
     )
 
 
@@ -376,9 +387,10 @@ def get_fluid_properties(
             pass  # fall through to petroleum / specialty
 
     # 4. Petroleum correlations — crude oils & fractions
-    char = resolve_petroleum_name(normalised)
-    if char is not None:
-        return get_petroleum_properties(char, temperature_C)
+    resolved = resolve_petroleum_name(normalised)
+    if resolved is not None:
+        char, petro_source = resolved
+        return get_petroleum_properties(char, temperature_C, source=petro_source)
 
     # 5. Specialty fluids — T-dependent fits
     specialty_fn = _SPECIALTY_FLUIDS.get(normalised)

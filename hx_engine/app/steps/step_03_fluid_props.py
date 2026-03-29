@@ -162,6 +162,27 @@ class Step03FluidProperties(BaseStep):
         self._hot_props = hot_props
         self._cold_props = cold_props
 
+        # --- C2b: property confidence warnings ---
+        for label, props, fluid_name in [
+            ("Hot", hot_props, state.hot_fluid_name),
+            ("Cold", cold_props, state.cold_fluid_name),
+        ]:
+            if props.property_confidence is not None and props.property_confidence < 0.80:
+                warnings.append(
+                    f"{label} fluid '{fluid_name}': property confidence "
+                    f"{props.property_confidence:.0%} (source: {props.property_source}). "
+                    f"Viscosity is the most sensitive parameter — consider "
+                    f"providing measured values for critical designs."
+                )
+            elif props.property_source and "petroleum" in (props.property_source or ""):
+                # Even named crudes get a note — correlations, not measured data
+                warnings.append(
+                    f"{label} fluid '{fluid_name}': properties from "
+                    f"{props.property_source} correlations "
+                    f"(confidence: {props.property_confidence:.0%}). "
+                    f"Viscosity uncertainty is ±30–50% for petroleum correlations."
+                )
+
         # --- C3: water near phase change ---
         for name, T_mean, P in [
             (state.hot_fluid_name, T_mean_hot, state.P_hot_Pa),

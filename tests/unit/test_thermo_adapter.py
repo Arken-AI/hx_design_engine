@@ -214,9 +214,11 @@ class TestPetroleumNameResolution:
         "  Maya  ",
     ])
     def test_crude_name_variations(self, name: str):
-        char = resolve_petroleum_name(name.strip().lower())
-        assert char is not None
+        result = resolve_petroleum_name(name.strip().lower())
+        assert result is not None
+        char, source = result
         assert char.api_gravity == pytest.approx(22.2)
+        assert source == "petroleum-named"
 
     def test_ural_crude(self):
         props = get_fluid_properties("Ural crude oil", 100.0)
@@ -238,9 +240,11 @@ class TestPetroleumNameResolution:
 
     def test_generic_crude_oil_resolves(self):
         """Plain 'crude oil' resolves to generic medium (API ≈ 33)."""
-        char = resolve_petroleum_name("crude oil")
-        assert char is not None
+        result = resolve_petroleum_name("crude oil")
+        assert result is not None
+        char, source = result
         assert 30 <= char.api_gravity <= 36
+        assert source == "petroleum-generic"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
