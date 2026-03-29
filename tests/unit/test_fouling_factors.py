@@ -17,9 +17,9 @@ from hx_engine.app.data.fouling_factors import (
 
 class TestFoulingFactors:
     def test_water_fouling_factor(self):
-        """Cooling water → R_f ≈ 0.000352 m²·K/W."""
+        """Cooling water (treated) → R_f ≈ 0.000176 m²·K/W."""
         rf = get_fouling_factor("cooling water")
-        assert abs(rf - 0.000352) < 1e-6
+        assert abs(rf - 0.000176) < 1e-6
 
     def test_crude_oil_120C(self):
         """Crude at 100°C → R_f ≈ 0.000352."""
