@@ -16,6 +16,7 @@ from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
+from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
@@ -122,6 +123,13 @@ class PipelineRunner:
                     return state
 
                 duration_ms = int((time.monotonic() - start_ms) * 1000)
+
+                # --- Layer 2: hard validation rules ---
+                vr = check_validation_rules(step.step_id, result)
+                result.validation_passed = vr.passed
+                result.validation_errors = vr.errors
+                if not vr.passed:
+                    raise StepHardFailure(step.step_id, vr.errors)
 
                 # --- log step result ---
                 self._log_step_result(step, result, duration_ms)

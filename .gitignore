@@ -1,2 +1,7 @@
 *.pyc
 *.env
+__pycache__/
+.venv/
+.gstack/
+*.egg-info/
+storage/

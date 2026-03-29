@@ -8,7 +8,7 @@ POST /api/v1/hx/design/{id}/respond  → user response to ESCALATED step
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
@@ -53,8 +53,8 @@ class DesignStatusResponse(BaseModel):
 class UserResponse(BaseModel):
     """Payload for POST /design/{session_id}/respond — user answers an ESCALATE."""
 
-    type: str  # "accept" | "override" | "skip"
-    values: dict | None = None
+    type: Literal["accept", "override", "skip"]
+    values: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

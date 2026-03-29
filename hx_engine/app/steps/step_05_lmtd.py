@@ -166,13 +166,22 @@ class Step05LMTD(BaseStep):
         # 6. Compute F-factor
         F = compute_f_factor(R, P, n_shell_passes=shell_passes)
 
+        # 6a. Detect domain violation: F=0.0 means Bowman formula
+        # hit a mathematical singularity (log of ≤0, division by 0).
+        # This is NOT a real F value — it's an infeasible configuration.
+        F_1shell_domain_violation = (F == 0.0)
+
         # 7. Auto-correction: try 2 shell passes if F is poor
         auto_corrected = False
-        if F < 0.80 and shell_passes == 1:
+        if (F < 0.80 or F_1shell_domain_violation) and shell_passes == 1:
             F_2shell = compute_f_factor(R, P, n_shell_passes=2)
-            if F_2shell >= 0.75:  # Improvement worth taking
+            F_2shell_domain_violation = (F_2shell == 0.0)
+
+            if not F_2shell_domain_violation and F_2shell >= 0.75:
+                # Improvement worth taking
                 warnings.append(
-                    f"F-factor with 1 shell pass = {F:.4f} (< 0.80). "
+                    f"F-factor with 1 shell pass = {F:.4f} "
+                    f"{'(domain violation)' if F_1shell_domain_violation else '(< 0.80)'}. "
                     f"Increased to 2 shell passes → F = {F_2shell:.4f}."
                 )
                 F = F_2shell
@@ -181,10 +190,29 @@ class Step05LMTD(BaseStep):
                 # Update geometry on state directly (Option A — step handles it)
                 state.geometry.shell_passes = 2
             else:
+                detail_1 = (
+                    f"{F:.4f} (domain violation)"
+                    if F_1shell_domain_violation
+                    else f"{F:.4f}"
+                )
+                detail_2 = (
+                    f"{F_2shell:.4f} (domain violation)"
+                    if F_2shell_domain_violation
+                    else f"{F_2shell:.4f}"
+                )
                 warnings.append(
-                    f"F-factor = {F:.4f} with 1 shell pass, "
-                    f"{F_2shell:.4f} with 2 shell passes. "
-                    f"Both below 0.80 — design may be infeasible."
+                    f"F-factor = {detail_1} with 1 shell pass, "
+                    f"{detail_2} with 2 shell passes. "
+                    f"Both below 0.75 — design is thermally infeasible."
+                )
+                # Raise CalculationError for domain violations where
+                # no auto-correction is possible
+                raise CalculationError(
+                    5,
+                    f"F-factor infeasible: 1-shell={detail_1}, "
+                    f"2-shell={detail_2}. R={R:.4f}, P={P:.4f}. "
+                    f"Consider reducing temperature cross, changing "
+                    f"TEMA type, or splitting into multiple units.",
                 )
 
         # 8. Highly asymmetric warning

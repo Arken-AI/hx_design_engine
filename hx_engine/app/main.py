@@ -75,3 +75,13 @@ app.include_router(stream.router, prefix="/api/v1/hx")
 @app.get("/health", tags=["system"])
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "hx-engine", "version": "0.1.0"}
+
+
+@app.get("/", tags=["system"])
+async def root() -> dict[str, str]:
+    return {
+        "service": "hx-engine",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
