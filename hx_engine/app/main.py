@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from hx_engine.app import dependencies
 from hx_engine.app.config import settings
-from hx_engine.app.routers import design, stream
+from hx_engine.app.routers import design, requirements, stream
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ app.add_middleware(
 )
 
 # Register routers — plan requires /api/v1/hx prefix
+app.include_router(requirements.router, prefix="/api/v1/hx")
 app.include_router(design.router, prefix="/api/v1/hx")
 app.include_router(stream.router, prefix="/api/v1/hx")
 

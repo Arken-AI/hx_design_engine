@@ -1,122 +1,119 @@
-"""Tests for Piece 10: Step 1 full execute() integration."""
+"""Integration tests for Step01Requirements — hydration-only step.
 
-import copy
-import json
+Step 1 no longer parses NL or validates physics. It simply reads values
+from DesignState (which are pre-validated by POST /requirements) and
+emits them as outputs for the pipeline audit trail.
+"""
+
+from __future__ import annotations
 
 import pytest
 
 from hx_engine.app.models.design_state import DesignState
+from hx_engine.app.models.step_result import AIModeEnum
 from hx_engine.app.steps.base import StepProtocol
 from hx_engine.app.steps.step_01_requirements import Step01Requirements
 
 
+def _state(**kwargs) -> DesignState:
+    defaults = {
+        "hot_fluid_name": "crude oil",
+        "cold_fluid_name": "water",
+        "T_hot_in_C": 150.0,
+        "T_hot_out_C": 80.0,
+        "T_cold_in_C": 25.0,
+        "T_cold_out_C": 50.0,
+        "m_dot_hot_kg_s": 10.0,
+        "P_hot_Pa": 500_000.0,
+        "P_cold_Pa": 300_000.0,
+    }
+    defaults.update(kwargs)
+    return DesignState(**defaults)
+
+
 class TestStep01Integration:
-
-    async def test_execute_structured_json(self):
-        data = json.dumps({
-            "hot_fluid": "crude oil",
-            "cold_fluid": "cooling water",
-            "T_hot_in": 150.0,
-            "T_hot_out": 90.0,
-            "T_cold_in": 30.0,
-            "m_dot_hot": 50.0,
-        })
-        state = DesignState(raw_request=data)
-        step = Step01Requirements()
-        result = await step.execute(state)
-        assert result.validation_passed
-        assert result.outputs["T_hot_in_C"] == 150.0
-
-    async def test_execute_natural_language(self):
-        state = DesignState(
-            raw_request=(
-                "Design a heat exchanger for cooling 50 kg/s of crude oil "
-                "from 150°C to 90°C using cooling water at 30°C"
-            )
-        )
-        step = Step01Requirements()
-        result = await step.execute(state)
-        assert result.validation_passed
-        assert result.outputs["m_dot_hot_kg_s"] == pytest.approx(50.0)
-
-    async def test_execute_invalid_json_falls_to_nl(self):
-        state = DesignState(
-            raw_request=(
-                "{broken json} cooling 50 kg/s of crude oil "
-                "from 150°C to 90°C using cooling water at 30°C"
-            )
-        )
-        step = Step01Requirements()
-        result = await step.execute(state)
-        # Falls through to NL parser — may or may not succeed,
-        # but should NOT crash
-        assert result is not None
-
-    async def test_execute_3_temps_marks_missing(self):
-        data = json.dumps({
-            "hot_fluid": "crude oil",
-            "cold_fluid": "cooling water",
-            "T_hot_in": 150.0,
-            "T_hot_out": 90.0,
-            "T_cold_in": 30.0,
-            "m_dot_hot": 50.0,
-        })
-        state = DesignState(raw_request=data)
-        step = Step01Requirements()
-        result = await step.execute(state)
-        assert result.outputs["missing_T_cold_out"] is True
-
-    async def test_execute_output_fields_match_design_state(self):
-        data = json.dumps({
-            "hot_fluid": "crude oil",
-            "cold_fluid": "cooling water",
-            "T_hot_in": 150.0,
-            "T_hot_out": 90.0,
-            "T_cold_in": 30.0,
-            "m_dot_hot": 50.0,
-        })
-        state = DesignState(raw_request=data)
-        step = Step01Requirements()
-        result = await step.execute(state)
-        # All output keys that map to DesignState fields
-        state_fields = set(DesignState.model_fields.keys())
-        for key in result.outputs:
-            if key.startswith("missing_"):
-                continue
-            assert key in state_fields, f"Output key '{key}' not in DesignState"
-
-    async def test_execute_does_not_mutate_input_state(self):
-        data = json.dumps({
-            "hot_fluid": "crude oil",
-            "cold_fluid": "cooling water",
-            "T_hot_in": 150.0,
-            "T_hot_out": 90.0,
-            "T_cold_in": 30.0,
-            "m_dot_hot": 50.0,
-        })
-        state = DesignState(raw_request=data)
-        state_before = state.model_dump()
-        step = Step01Requirements()
-        await step.execute(state)
-        state_after = state.model_dump()
-        assert state_before == state_after
 
     def test_step_01_is_step_protocol(self):
         step = Step01Requirements()
         assert isinstance(step, StepProtocol)
 
-    async def test_execute_benchmark_request(self):
-        state = DesignState(
-            raw_request=(
-                "Design a heat exchanger for cooling 50 kg/s of crude oil "
-                "from 150°C to 90°C using cooling water at 30°C"
-            )
-        )
+    def test_step_01_ai_mode_is_none(self):
+        step = Step01Requirements()
+        assert step.ai_mode == AIModeEnum.NONE
+
+    @pytest.mark.asyncio
+    async def test_execute_emits_all_required_fields(self):
+        state = _state()
         step = Step01Requirements()
         result = await step.execute(state)
-        assert result.validation_passed
-        o = result.outputs
-        assert o["hot_fluid_name"] == "crude oil"
-        assert o["cold_fluid_name"] == "cooling water"
-        assert o["T_hot_in_C"] == pytest.approx(150.0)
-        assert o["m_dot_hot_kg_s"] == pytest.approx(50.0)
+
+        assert result.step_id == 1
+        assert result.step_name == "Process Requirements"
+        assert result.validation_passed is True
+        assert result.outputs["hot_fluid_name"] == "crude oil"
+        assert result.outputs["cold_fluid_name"] == "water"
+        assert result.outputs["T_hot_in_C"] == 150.0
+        assert result.outputs["T_hot_out_C"] == 80.0
+        assert result.outputs["T_cold_in_C"] == 25.0
+        assert result.outputs["T_cold_out_C"] == 50.0
+        assert result.outputs["m_dot_hot_kg_s"] == 10.0
+
+    @pytest.mark.asyncio
+    async def test_pressures_passed_through_correctly(self):
+        """Step 1 must NOT overwrite explicit pressures from DesignState."""
+        state = _state(P_hot_Pa=500_000.0, P_cold_Pa=300_000.0)
+        step = Step01Requirements()
+        result = await step.execute(state)
+
+        assert result.outputs["P_hot_Pa"] == 500_000.0
+        assert result.outputs["P_cold_Pa"] == 300_000.0
+
+    @pytest.mark.asyncio
+    async def test_missing_optional_temps_flagged(self):
+        state = _state(T_hot_out_C=None, m_dot_cold_kg_s=None, T_cold_out_C=None)
+        step = Step01Requirements()
+        result = await step.execute(state)
+
+        assert result.outputs["missing_T_cold_out"] is True
+        assert result.outputs["missing_m_dot_cold"] is True
+
+    @pytest.mark.asyncio
+    async def test_all_temps_present_flags_false(self):
+        state = _state(T_cold_out_C=50.0, m_dot_cold_kg_s=8.0)
+        step = Step01Requirements()
+        result = await step.execute(state)
+
+        assert result.outputs["missing_T_cold_out"] is False
+        assert result.outputs["missing_m_dot_cold"] is False
+
+    @pytest.mark.asyncio
+    async def test_tema_preference_passed_through(self):
+        state = _state(tema_preference="AES")
+        step = Step01Requirements()
+        result = await step.execute(state)
+
+        assert result.outputs["tema_preference"] == "AES"
+
+    @pytest.mark.asyncio
+    async def test_no_mutations_to_state(self):
+        """Step 1 must be read-only — it never modifies DesignState."""
+        state = _state()
+        state_before = state.model_dump()
+
+        step = Step01Requirements()
+        await step.execute(state)
+
+        assert state.model_dump() == state_before
+
+    @pytest.mark.asyncio
+    async def test_output_fields_present_in_design_state(self):
+        """All non-missing_ outputs must correspond to DesignState fields."""
+        state = _state()
+        step = Step01Requirements()
+        result = await step.execute(state)
+
+        state_fields = set(DesignState.model_fields.keys())
+        for key in result.outputs:
+            if key.startswith("missing_"):
+                continue
+            assert key in state_fields, f"Output key '{key}' not in DesignState"

@@ -11,9 +11,9 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
 
 from hx_engine.app.core.pipeline_runner import PipelineRunner
+from hx_engine.app.core.requirements_validator import validate_requirements, verify_token
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.dependencies import (
@@ -22,6 +22,8 @@ from hx_engine.app.dependencies import (
     get_sse_manager,
 )
 from hx_engine.app.models.design_state import DesignState
+from hx_engine.app.models.requirements import DesignRequest
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["design"])
@@ -30,32 +32,6 @@ router = APIRouter(tags=["design"])
 # ---------------------------------------------------------------------------
 # Request / Response schemas
 # ---------------------------------------------------------------------------
-
-class DesignRequest(BaseModel):
-    """Payload for POST /api/v1/hx/design — kick off a new design session."""
-
-    raw_request: str = Field(
-        ...,
-        description="Natural-language design request from the user / LLM",
-        min_length=1,
-    )
-    user_id: str
-    org_id: str | None = None
-    mode: str = "design"  # "design" | "rating"
-
-    # Optional explicit overrides (usually parsed by Step 01)
-    T_hot_in_C: float | None = None
-    T_hot_out_C: float | None = None
-    T_cold_in_C: float | None = None
-    T_cold_out_C: float | None = None
-    m_dot_hot_kg_s: float | None = None
-    m_dot_cold_kg_s: float | None = None
-    hot_fluid_name: str | None = None
-    cold_fluid_name: str | None = None
-    P_hot_Pa: float | None = None
-    P_cold_Pa: float | None = None
-    tema_preference: str | None = None
-
 
 class DesignResponse(BaseModel):
     """Response from POST /api/v1/hx/design."""
@@ -93,10 +69,44 @@ async def start_design(
     sse_manager: SSEManager = Depends(get_sse_manager),
     pipeline_runner: PipelineRunner = Depends(get_pipeline_runner),
 ) -> DesignResponse:
-    """Create a new HX design session and start the pipeline in the background."""
+    """Create a new HX design session and start the pipeline in the background.
+
+    Defense in depth:
+    - If a token is provided (from POST /requirements), verify it.
+    - If no token (direct API call, tests), run inline validation.
+    In both cases invalid inputs are rejected before a session is created.
+    """
+    validation_dict = req.to_validation_dict()
+
+    if req.token:
+        if not verify_token(req.token, validation_dict):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid requirements token — call POST /requirements first or re-run it",
+            )
+    else:
+        # No token — run inline validation (direct API callers, tests, backend)
+        result = validate_requirements(validation_dict)
+        if not result.valid:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "valid": False,
+                    "errors": [
+                        {
+                            "field": e.field,
+                            "message": e.message,
+                            "suggestion": e.suggestion,
+                            "valid_range": e.valid_range,
+                        }
+                        for e in result.errors
+                    ],
+                },
+            )
+
     # Build initial state from request
     state = DesignState(
-        raw_request=req.raw_request,
+        raw_request=req.raw_request or "",
         user_id=req.user_id,
         org_id=req.org_id,
         mode=req.mode,
