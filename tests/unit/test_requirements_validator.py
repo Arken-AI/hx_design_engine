@@ -264,7 +264,11 @@ class TestLayer2PhysicsFeasibility:
         assert not result.valid
         assert any("underdetermined" in m.lower() for m in _error_messages(result))
 
-    def test_only_T_hot_out_provided_is_sufficient(self):
+    def test_only_T_hot_out_provided_is_underdetermined(self):
+        """T_hot_out alone is NOT sufficient — cold side still underdetermined.
+        Step 2 can compute Q from the hot side, but cannot back-calculate
+        T_cold_out without m_dot_cold_kg_s.
+        """
         d = {
             "hot_fluid_name": "crude oil",
             "cold_fluid_name": "water",
@@ -272,6 +276,33 @@ class TestLayer2PhysicsFeasibility:
             "T_hot_out_C": 80.0,
             "T_cold_in_C": 25.0,
             "m_dot_hot_kg_s": 10.0,
+        }
+        result = validate_requirements(d)
+        assert not result.valid
+        assert any("cold side underdetermined" in m.lower() for m in _error_messages(result))
+
+    def test_T_hot_out_plus_T_cold_out_is_sufficient(self):
+        d = {
+            "hot_fluid_name": "crude oil",
+            "cold_fluid_name": "water",
+            "T_hot_in_C": 150.0,
+            "T_hot_out_C": 80.0,
+            "T_cold_in_C": 25.0,
+            "T_cold_out_C": 60.0,
+            "m_dot_hot_kg_s": 10.0,
+        }
+        result = validate_requirements(d)
+        assert result.valid
+
+    def test_T_hot_out_plus_m_dot_cold_is_sufficient(self):
+        d = {
+            "hot_fluid_name": "crude oil",
+            "cold_fluid_name": "water",
+            "T_hot_in_C": 150.0,
+            "T_hot_out_C": 80.0,
+            "T_cold_in_C": 25.0,
+            "m_dot_hot_kg_s": 10.0,
+            "m_dot_cold_kg_s": 8.0,
         }
         result = validate_requirements(d)
         assert result.valid

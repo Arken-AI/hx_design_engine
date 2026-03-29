@@ -261,8 +261,17 @@ def _layer2(data: dict[str, Any]) -> tuple[list[ValidationError], list[Validatio
                 message="T_cold_out equals T_cold_in — cold fluid shows no temperature rise",
             ))
 
-    # Underdetermined system check: at least one of the optional temps/flows must be present
-    # so Step 2 can solve the energy balance (only run when no errors so far)
+    # Underdetermined system check: the energy balance in Step 2 needs enough
+    # knowns to solve for every unknown temperature.  The rules are:
+    #
+    #  1. If NEITHER T_hot_out NOR T_cold_out NOR m_dot_cold is given → fail
+    #     (nothing to constrain the balance at all).
+    #
+    #  2. If T_hot_out is given but BOTH T_cold_out AND m_dot_cold are missing
+    #     → fail.  Step 2 can compute Q from the hot side, but cannot
+    #     back-calculate T_cold_out without knowing m_dot_cold.
+    #
+    # (Only run when no errors so far.)
     if not errors:
         has_T_hot_out = T_hot_out is not None
         has_T_cold_out = T_cold_out is not None
@@ -277,6 +286,19 @@ def _layer2(data: dict[str, Any]) -> tuple[list[ValidationError], list[Validatio
                     "so Step 2 can close the energy balance"
                 ),
                 suggestion="Add the cold outlet temperature (most common) or cold-side flow rate",
+            ))
+        elif has_T_hot_out and not has_T_cold_out and not has_m_dot_cold:
+            errors.append(ValidationError(
+                field="T_cold_out_C",
+                message=(
+                    "Cold side underdetermined: T_hot_out_C is given but both "
+                    "T_cold_out_C and m_dot_cold_kg_s are missing — the engine "
+                    "cannot compute the cold outlet temperature"
+                ),
+                suggestion=(
+                    "Provide either T_cold_out_C (cold outlet temperature in °C) "
+                    "or m_dot_cold_kg_s (cold-side mass flow rate in kg/s)"
+                ),
             ))
 
     return errors, warnings
