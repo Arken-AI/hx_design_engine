@@ -117,5 +117,8 @@ class StepRecord(BaseModel):
     validation_passed: bool = True
     validation_errors: list[str] = Field(default_factory=list)
     outputs: dict[str, Any] = Field(default_factory=dict, alias="outputs_snapshot")
+    warnings: list[str] = Field(default_factory=list)
+    # Full AI review stored for audit / frontend restore
+    ai_review: Optional[AIReview] = None
 
     model_config = {"populate_by_name": True}

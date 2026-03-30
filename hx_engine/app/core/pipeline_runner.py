@@ -34,6 +34,7 @@ from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
 from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
 from hx_engine.app.steps.step_04_tema_geometry import Step04TEMAGeometry
 from hx_engine.app.steps.step_05_lmtd import Step05LMTD
+from hx_engine.app.steps.step_06_initial_u import Step06InitialU
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ PIPELINE_STEPS = [
     Step03FluidProperties,
     Step04TEMAGeometry,
     Step05LMTD,
+    Step06InitialU,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
@@ -164,6 +166,8 @@ class PipelineRunner:
 
             # --- pipeline complete ---
             state.pipeline_status = "completed"
+            state.is_complete = True
+            await self.session_store.save(session_id, state)
             await self.sse_manager.emit(
                 session_id,
                 DesignCompleteEvent(
