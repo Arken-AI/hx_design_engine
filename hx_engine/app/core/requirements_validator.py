@@ -70,6 +70,16 @@ _TEMP_MAX = 1000.0
 # Minimum approach temperature (°C)
 _MIN_APPROACH_C = 3.0
 
+# Petroleum correlation validity ceiling (°C)
+# Crude oil correlations (Lee-Kesler, Beggs-Robinson, Cragoe) are typically
+# reliable up to ~350°C; extrapolation beyond this range is uncertain.
+_PETROLEUM_TEMP_LIMIT_C = 350.0
+_PETROLEUM_KEYWORDS = frozenset({
+    "crude", "crude oil", "naphtha", "kerosene", "diesel",
+    "gas oil", "fuel oil", "heavy fuel oil", "hfo", "bunker fuel",
+    "lube oil", "lubricating oil", "heating oil",
+})
+
 
 # ---------------------------------------------------------------------------
 # Layer 1 — schema / completeness checks
@@ -173,7 +183,11 @@ def _layer1(data: dict[str, Any]) -> tuple[list[ValidationError], list[Validatio
         if v and str(v).strip().lower() not in _KNOWN_FLUIDS:
             warnings.append(ValidationWarning(
                 field=fname,
-                message=f"'{v}' not in known fluid list — thermo lookup may fail in Step 2",
+                message=(
+                    f"'{v}' not in known fluid list — the engine will attempt "
+                    f"partial matching and petroleum correlations, but verify "
+                    f"properties in Step 3 output"
+                ),
             ))
 
     return errors, warnings
@@ -191,6 +205,19 @@ def _layer2(data: dict[str, Any]) -> tuple[list[ValidationError], list[Validatio
     T_hot_out = data.get("T_hot_out_C")
     T_cold_in = data.get("T_cold_in_C")
     T_cold_out = data.get("T_cold_out_C")
+
+    # Hot inlet must be hotter than cold inlet (basic sanity)
+    if T_hot_in is not None and T_cold_in is not None:
+        if T_hot_in <= T_cold_in:
+            errors.append(ValidationError(
+                field="T_hot_in_C",
+                message=(
+                    f"Hot inlet ({T_hot_in}°C) must be hotter than "
+                    f"cold inlet ({T_cold_in}°C)"
+                ),
+                suggestion="Check that the hot and cold streams are not swapped",
+                valid_range=f"> {T_cold_in}°C",
+            ))
 
     # Hot fluid must cool
     if T_hot_in is not None and T_hot_out is not None:
@@ -255,11 +282,46 @@ def _layer2(data: dict[str, Any]) -> tuple[list[ValidationError], list[Validatio
                     field="T_hot_out_C",
                     message=f"R={R:.1f} is very high — may need multiple shells",
                 ))
+            elif R > 3:
+                warnings.append(ValidationWarning(
+                    field="T_hot_out_C",
+                    message=(
+                        f"R={R:.1f} (> 3) — F-factor is highly sensitive to "
+                        f"operating point drift at this ratio. Small temperature "
+                        f"deviations may cause large F-factor changes."
+                    ),
+                ))
         elif delta_T_cold == 0:
             warnings.append(ValidationWarning(
                 field="T_cold_out_C",
                 message="T_cold_out equals T_cold_in — cold fluid shows no temperature rise",
             ))
+
+    # Petroleum correlation validity range warning
+    # Crude oil correlations are reliable up to ~350°C; flag any petroleum
+    # fluid whose inlet temperature approaches or exceeds this limit.
+    for fluid_field, temp_field in [
+        ("hot_fluid_name", "T_hot_in_C"),
+        ("cold_fluid_name", "T_cold_in_C"),
+    ]:
+        fluid_name = data.get(fluid_field)
+        temp_val = data.get(temp_field)
+        if fluid_name and temp_val is not None:
+            name_lower = str(fluid_name).strip().lower()
+            is_petroleum = (
+                name_lower in _PETROLEUM_KEYWORDS
+                or any(kw in name_lower for kw in _PETROLEUM_KEYWORDS)
+            )
+            if is_petroleum and float(temp_val) >= _PETROLEUM_TEMP_LIMIT_C:
+                warnings.append(ValidationWarning(
+                    field=temp_field,
+                    message=(
+                        f"{fluid_name} at {temp_val}°C is at or beyond the "
+                        f"petroleum correlation validity range (~{_PETROLEUM_TEMP_LIMIT_C:.0f}°C). "
+                        f"Property predictions (especially viscosity) may be unreliable. "
+                        f"Consider providing measured properties."
+                    ),
+                ))
 
     # Underdetermined system check: the energy balance in Step 2 needs enough
     # knowns to solve for every unknown temperature.  The rules are:

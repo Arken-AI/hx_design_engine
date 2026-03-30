@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 
 from hx_engine.app.core.requirements_validator import (
     build_user_message,
@@ -45,7 +46,7 @@ async def validate_design_requirements(req: DesignRequest) -> RequirementsRespon
             req.user_id,
             len(result.errors),
         )
-        return RequirementsResponse(
+        body = RequirementsResponse(
             valid=False,
             errors=[
                 ValidationErrorDetail(
@@ -56,6 +57,10 @@ async def validate_design_requirements(req: DesignRequest) -> RequirementsRespon
                 )
                 for e in result.errors
             ],
+        )
+        return JSONResponse(
+            status_code=422,
+            content=body.model_dump(),
         )
 
     # Validation passed — sign a token and build the success response

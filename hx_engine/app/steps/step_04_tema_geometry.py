@@ -739,11 +739,24 @@ def _build_escalation_hints(
         if resolved is not None:
             # Already resolved via MongoDB/AI — only flag if still uncertain
             if resolved.get("needs_ai") or resolved.get("confidence", 1.0) < 0.5:
+                raw_conf = resolved.get("confidence")
+                source = resolved.get("source", "unknown")
+                # Table values with location-dependent uncertainty are usable
+                # starting points, not zero-confidence unknowns.
+                if source in ("exact", "partial_match", "temp_dependent"):
+                    conf_text = (
+                        f"Table value available (source: {source}), "
+                        f"confirmation recommended for site-specific conditions"
+                    )
+                elif raw_conf is not None:
+                    conf_text = f"confidence={raw_conf:.0%}"
+                else:
+                    conf_text = "confidence unknown"
                 hints.append({
                     "trigger": "fouling_factor_uncertain",
                     "recommendation": (
-                        f"{side_label.title()} fluid '{fluid_name}': low confidence "
-                        f"R_f={resolved['rf']:.6f} m²·K/W (confidence={resolved.get('confidence', 0):.0%}). "
+                        f"{side_label.title()} fluid '{fluid_name}': "
+                        f"R_f={resolved['rf']:.6f} m²·K/W ({conf_text}). "
                         f"Please confirm or provide the correct fouling resistance."
                     ),
                 })

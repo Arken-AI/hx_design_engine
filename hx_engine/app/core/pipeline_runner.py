@@ -70,6 +70,7 @@ class PipelineRunner:
         response returns immediately with the session_id.
         """
         session_id = state.session_id
+        state.pipeline_status = "running"
 
         try:
             for step_cls in PIPELINE_STEPS:
@@ -100,12 +101,14 @@ class PipelineRunner:
                         state, self.ai_engineer
                     )
                 except CalculationError as exc:
+                    state.pipeline_status = "error"
                     await self._emit_step_error(
                         session_id, step, str(exc),
                         recommendation="Check input parameters and retry.",
                     )
                     return state
                 except StepHardFailure as exc:
+                    state.pipeline_status = "error"
                     await self._emit_step_error(
                         session_id, step,
                         "; ".join(exc.validation_errors),
@@ -116,6 +119,7 @@ class PipelineRunner:
                     logger.exception(
                         "Unexpected error in step %d", step.step_id
                     )
+                    state.pipeline_status = "error"
                     await self._emit_step_error(
                         session_id, step, str(exc),
                         recommendation="An unexpected error occurred.",
@@ -159,6 +163,7 @@ class PipelineRunner:
                 await self.session_store.save(session_id, state)
 
             # --- pipeline complete ---
+            state.pipeline_status = "completed"
             await self.sse_manager.emit(
                 session_id,
                 DesignCompleteEvent(
@@ -169,8 +174,10 @@ class PipelineRunner:
 
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
+            state.pipeline_status = "cancelled"
         except Exception:
             logger.exception("Pipeline failed for session %s", session_id)
+            state.pipeline_status = "error"
             await self.sse_manager.emit(
                 session_id,
                 StepErrorEvent(
@@ -300,8 +307,8 @@ class PipelineRunner:
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
-                confidence=review.confidence if review else 0.85,
-                reasoning=review.reasoning if review else "",
+                confidence=review.confidence if review else 1.0,
+                reasoning=review.reasoning if review else "No AI review required.",
                 user_summary=f"Step {step.step_id} ({step.step_name}) completed.",
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
@@ -415,6 +422,7 @@ class PipelineRunner:
         """Build a compact design summary from final state."""
         return {
             "session_id": state.session_id,
+            "pipeline_status": state.pipeline_status,
             "completed_steps": state.completed_steps,
             "Q_W": state.Q_W,
             "LMTD_K": state.LMTD_K,

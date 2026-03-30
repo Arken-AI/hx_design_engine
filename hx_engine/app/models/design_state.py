@@ -270,6 +270,7 @@ class DesignState(BaseModel):
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
+    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "error" | "cancelled"
     step_records: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

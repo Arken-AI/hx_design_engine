@@ -162,6 +162,26 @@ class Step03FluidProperties(BaseStep):
         self._hot_props = hot_props
         self._cold_props = cold_props
 
+        # --- C2c: petroleum correlation range warning ---
+        _PETRO_TEMP_LIMIT = 350.0
+        for label, props, T_in in [
+            ("Hot", hot_props, state.T_hot_in_C),
+            ("Cold", cold_props, state.T_cold_in_C),
+        ]:
+            if (
+                props.property_source
+                and "petroleum" in props.property_source
+                and T_in is not None
+                and T_in >= _PETRO_TEMP_LIMIT
+            ):
+                warnings.append(
+                    f"{label} fluid: inlet temperature {T_in:.0f}°C is at or "
+                    f"beyond the petroleum correlation validity range "
+                    f"(~{_PETRO_TEMP_LIMIT:.0f}°C). Viscosity and other property "
+                    f"predictions may be unreliable — consider providing "
+                    f"measured values for critical designs."
+                )
+
         # --- C2b: property confidence warnings ---
         for label, props, fluid_name in [
             ("Hot", hot_props, state.hot_fluid_name),

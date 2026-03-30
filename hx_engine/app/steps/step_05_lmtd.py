@@ -215,12 +215,18 @@ class Step05LMTD(BaseStep):
                     f"TEMA type, or splitting into multiple units.",
                 )
 
-        # 8. Highly asymmetric warning
+        # 8. High R warnings
         if R > 4.0:
             warnings.append(
                 f"R = {R:.2f} is highly asymmetric. "
                 f"Consider if a different exchanger arrangement "
                 f"(e.g., multiple shells in series) would be more effective."
+            )
+        elif R > 3.0:
+            warnings.append(
+                f"R = {R:.2f} (> 3) — F-factor is highly sensitive to "
+                f"operating point drift. Small temperature deviations may "
+                f"cause large F-factor changes. Verify temperature spec accuracy."
             )
 
         # 9. Cache values for _conditional_ai_trigger (same pattern as Step 3)
@@ -243,6 +249,14 @@ class Step05LMTD(BaseStep):
                 "recommendation": (
                     "F-factor is sensitive to small P changes at this R. "
                     "Verify temperature spec accuracy."
+                ),
+            })
+        elif R > 3.0:
+            escalation_hints.append({
+                "trigger": "elevated_R_sensitivity",
+                "recommendation": (
+                    "R > 3 — F-factor sensitivity to operating drift is "
+                    "elevated. Confirm temperature specs are realistic."
                 ),
             })
         if (
@@ -303,7 +317,7 @@ class Step05LMTD(BaseStep):
                     return True
 
         # Trigger 2: Highly asymmetric duty (steep F-P curve)
-        if R is not None and R > 4.0:
+        if R is not None and R > 3.0:
             return True
 
         # Trigger 3: Temperature cross risk (minimum terminal approach < 3°C)
