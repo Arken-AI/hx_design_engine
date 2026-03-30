@@ -351,6 +351,8 @@ class BaseStep(ABC):
             validation_passed=result.validation_passed,
             validation_errors=list(result.validation_errors),
             outputs=_serialize_outputs(result.outputs),
+            warnings=list(result.warnings) if result.warnings else [],
+            ai_review=result.ai_review,
         )
         state.step_records.append(rec)
 

@@ -46,6 +46,7 @@ class DesignStatusResponse(BaseModel):
     current_step: int
     pipeline_status: str
     waiting_for_user: bool
+    is_complete: bool
     step_records: list[dict[str, Any]]
     warnings: list[str]
     notes: list[str]
@@ -157,6 +158,7 @@ async def get_design_status(
         current_step=state.current_step,
         pipeline_status=state.pipeline_status,
         waiting_for_user=state.waiting_for_user,
+        is_complete=state.is_complete,
         step_records=[r.model_dump() for r in state.step_records],
         warnings=state.warnings,
         notes=state.notes,

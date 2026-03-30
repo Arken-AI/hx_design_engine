@@ -164,6 +164,8 @@ class PipelineRunner:
 
             # --- pipeline complete ---
             state.pipeline_status = "completed"
+            state.is_complete = True
+            await self.session_store.save(session_id, state)
             await self.sse_manager.emit(
                 session_id,
                 DesignCompleteEvent(
