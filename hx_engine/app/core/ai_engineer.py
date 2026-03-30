@@ -375,6 +375,55 @@ DO NOT:
 - Escalate for F between 0.80 and 0.85 — use "warn" instead\
 """
 
+_STEP_6_PROMPT = """\
+## Step 6: Initial U + Size Estimate — Review Focus
+
+You are reviewing the initial overall heat transfer coefficient (U) assumption \
+and the resulting heat exchanger sizing (area, tube count, shell selection).
+
+This step uses a starting-guess U from published fluid-pair tables to compute:
+  A_required = Q / (U_mid × F × LMTD)
+  N_tubes = A / (π × d_o × L)
+  → smallest standard TEMA shell that fits N_tubes
+
+YOUR REVIEW FOCUS:
+1. U ASSUMPTION — Is the assumed U reasonable for this fluid pair?
+   - Water/water: 800–1800 W/m²K (typical ~1200)
+   - Light organic/water: 200–800 W/m²K
+   - Heavy organic/water: 100–500 W/m²K
+   - Gas/gas: 5–50 W/m²K
+   - Steam/water: 1000–4000 W/m²K
+   - If a gas-phase fluid is using a liquid-liquid U, this is WRONG
+   - If the fluid pair used the generic fallback, verify classification
+
+2. AREA REASONABLENESS:
+   - < 0.5 m²: Very small — possibly a compact/plate HX is better
+   - 0.5–500 m²: Normal industrial range
+   - > 500 m²: Very large — consider multiple units
+   - Verify area matches the duty magnitude and temperature driving force
+
+3. SHELL SELECTION:
+   - Does the shell diameter make sense for the tube count?
+   - If tubes required > largest shell capacity, multiple shells needed
+   - Is the overdesign ratio (A_provided / A_required) reasonable? (1.0–1.3 typical)
+
+4. FLUID CLASSIFICATION:
+   - Were both fluids classified correctly? (water, steam, crude, gas, etc.)
+   - Would a different classification change U significantly?
+
+COMMON ISSUES WHEN YOU ARE CALLED:
+- Unknown fluid pair → generic fallback U used (may be too high or low)
+- Gas-phase fluid misclassified as liquid → U far too high → area too small
+- Very viscous fluid not classified as heavy_organic → U too high
+- Extremely large or small area suggesting U is off by an order of magnitude
+
+DO NOT:
+- Change Q_W, LMTD_K, or F_factor — these are upstream results from Steps 2 and 5
+- Override tube geometry fundamentals (OD, length) — those come from Step 4
+- Change pitch layout or n_passes — those are Step 4 decisions
+- Escalate for normal fluid pairs with well-known U ranges — use "proceed"\
+"""
+
 # Step prompt registry — add an entry here before wiring any new step
 _STEP_PROMPTS: dict[int, str] = {
     1: _STEP_1_PROMPT,
@@ -382,6 +431,7 @@ _STEP_PROMPTS: dict[int, str] = {
     3: _STEP_3_PROMPT,
     4: _STEP_4_PROMPT,
     5: _STEP_5_PROMPT,
+    6: _STEP_6_PROMPT,
 }
 
 
@@ -587,6 +637,38 @@ def _build_step_context_inner(
             lines.append(f"P = {p_val:.3f}")
         if f_val is not None:
             lines.append(f"F = {f_val:.3f}")
+        return "\n".join(lines)
+
+    if step_id == 6:
+        # U assumption and sizing context
+        lines = []
+        u_mid = result.outputs.get("U_W_m2K")
+        u_range = result.outputs.get("U_range", {})
+        a_req = result.outputs.get("A_m2")
+        a_prov = result.outputs.get("A_provided_m2")
+        hot_type = result.outputs.get("hot_fluid_type")
+        cold_type = result.outputs.get("cold_fluid_type")
+        n_req = result.outputs.get("n_tubes_required")
+
+        if hot_type and cold_type:
+            lines.append(f"Fluid classification: hot={hot_type}, cold={cold_type}")
+        if u_range:
+            lines.append(
+                f"U range: {u_range.get('U_low')}–{u_range.get('U_high')} W/m²K "
+                f"(using mid={u_mid})"
+            )
+        f_val = state.F_factor
+        lmtd = state.LMTD_K
+        if f_val is not None and lmtd is not None:
+            lines.append(f"eff_LMTD = F × LMTD = {f_val:.3f} × {lmtd:.2f} = {f_val * lmtd:.2f} °C")
+        if a_req and a_prov:
+            ratio = a_prov / a_req if a_req > 0 else 0
+            lines.append(
+                f"A_required = {a_req:.2f} m², A_provided = {a_prov:.2f} m², "
+                f"overdesign = {ratio:.2f}×"
+            )
+        if n_req is not None:
+            lines.append(f"Tubes required = {n_req} (before TEMA rounding)")
         return "\n".join(lines)
 
     # Step 1 and unknown steps — no extra context needed
