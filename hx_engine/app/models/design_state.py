@@ -276,6 +276,7 @@ class DesignState(BaseModel):
     notes: list[str] = Field(default_factory=list)
     waiting_for_user: bool = False
     in_convergence_loop: bool = False
+    is_complete: bool = False
 
     # --- AI cross-step observations (populated by base.py after each review) ---
     # Each entry is a short note from the AI engineer, forwarded to downstream
