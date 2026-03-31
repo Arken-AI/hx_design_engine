@@ -96,70 +96,90 @@ class PipelineRunner:
                     ).model_dump(),
                 )
 
-                # --- execute step with AI review loop ---
-                start_ms = time.monotonic()
-                try:
-                    result: StepResult = await step.run_with_review_loop(
-                        state, self.ai_engineer
+                # --- execute step with AI review loop (re-runs on ESCALATE) ---
+                max_escalations = 2
+                escalation_count = 0
+                while True:
+                    start_ms = time.monotonic()
+                    try:
+                        result: StepResult = await step.run_with_review_loop(
+                            state, self.ai_engineer
+                        )
+                    except CalculationError as exc:
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step, str(exc),
+                            recommendation="Check input parameters and retry.",
+                        )
+                        return state
+                    except StepHardFailure as exc:
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step,
+                            "; ".join(exc.validation_errors),
+                            recommendation="Hard validation failure — cannot continue.",
+                        )
+                        return state
+                    except Exception as exc:
+                        logger.exception(
+                            "Unexpected error in step %d", step.step_id
+                        )
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step, str(exc),
+                            recommendation="An unexpected error occurred.",
+                        )
+                        return state
+
+                    duration_ms = int((time.monotonic() - start_ms) * 1000)
+
+                    # --- Layer 2: hard validation rules ---
+                    vr = check_validation_rules(step.step_id, result)
+                    result.validation_passed = vr.passed
+                    result.validation_errors = vr.errors
+                    if not vr.passed:
+                        raise StepHardFailure(step.step_id, vr.errors)
+
+                    # --- log step result ---
+                    self._log_step_result(step, result, duration_ms)
+
+                    # --- apply outputs to state ---
+                    self._apply_outputs(state, result)
+                    state.current_step = step.step_id
+                    if step.step_id not in state.completed_steps:
+                        state.completed_steps.append(step.step_id)
+
+                    # --- emit decision-based event ---
+                    await self._emit_decision_event(
+                        session_id, step, result, duration_ms
                     )
-                except CalculationError as exc:
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step, str(exc),
-                        recommendation="Check input parameters and retry.",
-                    )
-                    return state
-                except StepHardFailure as exc:
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step,
-                        "; ".join(exc.validation_errors),
-                        recommendation="Hard validation failure — cannot continue.",
-                    )
-                    return state
-                except Exception as exc:
-                    logger.exception(
-                        "Unexpected error in step %d", step.step_id
-                    )
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step, str(exc),
-                        recommendation="An unexpected error occurred.",
-                    )
-                    return state
 
-                duration_ms = int((time.monotonic() - start_ms) * 1000)
+                    # --- handle ESCALATE: pause, wait for user, then re-run ---
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.ESCALATE
+                        and escalation_count < max_escalations
+                    ):
+                        escalation_count += 1
+                        state.waiting_for_user = True
+                        await self.session_store.save(session_id, state)
+                        state = await self._wait_for_user(
+                            session_id, state, step, result
+                        )
+                        state.waiting_for_user = False
+                        # Re-emit step_started so the frontend resets the card
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepStartedEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                            ).model_dump(),
+                        )
+                        continue  # Re-run the step with updated state
 
-                # --- Layer 2: hard validation rules ---
-                vr = check_validation_rules(step.step_id, result)
-                result.validation_passed = vr.passed
-                result.validation_errors = vr.errors
-                if not vr.passed:
-                    raise StepHardFailure(step.step_id, vr.errors)
-
-                # --- log step result ---
-                self._log_step_result(step, result, duration_ms)
-
-                # --- apply outputs to state ---
-                self._apply_outputs(state, result)
-                state.current_step = step.step_id
-                if step.step_id not in state.completed_steps:
-                    state.completed_steps.append(step.step_id)
-
-                # --- emit decision-based event ---
-                await self._emit_decision_event(
-                    session_id, step, result, duration_ms
-                )
-
-                # --- handle ESCALATE: pause and wait for user ---
-                if (
-                    result.ai_review
-                    and result.ai_review.decision == AIDecisionEnum.ESCALATE
-                ):
-                    state.waiting_for_user = True
-                    await self.session_store.save(session_id, state)
-                    state = await self._wait_for_user(session_id, state, step)
-                    state.waiting_for_user = False
+                    # Step completed (non-ESCALATE, or escalations exhausted)
+                    break
 
                 # --- persist state after each step ---
                 await self.session_store.save(session_id, state)
@@ -392,18 +412,52 @@ class PipelineRunner:
         session_id: str,
         state: DesignState,
         step: Any,
+        result: StepResult,
     ) -> DesignState:
-        """Block the pipeline until the user responds via POST /respond."""
+        """Block the pipeline until the user responds via POST /respond.
+
+        Interprets the user response and applies it to state so the step
+        re-run sees a clean, conflict-free input.
+
+        Response types:
+          accept  — user accepts the AI's recommendation; apply suggested
+                    corrections from result.ai_review.corrections to state.
+          override — user provided free-text; parse values.user_input and
+                     map recognised fields (e.g. tema_type) onto state.
+          skip    — user wants to proceed with current outputs unchanged.
+        """
         future = self.sse_manager.create_user_response_future(session_id)
         try:
             response = await asyncio.wait_for(
                 future, timeout=USER_RESPONSE_TIMEOUT
             )
-            # Apply any user-provided overrides
             if isinstance(response, dict):
-                for key, val in response.items():
-                    if hasattr(state, key):
-                        setattr(state, key, val)
+                response_type = response.get("type", "accept")
+                values = response.get("values") or {}
+                user_input = values.get("user_input", "").strip().lower()
+
+                if response_type == "accept" or self._sounds_like_acceptance(user_input):
+                    # Apply AI-recommended corrections so the re-run doesn't conflict
+                    review = result.ai_review
+                    if review and review.corrections:
+                        for correction in review.corrections:
+                            if hasattr(state, correction.field):
+                                setattr(state, correction.field, correction.new_value)
+                                logger.info(
+                                    "User accepted AI suggestion: %s = %r",
+                                    correction.field,
+                                    correction.new_value,
+                                )
+                    # Recommendation may contain a TEMA type hint (e.g. "Use AES")
+                    if review and review.recommendation:
+                        self._apply_recommendation_hint(state, review.recommendation)
+
+                elif response_type == "override":
+                    # User typed a specific value — look for recognisable field names
+                    self._apply_user_text_override(state, user_input)
+
+                # "skip" — don't touch state; re-run will see unchanged inputs
+
         except asyncio.TimeoutError:
             logger.warning(
                 "User response timeout for session %s step %d",
@@ -420,6 +474,51 @@ class PipelineRunner:
                 ).model_dump(),
             )
         return state
+
+    # ------------------------------------------------------------------
+    # User response interpretation helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sounds_like_acceptance(text: str) -> bool:
+        """Return True if free-text user input signals acceptance of suggestion."""
+        accept_phrases = (
+            "as per suggestion", "suggestion", "recommended", "recommend",
+            "yes", "ok", "okay", "accept", "agree", "go ahead", "proceed",
+            "use that", "use it", "use the", "sounds good", "looks good",
+        )
+        return any(phrase in text for phrase in accept_phrases)
+
+    @staticmethod
+    def _apply_recommendation_hint(state: DesignState, recommendation: str) -> None:
+        """Extract TEMA type hints from the AI's recommendation text."""
+        import re
+        # Match patterns like "Use AES" / "recommend AEP" / "switch to AEU"
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
+            recommendation,
+            re.IGNORECASE,
+        )
+        if match:
+            suggested = match.group(1).upper()
+            logger.info(
+                "Applying recommendation hint: tema_preference = %r", suggested
+            )
+            state.tema_preference = suggested
+
+    @staticmethod
+    def _apply_user_text_override(state: DesignState, text: str) -> None:
+        """Parse free-text override for known field names."""
+        import re
+        # TEMA type mentioned explicitly
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b", text, re.IGNORECASE
+        )
+        if match:
+            state.tema_preference = match.group(1).upper()
+            logger.info(
+                "User override: tema_preference = %r", state.tema_preference
+            )
 
     @staticmethod
     def _build_summary(state: DesignState) -> dict[str, Any]:
