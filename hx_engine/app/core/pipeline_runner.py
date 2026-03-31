@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
-from typing import Any
+from typing import Any, Optional
 
 from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
