@@ -164,10 +164,21 @@ class PipelineRunner:
                         escalation_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        state = await self._wait_for_user(
+                        updated_state = await self._wait_for_user(
                             session_id, state, step, result
                         )
+                        if updated_state is None:
+                            # Timeout — pipeline already emitted StepErrorEvent
+                            state.pipeline_status = "error"
+                            return state
+                        state = updated_state
                         state.waiting_for_user = False
+                        # Drop the step record from the escalated run so the
+                        # re-run's record is the only one persisted for this step.
+                        state.step_records = [
+                            r for r in state.step_records
+                            if r.step_id != step.step_id
+                        ]
                         # Re-emit step_started so the frontend resets the card
                         await self.sse_manager.emit(
                             session_id,
@@ -179,7 +190,34 @@ class PipelineRunner:
                         )
                         continue  # Re-run the step with updated state
 
-                    # Step completed (non-ESCALATE, or escalations exhausted)
+                    # Step completed (non-ESCALATE, or escalations exhausted).
+                    # If escalations were exhausted (still ESCALATE here), emit a
+                    # warning so the frontend doesn't freeze on the input box.
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.ESCALATE
+                    ):
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepWarningEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                                confidence=result.ai_review.confidence if result.ai_review else 0.0,
+                                reasoning=result.ai_review.reasoning if result.ai_review else "",
+                                user_summary=(
+                                    f"Step {step.step_id}: escalation limit reached — "
+                                    "proceeding with current values."
+                                ),
+                                warning_message=(
+                                    "Maximum escalation attempts reached. "
+                                    "Pipeline continues with unresolved conflict."
+                                ),
+                                severity="warning",
+                                duration_ms=duration_ms,
+                                outputs=_serialize_outputs(result.outputs),
+                            ).model_dump(mode="json"),
+                        )
                     break
 
                 # --- persist state after each step ---
@@ -414,11 +452,11 @@ class PipelineRunner:
         state: DesignState,
         step: Any,
         result: StepResult,
-    ) -> DesignState:
+    ) -> Optional[DesignState]:
         """Block the pipeline until the user responds via POST /respond.
 
-        Interprets the user response and applies it to state so the step
-        re-run sees a clean, conflict-free input.
+        Returns the updated DesignState on success, or None on timeout
+        (caller must abort the pipeline when None is returned).
 
         Response types:
           accept  — user accepts the AI's recommendation; apply suggested
@@ -449,9 +487,13 @@ class PipelineRunner:
                                     correction.field,
                                     correction.new_value,
                                 )
-                    # Recommendation may contain a TEMA type hint (e.g. "Use AES")
+                    # Apply recommendation hint only when corrections didn't
+                    # already cover tema_preference to avoid overwriting the
+                    # user's explicit choice with a hint from the AI's text.
                     if review and review.recommendation:
-                        self._apply_recommendation_hint(state, review.recommendation)
+                        correction_fields = {c.field for c in (review.corrections or [])}
+                        if "tema_preference" not in correction_fields:
+                            self._apply_recommendation_hint(state, review.recommendation)
 
                 elif response_type == "override":
                     # User typed a specific value — look for recognisable field names
@@ -474,26 +516,38 @@ class PipelineRunner:
                     message="User response timeout — aborting pipeline.",
                 ).model_dump(),
             )
+            return None  # Signal caller to abort
         return state
 
     # ------------------------------------------------------------------
     # User response interpretation helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _sounds_like_acceptance(text: str) -> bool:
-        """Return True if free-text user input signals acceptance of suggestion."""
+    _NEGATION_WORDS = frozenset(
+        ("no", "not", "don't", "dont", "do not", "never", "disagree", "reject",
+         "keep", "stay", "remain", "cancel", "abort", "stop")
+    )
+
+    @classmethod
+    def _sounds_like_acceptance(cls, text: str) -> bool:
+        """Return True if free-text input signals acceptance of the AI suggestion.
+
+        Checks for explicit negation first so phrases like "don't proceed"
+        or "I don't agree" are correctly treated as rejections.
+        """
+        # Explicit negation takes priority
+        if any(word in text for word in cls._NEGATION_WORDS):
+            return False
         accept_phrases = (
-            "as per suggestion", "suggestion", "recommended", "recommend",
-            "yes", "ok", "okay", "accept", "agree", "go ahead", "proceed",
-            "use that", "use it", "use the", "sounds good", "looks good",
+            "as per suggestion", "use suggestion", "use your suggestion",
+            "yes", "ok", "okay", "accept", "agree", "go ahead",
+            "use that", "sounds good", "looks good",
         )
         return any(phrase in text for phrase in accept_phrases)
 
     @staticmethod
     def _apply_recommendation_hint(state: DesignState, recommendation: str) -> None:
         """Extract TEMA type hints from the AI's recommendation text."""
-        import re
         # Match patterns like "Use AES" / "recommend AEP" / "switch to AEU"
         match = re.search(
             r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
@@ -510,7 +564,6 @@ class PipelineRunner:
     @staticmethod
     def _apply_user_text_override(state: DesignState, text: str) -> None:
         """Parse free-text override for known field names."""
-        import re
         # TEMA type mentioned explicitly
         match = re.search(
             r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b", text, re.IGNORECASE
