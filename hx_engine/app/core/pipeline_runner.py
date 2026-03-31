@@ -81,7 +81,11 @@ class PipelineRunner:
 
                 # --- orphan check ---
                 if await self.session_store.is_orphaned(session_id):
-                    logger.warning("Session %s orphaned, aborting", session_id)
+                    logger.warning(
+                        "Session %s orphaned at step %d, aborting pipeline",
+                        session_id, step.step_id,
+                    )
+                    state.pipeline_status = "orphaned"
                     break
 
                 # --- heartbeat ---
@@ -139,7 +143,17 @@ class PipelineRunner:
                     result.validation_passed = vr.passed
                     result.validation_errors = vr.errors
                     if not vr.passed:
-                        raise StepHardFailure(step.step_id, vr.errors)
+                        logger.error(
+                            "[PIPELINE] Layer 2 validation failed for step %d: %s",
+                            step.step_id, vr.errors,
+                        )
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step,
+                            "; ".join(vr.errors),
+                            recommendation="Hard validation failure — cannot continue.",
+                        )
+                        return state
 
                     # --- log step result ---
                     self._log_step_result(step, result, duration_ms)
@@ -173,6 +187,10 @@ class PipelineRunner:
                             return state
                         state = updated_state
                         state.waiting_for_user = False
+
+                        # Refresh heartbeat — it may have expired while waiting
+                        await self.session_store.heartbeat(session_id)
+
                         # Drop the step record from the escalated run so the
                         # re-run's record is the only one persisted for this step.
                         state.step_records = [
@@ -187,6 +205,12 @@ class PipelineRunner:
                                 step_id=step.step_id,
                                 step_name=step.step_name,
                             ).model_dump(),
+                        )
+                        logger.info(
+                            "[ESCALATE] Re-running step %d (%s) after user response "
+                            "(attempt %d/%d)",
+                            step.step_id, step.step_name,
+                            escalation_count, max_escalations,
                         )
                         continue  # Re-run the step with updated state
 
@@ -220,20 +244,30 @@ class PipelineRunner:
                         )
                     break
 
+                logger.info(
+                    "[PIPELINE] Step %d (%s) finished — continuing to next step",
+                    step.step_id, step.step_name,
+                )
                 # --- persist state after each step ---
                 await self.session_store.save(session_id, state)
 
             # --- pipeline complete ---
-            state.pipeline_status = "completed"
-            state.is_complete = True
-            await self.session_store.save(session_id, state)
-            await self.sse_manager.emit(
-                session_id,
-                DesignCompleteEvent(
-                    session_id=session_id,
-                    summary=self._build_summary(state),
-                ).model_dump(),
-            )
+            # Only mark complete if pipeline wasn't aborted by orphan/error
+            if state.pipeline_status == "running":
+                logger.info(
+                    "[PIPELINE] All steps done — completed_steps=%s",
+                    state.completed_steps,
+                )
+                state.pipeline_status = "completed"
+                state.is_complete = True
+                await self.session_store.save(session_id, state)
+                await self.sse_manager.emit(
+                    session_id,
+                    DesignCompleteEvent(
+                        session_id=session_id,
+                        summary=self._build_summary(state),
+                    ).model_dump(),
+                )
 
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
@@ -397,18 +431,28 @@ class PipelineRunner:
             # Mirror the routing rule in base.py: corrections present = real concern,
             # no corrections = informational observation only.
             severity = "warning" if (review and review.corrections) else "note"
+            short_summary = (
+                f"Step {step.step_id} approved with warning."
+                if severity == "warning"
+                else f"Step {step.step_id} — AI note."
+            )
+            # warning_message is a short one-liner shown above the KV table;
+            # reasoning is the full AI review text shown in the collapsible
+            # section.  Previously both were set to review.reasoning, which
+            # caused the same long text to render twice on the frontend.
+            warn_msg = (
+                review.recommendation
+                or review.observation
+                or short_summary
+            ) if review else ""
             event = StepWarningEvent(
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=review.confidence if review else 0.0,
                 reasoning=review.reasoning if review else "",
-                user_summary=(
-                    f"Step {step.step_id} approved with warning."
-                    if severity == "warning"
-                    else f"Step {step.step_id} — AI note."
-                ),
-                warning_message=review.reasoning if review else "",
+                user_summary=short_summary,
+                warning_message=warn_msg,
                 severity=severity,
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
