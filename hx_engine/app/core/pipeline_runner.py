@@ -35,6 +35,7 @@ from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
 from hx_engine.app.steps.step_04_tema_geometry import Step04TEMAGeometry
 from hx_engine.app.steps.step_05_lmtd import Step05LMTD
 from hx_engine.app.steps.step_06_initial_u import Step06InitialU
+from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ PIPELINE_STEPS = [
     Step04TEMAGeometry,
     Step05LMTD,
     Step06InitialU,
+    Step07TubeSideH,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
@@ -263,6 +265,14 @@ class PipelineRunner:
             "shell_side_fluid": "shell_side_fluid",
             "R_f_hot_m2KW": "R_f_hot_m2KW",
             "R_f_cold_m2KW": "R_f_cold_m2KW",
+            "h_tube_W_m2K": "h_tube_W_m2K",
+            "tube_velocity_m_s": "tube_velocity_m_s",
+            "Re_tube": "Re_tube",
+            "Pr_tube": "Pr_tube",
+            "Nu_tube": "Nu_tube",
+            "flow_regime_tube": "flow_regime_tube",
+            "T_mean_hot_C": "T_mean_hot_C",
+            "T_mean_cold_C": "T_mean_cold_C",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:

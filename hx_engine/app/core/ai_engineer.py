@@ -424,6 +424,64 @@ DO NOT:
 - Escalate for normal fluid pairs with well-known U ranges — use "proceed"\
 """
 
+_STEP_7_PROMPT = """\
+## Step 7: Tube-Side Heat Transfer Coefficient — Review Focus
+
+You are reviewing the tube-side heat transfer coefficient (h_tube) calculation.
+The engine has computed velocity, Re, Pr, selected a Nusselt correlation \
+(Hausen for laminar, Gnielinski for transition/turbulent), applied a viscosity \
+correction, and returned h_tube.
+
+YOUR REVIEW FOCUS:
+1. VELOCITY — Is the tube-side velocity reasonable for liquid service?
+   - Ideal range: 0.8–2.5 m/s
+   - < 0.8 m/s: fouling risk — insufficient turbulence to keep tubes clean
+   - > 2.5 m/s: erosion risk — especially for soft metals or dirty fluids
+   - 0.3–0.8 m/s: acceptable but marginal (warn)
+   - > 3.0 m/s: likely needs geometry change (reduce n_passes)
+
+2. FLOW REGIME:
+   - Laminar (Re < 2300): acceptable for viscous fluids (heavy oil, glycol), \
+but h_i will be low. Verify this is realistic for the fluid.
+   - Transition (2300–10000): uncertain — flag instability. Flow switches \
+between laminar and turbulent unpredictably.
+   - Turbulent (> 10000): ideal for heat transfer. Most water services \
+fall here.
+
+3. h_tube RANGES BY FLUID TYPE:
+   - Water: 3,000–10,000 W/m²K
+   - Light organics (toluene, ethanol): 500–2,000 W/m²K
+   - Heavy oil / crude: 50–500 W/m²K
+   - Glycols: 200–1,000 W/m²K
+   If h_tube is outside these ranges for the stated fluid, investigate.
+
+4. VISCOSITY CORRECTION:
+   - If (μ_bulk / μ_wall) > 1.3 or < 0.7, note significant wall effect.
+   - Heating case: μ_bulk / μ_wall > 1 (fluid thins at wall → higher h)
+   - Cooling case: μ_bulk / μ_wall < 1 (fluid thickens at wall → lower h)
+
+5. DITTUS-BOELTER CROSSCHECK:
+   - Divergence > 20% warrants a comment (Gnielinski is primary, DB is check)
+
+CORRECTION OPTIONS:
+- Change n_passes (to adjust velocity): more passes → higher velocity → higher Re
+- Flag fouling or erosion risk for downstream attention
+- DO NOT change tube geometry (OD, ID, length) — those are Step 4 decisions
+- DO NOT change n_tubes or shell diameter — those are Step 6 decisions
+
+DECISION GUIDE:
+- PROCEED: velocity in range and h_i reasonable for the fluid type
+- WARN: borderline velocity or transition zone — human should be aware
+- CORRECT: n_passes change needed to fix velocity
+- ESCALATE: fundamentally problematic (e.g. h_i orders of magnitude off)
+
+DO NOT:
+- Change Q_W, LMTD_K, F_factor, U_W_m2K, or A_m2 — those are upstream results
+- Override fluid properties — those come from Step 3
+- Change tube OD, ID, or length — those are Step 4 geometry decisions
+- Escalate for normal turbulent water with h_i in 3000–10000 range — use proceed\
+"""
+
 # Step prompt registry — add an entry here before wiring any new step
 _STEP_PROMPTS: dict[int, str] = {
     1: _STEP_1_PROMPT,
@@ -432,6 +490,7 @@ _STEP_PROMPTS: dict[int, str] = {
     4: _STEP_4_PROMPT,
     5: _STEP_5_PROMPT,
     6: _STEP_6_PROMPT,
+    7: _STEP_7_PROMPT,
 }
 
 
@@ -669,6 +728,41 @@ def _build_step_context_inner(
             )
         if n_req is not None:
             lines.append(f"Tubes required = {n_req} (before TEMA rounding)")
+        return "\n".join(lines)
+
+    if step_id == 7:
+        # Tube-side HTC context
+        lines = []
+        velocity = result.outputs.get("tube_velocity_m_s")
+        re = result.outputs.get("Re_tube")
+        pr = result.outputs.get("Pr_tube")
+        h_i = result.outputs.get("h_tube_W_m2K")
+        regime = result.outputs.get("flow_regime_tube")
+        method = result.outputs.get("method")
+        visc_corr = result.outputs.get("viscosity_correction")
+        db_div = result.outputs.get("dittus_boelter_divergence_pct")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+
+        tube_side = "cold" if state.shell_side_fluid == "hot" else "hot"
+        lines.append(f"Tube-side fluid: {tube_side} ({getattr(state, tube_side + '_fluid_name', '?')})")
+        if velocity is not None:
+            lines.append(f"Velocity = {velocity:.3f} m/s")
+        if re is not None:
+            lines.append(f"Re = {re:.0f}")
+        if pr is not None:
+            lines.append(f"Pr = {pr:.2f}")
+        if regime:
+            lines.append(f"Flow regime = {regime}")
+        if method:
+            lines.append(f"Correlation = {method}")
+        if h_i is not None:
+            lines.append(f"h_tube = {h_i:.1f} W/m²K")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction factor = {visc_corr:.4f}")
+        if db_div is not None:
+            lines.append(f"Dittus-Boelter divergence = {db_div:.1f}%")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
         return "\n".join(lines)
 
     # Step 1 and unknown steps — no extra context needed

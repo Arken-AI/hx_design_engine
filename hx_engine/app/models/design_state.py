@@ -260,12 +260,24 @@ class DesignState(BaseModel):
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
 
+    # --- mean temperatures (arithmetic mean of inlet/outlet, °C) ---
+    T_mean_hot_C: Optional[float] = None
+    T_mean_cold_C: Optional[float] = None
+
     # --- thermal results (populated by later steps) ---
     Q_W: Optional[float] = None
     LMTD_K: Optional[float] = None
     F_factor: Optional[float] = None
     U_W_m2K: Optional[float] = None
     A_m2: Optional[float] = None
+
+    # --- tube-side heat transfer (populated by Step 7) ---
+    h_tube_W_m2K: Optional[float] = None
+    tube_velocity_m_s: Optional[float] = None
+    Re_tube: Optional[float] = None
+    Pr_tube: Optional[float] = None
+    Nu_tube: Optional[float] = None
+    flow_regime_tube: Optional[str] = None   # "laminar" | "transition" | "turbulent"
 
     # --- pipeline state ---
     current_step: int = 0
