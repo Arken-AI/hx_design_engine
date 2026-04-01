@@ -78,6 +78,7 @@ class AIReview(BaseModel):
     observation: str = ""
     recommendation: Optional[str] = None  # required when decision == ESCALATE
     options: list[str] = Field(default_factory=list)  # choices for the user
+    option_ratings: list[int] = Field(default_factory=list)  # 1–10 completeness score per option
     attempts: list[AttemptRecord] = Field(default_factory=list)  # diagnostic trail
     ai_called: bool = False
 

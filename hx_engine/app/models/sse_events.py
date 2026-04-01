@@ -63,6 +63,8 @@ class StepEscalatedEvent(SSEBaseEvent):
     step_name: str
     message: str = ""
     options: list[str] = Field(default_factory=list)
+    option_ratings: list[int] = Field(default_factory=list)
+    recommendation: Optional[str] = None
 
 
 class StepCorrectedEvent(SSEBaseEvent):
@@ -90,6 +92,9 @@ class StepWarningEvent(SSEBaseEvent):
     severity: str = "warning"  # "warning" = actionable | "note" = informational
     duration_ms: int = 0
     outputs: dict[str, Any] = Field(default_factory=dict)
+    options: list[str] = Field(default_factory=list)
+    option_ratings: list[int] = Field(default_factory=list)
+    recommendation: Optional[str] = None
 
 
 class DesignCompleteEvent(SSEBaseEvent):
