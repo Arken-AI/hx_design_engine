@@ -52,6 +52,10 @@ PIPELINE_STEPS = [
 # How long (seconds) to wait for user response on ESCALATE
 USER_RESPONSE_TIMEOUT = 300
 
+# How long (seconds) to wait for user response on actionable WARNING
+# (shorter than ESCALATE — auto-proceeds with current values on timeout)
+WARNING_PAUSE_TIMEOUT = 120
+
 
 class PipelineRunner:
     """Runs the 5-step HX design pipeline for a single session."""
@@ -101,9 +105,11 @@ class PipelineRunner:
                     ).model_dump(),
                 )
 
-                # --- execute step with AI review loop (re-runs on ESCALATE) ---
+                # --- execute step with AI review loop (re-runs on ESCALATE/WARNING) ---
                 max_escalations = 2
                 escalation_count = 0
+                max_actionable_warnings = 1
+                warning_pause_count = 0
                 while True:
                     start_ms = time.monotonic()
                     try:
@@ -211,6 +217,50 @@ class PipelineRunner:
                             "(attempt %d/%d)",
                             step.step_id, step.step_name,
                             escalation_count, max_escalations,
+                        )
+                        continue  # Re-run the step with updated state
+
+                    # --- handle actionable WARNING: pause, wait for user, then re-run ---
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.WARN
+                        and result.ai_review.options  # actionable (has choices)
+                        and warning_pause_count < max_actionable_warnings
+                    ):
+                        warning_pause_count += 1
+                        state.waiting_for_user = True
+                        await self.session_store.save(session_id, state)
+                        updated_state = await self._wait_for_user(
+                            session_id, state, step, result,
+                            timeout=WARNING_PAUSE_TIMEOUT,
+                            on_timeout="proceed",
+                        )
+                        state = updated_state
+                        state.waiting_for_user = False
+
+                        # Refresh heartbeat — it may have expired while waiting
+                        await self.session_store.heartbeat(session_id)
+
+                        # Drop the step record from the warning run so the
+                        # re-run's record is the only one persisted for this step.
+                        state.step_records = [
+                            r for r in state.step_records
+                            if r.step_id != step.step_id
+                        ]
+                        # Re-emit step_started so the frontend resets the card
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepStartedEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                            ).model_dump(),
+                        )
+                        logger.info(
+                            "[WARNING-PAUSE] Re-running step %d (%s) after user response "
+                            "(warning attempt %d/%d)",
+                            step.step_id, step.step_name,
+                            warning_pause_count, max_actionable_warnings,
                         )
                         continue  # Re-run the step with updated state
 
@@ -456,6 +506,8 @@ class PipelineRunner:
                 severity=severity,
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
+                options=review.options if review else [],
+                recommendation=review.recommendation if review else None,
             )
 
         elif decision == AIDecisionEnum.ESCALATE:
@@ -464,6 +516,8 @@ class PipelineRunner:
                 step_id=step.step_id,
                 step_name=step.step_name,
                 message=review.reasoning if review else "AI requests user input.",
+                options=review.options if review else [],
+                recommendation=review.recommendation if review else None,
             )
 
         else:
@@ -496,11 +550,16 @@ class PipelineRunner:
         state: DesignState,
         step: Any,
         result: StepResult,
+        *,
+        timeout: int = USER_RESPONSE_TIMEOUT,
+        on_timeout: str = "abort",
     ) -> Optional[DesignState]:
         """Block the pipeline until the user responds via POST /respond.
 
         Returns the updated DesignState on success, or None on timeout
-        (caller must abort the pipeline when None is returned).
+        when on_timeout='abort' (caller must abort the pipeline).
+        When on_timeout='proceed', returns the current state unchanged
+        on timeout (pipeline continues with current values).
 
         Response types:
           accept  — user accepts the AI's recommendation; apply suggested
@@ -512,7 +571,7 @@ class PipelineRunner:
         future = self.sse_manager.create_user_response_future(session_id)
         try:
             response = await asyncio.wait_for(
-                future, timeout=USER_RESPONSE_TIMEOUT
+                future, timeout=timeout
             )
             if isinstance(response, dict):
                 response_type = response.get("type", "accept")
@@ -547,10 +606,19 @@ class PipelineRunner:
 
         except asyncio.TimeoutError:
             logger.warning(
-                "User response timeout for session %s step %d",
+                "User response timeout for session %s step %d (on_timeout=%s)",
                 session_id,
                 step.step_id,
+                on_timeout,
             )
+            if on_timeout == "proceed":
+                # Actionable WARNING timeout — proceed with current values
+                logger.info(
+                    "[WARNING-TIMEOUT] Proceeding with current values for step %d",
+                    step.step_id,
+                )
+                return state
+            # Default: abort pipeline (ESCALATE behavior)
             await self.sse_manager.emit(
                 session_id,
                 StepErrorEvent(

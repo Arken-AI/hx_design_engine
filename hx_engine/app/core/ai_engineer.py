@@ -310,6 +310,32 @@ Review the `escalation_hints` array. If you see triggers like:
 - `extreme_pressure`: > 100 bar → verify materials
 - `fouling_factor_uncertain`: Low confidence R_f → ask user to confirm
 
+### F. Auto-Correction Rules (WARN with corrections)
+When you identify a clear engineering rule violation, return decision="warn" \
+WITH a non-empty "corrections" array so the pipeline auto-resolves it. \
+Reserve corrections-free "warn" for judgment calls only.
+
+RULE 1 — Fouling-prone fluid in U-tube bundle:
+If the tube-side fluid is fouling-prone (lube oil, crude oil, heavy fuel oil, \
+heavy organics) AND tema_type == "AEU", this is a clear rule violation: \
+U-tube bundles cannot be mechanically cleaned on the tube side.
+→ Return decision="warn" with corrections:
+  [{"field": "tema_type", "old_value": "AEU", "new_value": "AES", \
+    "reason": "Fouling-prone fluid on tube side — U-tube cannot be mechanically cleaned. Switching to AES floating head."}]
+Also populate options for user override:
+  options: ["Switch to AES floating head (recommended)", "Keep AEU — fouling risk is acceptable", "Switch to BEM fixed tube-sheet"]
+  recommendation: "Switch to AES floating head (recommended)"
+
+RULE 2 — Shell-side crude/heavy oil in non-cleanable shell:
+If the shell-side fluid is crude or heavy oil AND pitch_layout is triangular \
+(not square), warn with correction to square pitch for cleaning lane access.
+
+JUDGMENT CALLS (warn WITHOUT corrections):
+- Light fouling fluids (light organics, clean process water) in AEU — marginal risk
+- Debate on tube vs shell allocation with no clear priority violation
+- Borderline fouling factor confidence
+These should remain as informational warnings — let the user decide.
+
 DO NOT:
 - Change the fluid allocation unless it clearly violates the priority rules
 - Override TEMA type without explaining which condition is violated
@@ -416,6 +442,30 @@ COMMON ISSUES WHEN YOU ARE CALLED:
 - Gas-phase fluid misclassified as liquid → U far too high → area too small
 - Very viscous fluid not classified as heavy_organic → U too high
 - Extremely large or small area suggesting U is off by an order of magnitude
+
+### Auto-Correction Rules (WARN with corrections)
+When you identify a clear engineering rule violation, return decision="warn" \
+WITH a non-empty "corrections" array so the pipeline auto-resolves it. \
+Reserve corrections-free "warn" for judgment calls only.
+
+RULE 1 — High-viscosity fluid misclassified:
+If the kinematic viscosity at the mean operating temperature exceeds 50 cSt \
+(indicating a heavy organic), but the fluid is classified as something lighter \
+(e.g. light_organic, water), the U assumption is too high.
+→ Return decision="warn" with corrections:
+  [{"field": "fluid_category", "old_value": "<current>", "new_value": "heavy_organic", \
+    "reason": "Kinematic viscosity > 50 cSt at mean temp — reclassifying as heavy organic."},
+   {"field": "U_W_m2K", "old_value": <current_U>, "new_value": 175, \
+    "reason": "Heavy organic/water U range is 150–200 W/m²K. Using midpoint 175."}]
+Also populate options for user override:
+  options: ["Accept reclassification to heavy_organic (recommended)", "Keep current classification", "Use custom U value"]
+  recommendation: "Accept reclassification to heavy_organic (recommended)"
+
+JUDGMENT CALLS (warn WITHOUT corrections):
+- Zero overdesign margin (overdesign_pct ≈ 0%) — this is a design choice, not a rule.
+  Warn the user but do NOT correct it. The user may accept tight margins.
+- Viscosity between 20–50 cSt — borderline, depends on fouling history.
+  Flag the concern but do NOT force reclassification.
 
 DO NOT:
 - Change Q_W, LMTD_K, or F_factor — these are upstream results from Steps 2 and 5
