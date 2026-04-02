@@ -177,5 +177,12 @@ async def respond_to_escalation(
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if not state.waiting_for_user:
+        # Pipeline is not waiting — the timeout already fired or the step completed.
+        raise HTTPException(
+            status_code=410,
+            detail="Response window has expired. The pipeline already timed out or completed.",
+        )
+
     sse_manager.resolve_user_response(session_id, response.model_dump())
     return {"status": "received"}

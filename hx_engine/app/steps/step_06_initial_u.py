@@ -101,7 +101,14 @@ class Step06InitialU(BaseStep):
             )
 
         # 3. Lookup U assumption
-        hot_type = classify_fluid_type(
+        # Check if the AI correction loop has overridden the fluid category
+        # (e.g. lubricating oil reclassified as heavy_organic). Use the
+        # corrected value so the re-run reflects the updated classification.
+        _hot_category_override = (
+            state.applied_corrections.get("fluid_category")
+            if state.applied_corrections else None
+        )
+        hot_type = _hot_category_override or classify_fluid_type(
             state.hot_fluid_name,
             state.hot_fluid_props,
         )
@@ -109,7 +116,14 @@ class Step06InitialU(BaseStep):
             state.cold_fluid_name,
             state.cold_fluid_props,
         )
-        u_data = get_U_assumption(state.hot_fluid_name, state.cold_fluid_name)
+        # If the hot_type was overridden by a correction, look up the U table
+        # directly using the resolved types instead of re-classifying by name.
+        if _hot_category_override:
+            u_pair_key = (hot_type, cold_type)
+            u_low, u_mid, u_high = _U_TABLE.get(u_pair_key, (100, 250, 400))
+            u_data = {"U_low": u_low, "U_mid": u_mid, "U_high": u_high}
+        else:
+            u_data = get_U_assumption(state.hot_fluid_name, state.cold_fluid_name)
         U_low = u_data["U_low"]
         U_mid = u_data["U_mid"]
         U_high = u_data["U_high"]

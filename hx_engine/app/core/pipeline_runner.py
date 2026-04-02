@@ -50,7 +50,7 @@ PIPELINE_STEPS = [
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
-USER_RESPONSE_TIMEOUT = 300
+USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
 
 # How long (seconds) to wait for user response on actionable WARNING
 # (shorter than ESCALATE — auto-proceeds with current values on timeout)
@@ -184,7 +184,7 @@ class PipelineRunner:
                         escalation_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        updated_state = await self._wait_for_user(
+                        updated_state, user_response_text = await self._wait_for_user(
                             session_id, state, step, result
                         )
                         if updated_state is None:
@@ -193,6 +193,18 @@ class PipelineRunner:
                             return state
                         state = updated_state
                         state.waiting_for_user = False
+
+                        # Record this escalation attempt in history so the AI
+                        # gets context on the next call and avoids repeating itself.
+                        step_key = str(step.step_id)
+                        if step_key not in state.escalation_history:
+                            state.escalation_history[step_key] = []
+                        state.escalation_history[step_key].append({
+                            "attempt": escalation_count,
+                            "options": result.ai_review.options,
+                            "recommendation": result.ai_review.recommendation,
+                            "user_chose": user_response_text or "(no text — accepted recommendation)",
+                        })
 
                         # Refresh heartbeat — it may have expired while waiting
                         await self.session_store.heartbeat(session_id)
@@ -230,7 +242,7 @@ class PipelineRunner:
                         warning_pause_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        updated_state = await self._wait_for_user(
+                        updated_state, _ = await self._wait_for_user(
                             session_id, state, step, result,
                             timeout=WARNING_PAUSE_TIMEOUT,
                             on_timeout="proceed",
@@ -556,13 +568,12 @@ class PipelineRunner:
         *,
         timeout: int = USER_RESPONSE_TIMEOUT,
         on_timeout: str = "abort",
-    ) -> Optional[DesignState]:
+    ) -> tuple[Optional[DesignState], str]:
         """Block the pipeline until the user responds via POST /respond.
 
-        Returns the updated DesignState on success, or None on timeout
-        when on_timeout='abort' (caller must abort the pipeline).
-        When on_timeout='proceed', returns the current state unchanged
-        on timeout (pipeline continues with current values).
+        Returns (updated_state, user_input_text).
+        updated_state is None on timeout when on_timeout='abort' (caller must abort).
+        When on_timeout='proceed', returns (current_state, "") on timeout.
 
         Response types:
           accept  — user accepts the AI's recommendation; apply suggested
@@ -572,6 +583,7 @@ class PipelineRunner:
           skip    — user wants to proceed with current outputs unchanged.
         """
         future = self.sse_manager.create_user_response_future(session_id)
+        user_input = ""
         try:
             response = await asyncio.wait_for(
                 future, timeout=timeout
@@ -579,7 +591,8 @@ class PipelineRunner:
             if isinstance(response, dict):
                 response_type = response.get("type", "accept")
                 values = response.get("values") or {}
-                user_input = values.get("user_input", "").strip().lower()
+                user_input_raw = values.get("user_input", "").strip()
+                user_input = user_input_raw.lower()
 
                 if response_type == "accept" or self._sounds_like_acceptance(user_input):
                     # Apply AI-recommended corrections so the re-run doesn't conflict
@@ -622,7 +635,7 @@ class PipelineRunner:
                     "[WARNING-TIMEOUT] Proceeding with current values for step %d",
                     step.step_id,
                 )
-                return state
+                return state, ""
             # Default: abort pipeline (ESCALATE behavior)
             await self.sse_manager.emit(
                 session_id,
@@ -633,8 +646,8 @@ class PipelineRunner:
                     message="User response timeout — aborting pipeline.",
                 ).model_dump(),
             )
-            return None  # Signal caller to abort
-        return state
+            return None, ""  # Signal caller to abort
+        return state, user_input_raw
 
     # ------------------------------------------------------------------
     # User response interpretation helpers

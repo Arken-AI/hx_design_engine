@@ -926,6 +926,28 @@ class AIEngineer:
         if step_context:
             prompt_parts.extend(["", "### Computed Context", step_context])
 
+        # Inject escalation history so the AI doesn't repeat itself on re-escalation
+        esc_history = getattr(state, "escalation_history", {})
+        step_history = esc_history.get(str(step.step_id), [])
+        if step_history:
+            prompt_parts.extend([
+                "",
+                "### Previous Escalation Attempts for This Step",
+                "The user has already responded to escalation(s) for this step. "
+                "Do NOT present the same options again. Build on what was tried.",
+            ])
+            for entry in step_history:
+                prompt_parts.append(
+                    f"- Attempt {entry['attempt']}: presented options "
+                    f"{entry['options']}. User chose: \"{entry['user_chose']}\". "
+                    f"Recommended: \"{entry.get('recommendation', '')}\""
+                )
+            prompt_parts.append(
+                "Given the above history, if you must escalate again: "
+                "explain WHY the previous choice was insufficient, and offer "
+                "NEW options that address the remaining constraint."
+            )
+
         # Append failure context on retry calls
         if failure_context is not None:
             failure_block = self._build_failure_context_prompt(failure_context)
