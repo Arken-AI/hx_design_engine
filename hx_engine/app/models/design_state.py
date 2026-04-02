@@ -102,6 +102,7 @@ class GeometrySpec(BaseModel):
     n_passes: Optional[int] = None
     pitch_layout: Optional[str] = None
     shell_passes: Optional[int] = None
+    n_shells: Optional[int] = None   # Number of shells (multi-shell arrangement)
 
     @field_validator("baffle_spacing_m")
     @classmethod
@@ -202,6 +203,15 @@ class GeometrySpec(BaseModel):
             )
         return v
 
+    @field_validator("n_shells")
+    @classmethod
+    def _check_n_shells(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1 or v > 4):
+            raise ValueError(
+                f"n_shells={v} outside range [1, 4]"
+            )
+        return v
+
     @model_validator(mode="after")
     def _check_tube_id_lt_od(self) -> "GeometrySpec":
         if (
@@ -259,6 +269,12 @@ class DesignState(BaseModel):
 
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
+
+    # --- multi-shell arrangement (set by user response to Step 6 escalation) ---
+    # "series"   — 2 shells in series, each handles full flow with full temperature program
+    # "parallel" — 2 shells in parallel, each handles half the flow and half the duty
+    # None       — single-shell design (default)
+    multi_shell_arrangement: Optional[str] = None
 
     # --- thermal results (populated by later steps) ---
     Q_W: Optional[float] = None
