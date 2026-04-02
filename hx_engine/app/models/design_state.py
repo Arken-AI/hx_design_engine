@@ -322,6 +322,13 @@ class DesignState(BaseModel):
     # instead of re-running its own decision tree and overriding it.
     applied_corrections: dict[str, Any] = Field(default_factory=dict)
 
+    # --- escalation history (per step) ---
+    # Records what options the AI presented and what the user chose on each
+    # escalation attempt. Injected into the AI prompt on re-escalation so the
+    # AI generates different, more targeted options instead of repeating itself.
+    # Format: { step_id: [{ "attempt": int, "options": [...], "user_chose": str }, ...] }
+    escalation_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+
     # ------------------------------------------------------------------
     # State snapshot / restore helpers (used by correction loop in base.py)
     # ------------------------------------------------------------------

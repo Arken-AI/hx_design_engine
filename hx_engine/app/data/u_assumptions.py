@@ -73,6 +73,9 @@ _HEAVY_ORGANIC_NAMES = {
     "heavy hydrocarbon", "heavy hydrocarbons", "fuel oil",
     "vegetable oil", "bitumen", "tar", "asphalt",
     "ethylene glycol", "propylene glycol", "thermal oil",
+    "lubricating oil", "lube oil", "lubrication oil",
+    "hydraulic oil", "mineral oil", "transformer oil",
+    "gear oil", "engine oil", "turbine oil",
 }
 
 _GAS_NAMES = {
