@@ -406,6 +406,7 @@ class PipelineRunner:
             "shell_side_fluid": "shell_side_fluid",
             "R_f_hot_m2KW": "R_f_hot_m2KW",
             "R_f_cold_m2KW": "R_f_cold_m2KW",
+            "multi_shell_arrangement": "multi_shell_arrangement",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:
@@ -601,7 +602,9 @@ class PipelineRunner:
                             self._apply_recommendation_hint(state, review.recommendation)
 
                 elif response_type == "override":
-                    # User typed a specific value — look for recognisable field names
+                    # User typed a specific value or clicked an option button.
+                    # Check for multi-shell keywords in the full response text
+                    # (covers both option-click text and typed free text).
                     self._apply_user_text_override(state, user_input)
 
                 # "skip" — don't touch state; re-run will see unchanged inputs
@@ -678,6 +681,17 @@ class PipelineRunner:
     @staticmethod
     def _apply_user_text_override(state: DesignState, text: str) -> None:
         """Parse free-text override for known field names."""
+        # Multi-shell arrangement — check this first so "series"/"parallel"
+        # in the text is acted on before looking for TEMA type codes.
+        if re.search(r"\bseries\b", text, re.IGNORECASE):
+            state.multi_shell_arrangement = "series"
+            logger.info("User override: multi_shell_arrangement = 'series'")
+            return
+        if re.search(r"\bparallel\b", text, re.IGNORECASE):
+            state.multi_shell_arrangement = "parallel"
+            logger.info("User override: multi_shell_arrangement = 'parallel'")
+            return
+
         # TEMA type mentioned explicitly
         match = re.search(
             r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b", text, re.IGNORECASE
@@ -702,6 +716,8 @@ class PipelineRunner:
             "A_m2": state.A_m2,
             "tema_type": state.tema_type,
             "tema_class": state.tema_class,
+            "multi_shell_arrangement": state.multi_shell_arrangement,
+            "n_shells": state.geometry.n_shells if state.geometry else None,
             "warnings": state.warnings,
             "notes": state.notes,
             "geometry": state.geometry.model_dump() if state.geometry else None,

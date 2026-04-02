@@ -134,20 +134,45 @@ class Step06InitialU(BaseStep):
             A_required / (math.pi * tube_od * tube_length)
         )
 
-        # 6. Find standard shell
+        # 6. Find standard shell — with multi-shell support
         pitch_layout = state.geometry.pitch_layout
         n_passes = state.geometry.n_passes
 
+        # --- Multi-shell path (set by user response to a prior escalation) ---
+        arrangement = state.multi_shell_arrangement  # "series" | "parallel" | None
+        n_shells = 1
+        at_max_shell = False
+
+        if arrangement == "parallel":
+            # Parallel: split flow and duty equally across 2 shells.
+            # Each shell sees half the total tube count requirement and half Q.
+            n_shells = 2
+            N_tubes_per_shell = math.ceil(N_tubes_required / 2)
+            Q_per_shell = state.Q_W / 2  # emitted in outputs for downstream steps
+        elif arrangement == "series":
+            # Series: each shell handles the full flow and the full temperature
+            # program, but shell_passes is raised to 2 (two 1-2 shells in
+            # series is the standard TEMA multi-shell approach).
+            # Each shell transfers roughly half the total duty.
+            n_shells = 2
+            N_tubes_per_shell = math.ceil(N_tubes_required / 2)
+            Q_per_shell = state.Q_W / 2  # emitted in outputs for downstream steps
+        else:
+            # Single-shell (default) — use full tube count
+            N_tubes_per_shell = N_tubes_required
+            Q_per_shell = state.Q_W
+
         shell_diameter_m, actual_n_tubes = find_shell_diameter(
-            N_tubes_required, tube_od, pitch_layout, n_passes,
+            N_tubes_per_shell, tube_od, pitch_layout, n_passes,
         )
 
-        # Detect if we hit the largest shell capacity
-        at_max_shell = actual_n_tubes < N_tubes_required
+        # Detect if we still hit the largest shell capacity even after splitting
+        at_max_shell = actual_n_tubes < N_tubes_per_shell
 
         # 7. Update geometry
-        # Compute provided area with actual TEMA tube count
-        A_provided = actual_n_tubes * math.pi * tube_od * tube_length
+        # Compute provided area: per-shell tubes × n_shells
+        total_actual_n_tubes = actual_n_tubes * n_shells
+        A_provided = total_actual_n_tubes * math.pi * tube_od * tube_length
 
         # Recalculate baffle spacing using Step 4's heuristic:
         # 0.5× shell_diameter for viscous shell-side, 0.4× otherwise
@@ -167,18 +192,26 @@ class Step06InitialU(BaseStep):
         # Build updated geometry (preserve existing fields, override sizing)
         from hx_engine.app.models.design_state import GeometrySpec
 
+        # For series arrangement bump shell_passes to 2 so the F-factor step
+        # (Step 5) will recalculate correctly when the convergence loop runs.
+        new_shell_passes = 2 if arrangement == "series" else (
+            state.geometry.shell_passes or 1
+        )
+
         updated_geometry = state.geometry.model_copy(update={
-            "n_tubes": actual_n_tubes,
+            "n_tubes": actual_n_tubes,          # tubes per shell
             "shell_diameter_m": shell_diameter_m,
             "baffle_spacing_m": baffle_spacing_m,
+            "n_shells": n_shells,
+            "shell_passes": new_shell_passes,
         })
 
         # 8. Collect warnings
         if at_max_shell:
             warnings.append(
-                f"Required {N_tubes_required} tubes but largest standard shell "
-                f"(37\") holds only {actual_n_tubes}. Consider multiple shells "
-                f"in series/parallel."
+                f"Required {N_tubes_per_shell} tubes per shell but largest "
+                f"standard shell (37\") holds only {actual_n_tubes}. "
+                f"Consider increasing the number of shells or a non-standard shell."
             )
         if A_required > 500:
             warnings.append(
@@ -195,8 +228,11 @@ class Step06InitialU(BaseStep):
         self._is_fallback = is_fallback
         self._A_required = A_required
         self._N_tubes_required = N_tubes_required
+        self._N_tubes_per_shell = N_tubes_per_shell
         self._at_max_shell = at_max_shell
         self._U_mid = U_mid
+        self._n_shells = n_shells
+        self._arrangement = arrangement
 
         # 10. Build escalation hints for AI context
         escalation_hints: list[dict] = []
@@ -208,20 +244,26 @@ class Step06InitialU(BaseStep):
                     f"Verify U = {U_mid} W/m²K is reasonable for this service."
                 ),
             })
-        if at_max_shell:
+        if at_max_shell and arrangement is None:
+            # Only escalate for multi-shell selection when we haven't already
+            # been given an arrangement by the user.
             escalation_hints.append({
                 "trigger": "exceeds_max_shell",
                 "recommendation": (
                     f"Need {N_tubes_required} tubes but max TEMA shell holds "
-                    f"{actual_n_tubes}. Multiple shells may be required."
+                    f"{actual_n_tubes}. Multiple shells required."
                 ),
             })
+        # Note: large_area check uses total A_required (not per-shell) intentionally.
+        # The AI sees both A_required and n_shells in context, so it can reason
+        # that 306 m² across 2 shells is 153 m² each — an acceptable size.
         if A_required > 200:
             escalation_hints.append({
                 "trigger": "large_area",
                 "recommendation": (
-                    f"Required area = {A_required:.1f} m² is large. "
-                    f"Verify U assumption and consider if U is too conservative."
+                    f"Required area = {A_required:.1f} m² total"
+                    + (f" ({A_required / n_shells:.1f} m² per shell across {n_shells} shells)" if n_shells > 1 else "")
+                    + ". Verify U assumption and consider if U is too conservative."
                 ),
             })
         if A_required < 1:
@@ -246,7 +288,11 @@ class Step06InitialU(BaseStep):
             "hot_fluid_type": hot_type,
             "cold_fluid_type": cold_type,
             "n_tubes_required": N_tubes_required,
+            "n_tubes_per_shell": N_tubes_per_shell,
             "A_provided_m2": A_provided,
+            "n_shells": n_shells,
+            "multi_shell_arrangement": arrangement,
+            "Q_per_shell_W": Q_per_shell,
             "geometry": updated_geometry,
         }
         if escalation_hints:
@@ -270,13 +316,15 @@ class Step06InitialU(BaseStep):
           1. U_mid came from the default fallback (fluid pair not in table)
           2. Required area > 200 m² (unusually large)
           3. Required area < 1 m² (unusually small)
-          4. N_tubes_required exceeds largest available shell capacity
+          4. N_tubes_required exceeds largest available shell capacity AND
+             no multi_shell_arrangement has been set yet by the user
           5. U_mid outside typical range (< 50 or > 3000 W/m²K)
         """
         is_fallback = getattr(self, "_is_fallback", False)
         A_required = getattr(self, "_A_required", None)
         at_max_shell = getattr(self, "_at_max_shell", False)
         U_mid = getattr(self, "_U_mid", None)
+        arrangement = getattr(self, "_arrangement", None)
 
         if is_fallback:
             return True
@@ -284,7 +332,9 @@ class Step06InitialU(BaseStep):
             return True
         if A_required is not None and A_required < 1:
             return True
-        if at_max_shell:
+        # Only escalate for multi-shell if the user hasn't already chosen an
+        # arrangement — once they pick series/parallel, don't re-escalate.
+        if at_max_shell and arrangement is None:
             return True
         if U_mid is not None and (U_mid < 50 or U_mid > 3000):
             return True
