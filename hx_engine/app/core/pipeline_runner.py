@@ -463,12 +463,18 @@ class PipelineRunner:
         safe_outputs = _serialize_outputs(result.outputs)
 
         if decision == AIDecisionEnum.PROCEED:
+            # Only surface reasoning when AI was actually called with a real review.
+            # An empty string causes the frontend <Reasoning> component to render
+            # nothing, hiding the pointless "▸ view reasoning" toggle.
+            _reasoning = ""
+            if review and review.ai_called and review.reasoning:
+                _reasoning = review.reasoning
             event = StepApprovedEvent(
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=review.confidence if review else 1.0,
-                reasoning=review.reasoning if review else "No AI review required.",
+                reasoning=_reasoning,
                 user_summary=f"Step {step.step_id} ({step.step_name}) completed.",
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
