@@ -103,6 +103,13 @@ class GeometrySpec(BaseModel):
     pitch_layout: Optional[str] = None
     shell_passes: Optional[int] = None
 
+    # --- Bell-Delaware specific (populated by Step 8 preconditions) ---
+    tube_pitch_m: Optional[float] = None
+    n_sealing_strip_pairs: Optional[int] = 0
+    inlet_baffle_spacing_m: Optional[float] = None   # defaults to baffle_spacing_m
+    outlet_baffle_spacing_m: Optional[float] = None   # defaults to baffle_spacing_m
+    n_baffles: Optional[int] = None
+
     @field_validator("baffle_spacing_m")
     @classmethod
     def _check_baffle_spacing(cls, v: Optional[float]) -> Optional[float]:
@@ -202,6 +209,51 @@ class GeometrySpec(BaseModel):
             )
         return v
 
+    @field_validator("tube_pitch_m")
+    @classmethod
+    def _check_tube_pitch(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.01 or v > 0.10):
+            raise ValueError(
+                f"tube_pitch_m={v} outside range [0.01, 0.10]"
+            )
+        return v
+
+    @field_validator("n_sealing_strip_pairs")
+    @classmethod
+    def _check_sealing_strips(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 0 or v > 20):
+            raise ValueError(
+                f"n_sealing_strip_pairs={v} outside range [0, 20]"
+            )
+        return v
+
+    @field_validator("inlet_baffle_spacing_m")
+    @classmethod
+    def _check_inlet_baffle_spacing(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.05 or v > 2.0):
+            raise ValueError(
+                f"inlet_baffle_spacing_m={v} outside range [0.05, 2.0]"
+            )
+        return v
+
+    @field_validator("outlet_baffle_spacing_m")
+    @classmethod
+    def _check_outlet_baffle_spacing(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.05 or v > 2.0):
+            raise ValueError(
+                f"outlet_baffle_spacing_m={v} outside range [0.05, 2.0]"
+            )
+        return v
+
+    @field_validator("n_baffles")
+    @classmethod
+    def _check_n_baffles(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1 or v > 100):
+            raise ValueError(
+                f"n_baffles={v} outside range [1, 100]"
+            )
+        return v
+
     @model_validator(mode="after")
     def _check_tube_id_lt_od(self) -> "GeometrySpec":
         if (
@@ -278,6 +330,13 @@ class DesignState(BaseModel):
     Pr_tube: Optional[float] = None
     Nu_tube: Optional[float] = None
     flow_regime_tube: Optional[str] = None   # "laminar" | "transition" | "turbulent"
+
+    # --- shell-side heat transfer (populated by Step 8) ---
+    h_shell_W_m2K: Optional[float] = None
+    Re_shell: Optional[float] = None
+    shell_side_j_factors: Optional[dict] = None  # {"J_c": ..., "J_l": ..., ...}
+    h_shell_ideal_W_m2K: Optional[float] = None
+    h_shell_kern_W_m2K: Optional[float] = None   # Kern cross-check value
 
     # --- pipeline state ---
     current_step: int = 0
