@@ -32,6 +32,8 @@ _FOULING_SIMPLE: dict[str, float] = {
     "steam condensate":    0.000088,
     "light hydrocarbon":   0.000176,
     "light hydrocarbons":  0.000176,
+    "lube oil":            0.000176,
+    "lubricating oil":     0.000176,
     "gasoline":            0.000176,
     "kerosene":            0.000176,
     "diesel":              0.000352,
@@ -90,6 +92,29 @@ _HEAVY_THRESHOLD = 0.000704      # ≤ this → heavy
 
 # Default for unknown fluids (conservative)
 _DEFAULT_RF = 0.000352
+
+# ---------------------------------------------------------------------------
+# Lower bounds per fluid class (TEMA minimum expected value for the service)
+# Used by FE-2 to detect when a resolved Rf is at the TEMA minimum, which
+# signals that actual service conditions may push it significantly higher.
+# ---------------------------------------------------------------------------
+_FOULING_LOWER_BOUNDS: dict[str, float] = {
+    "lube oil":            0.000176,
+    "lubricating oil":     0.000176,
+    "light hydrocarbon":   0.000176,
+    "light hydrocarbons":  0.000176,
+    "gasoline":            0.000176,
+    "kerosene":            0.000176,
+    "diesel":              0.000176,
+    "fuel oil":            0.000352,
+    "heavy hydrocarbon":   0.000352,
+    "heavy hydrocarbons":  0.000352,
+    "crude oil":           0.000176,  # lowest range value (clean crude, T < 120°C)
+    "crude":               0.000176,
+    "thermal oil":         0.000176,
+    "organic solvent":     0.000176,
+    "organic solvents":    0.000176,
+}
 
 # ---------------------------------------------------------------------------
 # Location / condition-dependent fluids
@@ -282,6 +307,23 @@ def is_fouling_fluid(
     """True if R_f > 0.000352 (moderate-heavy or worse)."""
     rf = get_fouling_factor(fluid_name, temperature_C)
     return rf > _MODERATE_THRESHOLD
+
+
+def get_fouling_lower_bound(
+    fluid_name: str, temperature_C: float | None = None,
+) -> float | None:
+    """Return the TEMA lower-bound R_f for a fluid class, or None if unknown.
+
+    Used by FE-2 to check whether a resolved Rf is at the TEMA minimum —
+    if so, actual service may push it higher, warranting a warning.
+    """
+    name = _normalize_name(fluid_name)
+    if name in _FOULING_LOWER_BOUNDS:
+        return _FOULING_LOWER_BOUNDS[name]
+    for key, lb in _FOULING_LOWER_BOUNDS.items():
+        if key in name or name in key:
+            return lb
+    return None
 
 
 # ---------------------------------------------------------------------------

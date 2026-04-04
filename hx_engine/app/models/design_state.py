@@ -283,6 +283,11 @@ class DesignState(BaseModel):
     U_W_m2K: Optional[float] = None
     A_m2: Optional[float] = None
 
+    # --- area uncertainty band (FE-3, populated by Step 6 when tube-side ---
+    # fluid source confidence < 0.80; None when confidence is sufficient) ---
+    A_required_low_m2: Optional[float] = None
+    A_required_high_m2: Optional[float] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
@@ -301,6 +306,16 @@ class DesignState(BaseModel):
 
     # --- confidence breakdown (populated by Step 16) ---
     confidence_breakdown: Optional[dict[str, float]] = None
+
+    # --- shell ID finalisation flag (FE-4) ---
+    # False for floating-head types (AES/AEU) until Step 15 applies the
+    # +50-75 mm clearance. True for fixed-tubesheet types (BEM, etc.) and
+    # after Step 15 confirms the shell ID.
+    shell_id_finalised: bool = False
+
+    # --- design strengths / risks (FE-5, populated by Step 16) ---
+    design_strengths: list[str] = Field(default_factory=list)
+    design_risks: list[str] = Field(default_factory=list)
 
     # --- fouling resistances (populated by Step 4; AI can correct these) ---
     # When set, Step 4 skips the lookup and uses these values directly,

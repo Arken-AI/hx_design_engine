@@ -22,6 +22,7 @@ from hx_engine.app.data.fouling_factors import (
     classify_fouling,
     get_fouling_factor,
     get_fouling_factor_with_source,
+    get_fouling_lower_bound,
     is_fouling_fluid,
     is_location_dependent,
     resolve_fouling_factor,
@@ -910,6 +911,55 @@ class Step04TEMAGeometry(BaseStep):
             else:
                 fouling_metadata[side_label] = table_info
 
+        # --- FE-4: shell_id_finalised flag ---
+        # Floating-head types (AES/AEU) need a +50-75mm clearance applied in
+        # Step 15 before the shell ID is final. Fixed-tubesheet types are fine.
+        state.shell_id_finalised = tema_type not in ("AES", "AEU")
+
+        # --- FE-2: Rf lower-bound warning ---
+        # When tube-side Rf equals the TEMA lower bound AND tube-side fluid
+        # properties came from a low-confidence source (< 0.80), warn the
+        # engineer that actual service conditions may push Rf higher.
+        tube_side = "cold" if shell_side == "hot" else "hot"
+        tube_fluid_name = (
+            state.hot_fluid_name if tube_side == "hot" else state.cold_fluid_name
+        ) or ""
+        tube_side_props = (
+            state.hot_fluid_props if tube_side == "hot" else state.cold_fluid_props
+        )
+        tube_rf = fouling_metadata.get(tube_side, {}).get("rf")
+        tube_conf = (
+            tube_side_props.property_confidence
+            if tube_side_props is not None else None
+        )
+        if tube_rf is not None and tube_conf is not None and tube_conf < 0.80:
+            T_tube_in = (
+                state.T_hot_in_C if tube_side == "hot" else state.T_cold_in_C
+            )
+            T_tube_out = (
+                state.T_hot_out_C if tube_side == "hot" else state.T_cold_out_C
+            )
+            T_tube_mean = (
+                (T_tube_in + T_tube_out) / 2.0
+                if T_tube_in is not None and T_tube_out is not None else None
+            )
+            lower_bound = get_fouling_lower_bound(tube_fluid_name, T_tube_mean)
+            if lower_bound is not None and tube_rf <= lower_bound:
+                rf2 = 2.0 * lower_bound
+                rf3 = 3.0 * lower_bound
+                warning_msg = (
+                    f"Rf at lower bound for '{tube_fluid_name}': "
+                    f"R_f = {tube_rf:.6f} m²·K/W is the TEMA minimum for this fluid class "
+                    f"(tube-side property confidence = {tube_conf:.0%}). "
+                    f"Confirm oil cleanliness class. Three Rf scenarios: "
+                    f"(1) Clean service: {lower_bound:.6f} m²·K/W [current], "
+                    f"(2) Moderate contamination: {rf2:.6f} m²·K/W, "
+                    f"(3) Heavy contamination: {rf3:.6f} m²·K/W. "
+                    f"Area impact shown in Step 6."
+                )
+                all_warnings.append(warning_msg)
+                state.warnings.append(warning_msg)
+
         # --- TEMA Class (R/C/B) determination ---
         tema_class, class_reasoning = _determine_tema_class(state)
         all_warnings.append(f"TEMA Class: {tema_class} — {class_reasoning}")
@@ -934,6 +984,7 @@ class Step04TEMAGeometry(BaseStep):
             "fouling_metadata": fouling_metadata,
             "R_f_hot_m2KW": fouling_metadata.get("hot", {}).get("rf"),
             "R_f_cold_m2KW": fouling_metadata.get("cold", {}).get("rf"),
+            "shell_id_finalised": state.shell_id_finalised,
         }
 
         return StepResult(
