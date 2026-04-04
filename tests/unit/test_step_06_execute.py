@@ -333,3 +333,153 @@ class TestStep06Execute:
         expected_baffle = 0.4 * geom.shell_diameter_m
         expected_baffle = max(0.05, min(2.0, expected_baffle))
         assert geom.baffle_spacing_m == pytest.approx(expected_baffle, rel=1e-6)
+
+
+class TestFE3AreaUncertaintyBand:
+    """FE-3: area uncertainty band when tube-side confidence < 0.80."""
+
+    @pytest.mark.asyncio
+    async def test_band_computed_for_low_confidence(self, step):
+        """Low tube-side confidence → A_required_low/high set on state."""
+        hot_props = FluidProperties(
+            density_kg_m3=870, viscosity_Pa_s=0.02,
+            cp_J_kgK=2100, k_W_mK=0.13, Pr=300.0,
+            property_source="petroleum-generic",
+            property_confidence=0.65,
+        )
+        # hot is tube-side (shell_side_fluid="cold")
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+        )
+        result = await step.execute(state)
+
+        assert state.A_required_low_m2 is not None
+        assert state.A_required_high_m2 is not None
+        assert state.A_required_low_m2 < state.A_m2
+        assert state.A_required_high_m2 > state.A_m2
+
+    @pytest.mark.asyncio
+    async def test_band_formula_correctness(self, step):
+        """Band = A / (1 ± (1 - conf) × 0.25)."""
+        conf = 0.65
+        hot_props = FluidProperties(
+            density_kg_m3=870, viscosity_Pa_s=0.02,
+            cp_J_kgK=2100, k_W_mK=0.13, Pr=300.0,
+            property_confidence=conf,
+        )
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+        )
+        await step.execute(state)
+
+        unc = (1.0 - conf) * 0.25
+        import math
+        assert state.A_required_low_m2 == pytest.approx(state.A_m2 / (1.0 + unc), rel=1e-6)
+        assert state.A_required_high_m2 == pytest.approx(state.A_m2 / (1.0 - unc), rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_no_band_for_high_confidence(self, step):
+        """Confidence >= 0.80 → no band (A_required_low/high remain None)."""
+        hot_props = FluidProperties(
+            density_kg_m3=990, viscosity_Pa_s=0.0008,
+            cp_J_kgK=4186, k_W_mK=0.6, Pr=5.6,
+            property_confidence=0.95,
+        )
+        state = _make_state(
+            hot_fluid="water",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+        )
+        await step.execute(state)
+
+        assert state.A_required_low_m2 is None
+        assert state.A_required_high_m2 is None
+
+    @pytest.mark.asyncio
+    async def test_no_band_when_tube_props_none(self, step):
+        """tube_side_fluid_props=None → no crash, no band."""
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=None,  # no props
+            shell_side_fluid="cold",
+        )
+        await step.execute(state)
+
+        assert state.A_required_low_m2 is None
+        assert state.A_required_high_m2 is None
+
+    @pytest.mark.asyncio
+    async def test_band_appears_in_outputs(self, step):
+        """A_required_low/high_m2 appear in step outputs."""
+        hot_props = FluidProperties(
+            density_kg_m3=870, viscosity_Pa_s=0.02,
+            cp_J_kgK=2100, k_W_mK=0.13, Pr=300.0,
+            property_confidence=0.65,
+        )
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+        )
+        result = await step.execute(state)
+
+        assert "A_required_low_m2" in result.outputs
+        assert "A_required_high_m2" in result.outputs
+        assert result.outputs["A_required_low_m2"] is not None
+
+
+class TestFE2AreaAugment:
+    """FE-2 area augment in Step 6: Rf scenario area impact percentages."""
+
+    @pytest.mark.asyncio
+    async def test_area_impact_warning_emitted(self, step):
+        """Lube oil at lower-bound Rf + low confidence → area impact warning."""
+        hot_props = FluidProperties(
+            density_kg_m3=870, viscosity_Pa_s=0.02,
+            cp_J_kgK=2100, k_W_mK=0.13, Pr=300.0,
+            property_source="petroleum-generic",
+            property_confidence=0.65,
+        )
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+            R_f_hot_m2KW=0.000176,  # at lower bound
+        )
+        result = await step.execute(state)
+
+        all_warnings = result.warnings + state.warnings
+        assert any("scenario area impact" in w for w in all_warnings)
+        # All three scenarios listed
+        impact_warnings = [w for w in all_warnings if "scenario area impact" in w]
+        assert any("(1)" in w and "(2)" in w and "(3)" in w for w in impact_warnings)
+
+    @pytest.mark.asyncio
+    async def test_no_area_impact_when_rf_above_lower_bound(self, step):
+        """Rf above lower bound → no area impact warning."""
+        hot_props = FluidProperties(
+            density_kg_m3=870, viscosity_Pa_s=0.02,
+            cp_J_kgK=2100, k_W_mK=0.13, Pr=300.0,
+            property_confidence=0.65,
+        )
+        state = _make_state(
+            hot_fluid="lube oil",
+            cold_fluid="water",
+            hot_props=hot_props,
+            shell_side_fluid="cold",
+            R_f_hot_m2KW=0.000352,  # above lower bound (0.000176)
+        )
+        result = await step.execute(state)
+
+        all_warnings = result.warnings + state.warnings
+        assert not any("scenario area impact" in w for w in all_warnings)

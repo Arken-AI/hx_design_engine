@@ -419,6 +419,9 @@ class PipelineRunner:
             "R_f_hot_m2KW": "R_f_hot_m2KW",
             "R_f_cold_m2KW": "R_f_cold_m2KW",
             "multi_shell_arrangement": "multi_shell_arrangement",
+            "shell_id_finalised": "shell_id_finalised",
+            "A_required_low_m2": "A_required_low_m2",
+            "A_required_high_m2": "A_required_high_m2",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:

@@ -23,6 +23,7 @@ import math
 from typing import TYPE_CHECKING
 
 from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.data.fouling_factors import get_fouling_lower_bound
 from hx_engine.app.data.tema_tables import find_shell_diameter
 from hx_engine.app.data.u_assumptions import (
     _U_TABLE,
@@ -238,6 +239,71 @@ class Step06InitialU(BaseStep):
                 f"A compact or plate exchanger may be more suitable."
             )
 
+        # --- FE-3: Area uncertainty band ---
+        # When tube-side fluid property confidence < 0.80, compute a band on
+        # A_required derived from the source confidence.
+        # uncertainty_fraction = (1.0 - confidence) × 0.25
+        tube_side = "cold" if state.shell_side_fluid == "hot" else "hot"
+        tube_side_props = (
+            state.hot_fluid_props if tube_side == "hot" else state.cold_fluid_props
+        )
+        tube_conf = (
+            tube_side_props.property_confidence
+            if tube_side_props is not None else None
+        )
+        A_required_low: float | None = None
+        A_required_high: float | None = None
+
+        if tube_conf is not None and tube_conf < 0.80:
+            unc = (1.0 - tube_conf) * 0.25
+            A_required_low = A_required / (1.0 + unc)
+            A_required_high = A_required / (1.0 - unc)
+            band_msg = (
+                f"Area uncertainty band: {A_required:.1f} m² "
+                f"(range: {A_required_low:.1f}–{A_required_high:.1f} m²) "
+                f"— tube-side property confidence = {tube_conf:.0%}."
+            )
+            warnings.append(band_msg)
+            state.warnings.append(band_msg)
+
+        # Apply FE-3 results to state
+        state.A_required_low_m2 = A_required_low
+        state.A_required_high_m2 = A_required_high
+
+        # --- FE-2 area augment ---
+        # If Step 4 flagged Rf at the lower bound, append area impact for the
+        # three Rf scenarios now that A_required is available.
+        tube_fluid_name = (
+            state.hot_fluid_name if tube_side == "hot" else state.cold_fluid_name
+        ) or ""
+        tube_rf = (
+            state.R_f_hot_m2KW if tube_side == "hot" else state.R_f_cold_m2KW
+        )
+        if tube_conf is not None and tube_conf < 0.80 and tube_rf is not None:
+            T_tube_in = (
+                state.T_hot_in_C if tube_side == "hot" else state.T_cold_in_C
+            )
+            T_tube_out = (
+                state.T_hot_out_C if tube_side == "hot" else state.T_cold_out_C
+            )
+            T_tube_mean = (
+                (T_tube_in + T_tube_out) / 2.0
+                if T_tube_in is not None and T_tube_out is not None else None
+            )
+            lower_bound = get_fouling_lower_bound(tube_fluid_name, T_tube_mean)
+            if lower_bound is not None and tube_rf <= lower_bound:
+                rf_scenarios = [lower_bound, 2.0 * lower_bound, 3.0 * lower_bound]
+                # Area impact: A_new/A_old - 1 ≈ U_mid × ΔRf (linearised)
+                pcts = [U_mid * (rf - tube_rf) * 100.0 for rf in rf_scenarios]
+                impact_msg = (
+                    f"Rf scenario area impact (tube-side, U = {U_mid:.0f} W/m²K): "
+                    f"(1) {rf_scenarios[0]:.6f} m²·K/W → +{pcts[0]:.0f}% area, "
+                    f"(2) {rf_scenarios[1]:.6f} m²·K/W → +{pcts[1]:.0f}% area, "
+                    f"(3) {rf_scenarios[2]:.6f} m²·K/W → +{pcts[2]:.0f}% area."
+                )
+                warnings.append(impact_msg)
+                state.warnings.append(impact_msg)
+
         # 9. Cache values for _conditional_ai_trigger
         self._is_fallback = is_fallback
         self._A_required = A_required
@@ -298,6 +364,8 @@ class Step06InitialU(BaseStep):
         outputs: dict = {
             "U_W_m2K": U_mid,
             "A_m2": A_required,
+            "A_required_low_m2": A_required_low,
+            "A_required_high_m2": A_required_high,
             "U_range": {"U_low": U_low, "U_mid": U_mid, "U_high": U_high},
             "hot_fluid_type": hot_type,
             "cold_fluid_type": cold_type,

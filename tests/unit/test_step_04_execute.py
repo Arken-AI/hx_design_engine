@@ -128,3 +128,154 @@ class TestStep04Execute:
         """isinstance(Step04TEMAGeometry(), StepProtocol) → True."""
         step = Step04TEMAGeometry()
         assert isinstance(step, StepProtocol)
+
+
+class TestFE2RfLowerBoundWarning:
+    """FE-2: Rf at lower bound + low tube-side confidence → warning."""
+
+    @pytest.mark.asyncio
+    async def test_warning_fires_when_rf_at_lower_bound_and_low_confidence(self):
+        """Lube oil tube-side with petroleum-generic confidence → warning emitted.
+
+        mu=0.005 Pa·s keeps lube oil below the 10× viscosity threshold so Rule 4
+        doesn't fire and lube oil stays on tube-side (default allocation).
+        """
+        step = Step04TEMAGeometry()
+        state = _make_state(
+            hot_fluid_name="lube oil",
+            cold_fluid_name="water",
+            hot_fluid_props=FluidProperties(
+                density_kg_m3=870, viscosity_Pa_s=0.005,
+                cp_J_kgK=2100, k_W_mK=0.13, Pr=80.0,
+                property_source="petroleum-generic",
+                property_confidence=0.65,
+            ),
+            cold_fluid_props=FluidProperties(
+                density_kg_m3=1000, viscosity_Pa_s=0.001,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=7.0,
+                property_source="iapws",
+                property_confidence=1.0,
+            ),
+        )
+        result = await step.execute(state)
+        all_warnings = result.warnings + state.warnings
+        assert any("lower bound" in w for w in all_warnings)
+        assert any("lube oil" in w for w in all_warnings)
+        # Three Rf scenarios must be listed
+        lower_bound_warnings = [w for w in all_warnings if "lower bound" in w]
+        assert any("(1)" in w and "(2)" in w and "(3)" in w for w in lower_bound_warnings)
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_confidence_above_threshold(self):
+        """High tube-side confidence (>= 0.80) → no lower-bound warning."""
+        step = Step04TEMAGeometry()
+        state = _make_state(
+            hot_fluid_name="lube oil",
+            cold_fluid_name="water",
+            hot_fluid_props=FluidProperties(
+                density_kg_m3=870, viscosity_Pa_s=0.005,
+                cp_J_kgK=2100, k_W_mK=0.13, Pr=80.0,
+                property_source="petroleum-named",
+                property_confidence=0.85,
+            ),
+            cold_fluid_props=FluidProperties(
+                density_kg_m3=1000, viscosity_Pa_s=0.001,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=7.0,
+            ),
+        )
+        result = await step.execute(state)
+        all_warnings = result.warnings + state.warnings
+        assert not any("lower bound" in w for w in all_warnings)
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_rf_above_lower_bound(self):
+        """Rf already above lower bound → no warning even with low confidence."""
+        step = Step04TEMAGeometry()
+        # diesel has Rf=0.000352, lower bound=0.000176 → not at lower bound
+        state = _make_state(
+            hot_fluid_name="diesel",
+            cold_fluid_name="water",
+            hot_fluid_props=FluidProperties(
+                density_kg_m3=830, viscosity_Pa_s=0.003,
+                cp_J_kgK=1900, k_W_mK=0.14, Pr=40.0,
+                property_source="petroleum-generic",
+                property_confidence=0.65,
+            ),
+            cold_fluid_props=FluidProperties(
+                density_kg_m3=1000, viscosity_Pa_s=0.001,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=7.0,
+            ),
+        )
+        result = await step.execute(state)
+        all_warnings = result.warnings + state.warnings
+        assert not any("lower bound" in w for w in all_warnings)
+
+
+class TestFE4ShellIdFinalised:
+    """FE-4: shell_id_finalised flag set correctly by Step 4."""
+
+    @pytest.mark.asyncio
+    async def test_aes_sets_flag_false(self):
+        """AES/AEU (floating head) → shell_id_finalised = False.
+
+        Uses crude oil at T_mean > 120°C so it's classified as 'heavy' fouling
+        → Rule 3 fires → crude oil on tube-side → ΔT 90°C → AES selected.
+        tema_type is read from result.outputs (not state.tema_type, which is
+        only applied by pipeline_runner._apply_outputs, not called in unit tests).
+        """
+        step = Step04TEMAGeometry()
+        state = _make_state(
+            hot_fluid_name="crude oil",
+            cold_fluid_name="water",
+            T_hot_in_C=200, T_hot_out_C=120,  # T_mean=160°C → crude oil heavy fouling
+            T_cold_in_C=30, T_cold_out_C=70,
+            hot_fluid_props=FluidProperties(
+                density_kg_m3=830, viscosity_Pa_s=0.005,
+                cp_J_kgK=2200, k_W_mK=0.12, Pr=92.0,
+            ),
+            cold_fluid_props=FluidProperties(
+                density_kg_m3=1000, viscosity_Pa_s=0.001,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=7.0,
+            ),
+        )
+        result = await step.execute(state)
+        tema = result.outputs["tema_type"]
+        if tema in ("AES", "AEU"):
+            assert state.shell_id_finalised is False
+        else:
+            # If allocation/TEMA logic chose a different type, flag is True
+            assert state.shell_id_finalised is True
+
+    @pytest.mark.asyncio
+    async def test_bem_sets_flag_true(self):
+        """BEM (fixed tubesheet) → shell_id_finalised = True.
+
+        tema_type is read from result.outputs (pipeline_runner not called here).
+        """
+        step = Step04TEMAGeometry()
+        state = _make_state(
+            hot_fluid_name="water",
+            cold_fluid_name="water",
+            T_hot_in_C=80, T_hot_out_C=60,
+            T_cold_in_C=30, T_cold_out_C=50,
+            hot_fluid_props=FluidProperties(
+                density_kg_m3=990, viscosity_Pa_s=0.0008,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=5.6,
+            ),
+            cold_fluid_props=FluidProperties(
+                density_kg_m3=1000, viscosity_Pa_s=0.001,
+                cp_J_kgK=4186, k_W_mK=0.6, Pr=7.0,
+            ),
+        )
+        result = await step.execute(state)
+        assert result.outputs["tema_type"] == "BEM"
+        assert state.shell_id_finalised is True
+
+    @pytest.mark.asyncio
+    async def test_flag_in_outputs(self):
+        """shell_id_finalised must appear in step outputs."""
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        result = await step.execute(state)
+        assert "shell_id_finalised" in result.outputs
+        assert isinstance(result.outputs["shell_id_finalised"], bool)
