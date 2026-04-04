@@ -338,6 +338,23 @@ class DesignState(BaseModel):
     h_shell_ideal_W_m2K: Optional[float] = None
     h_shell_kern_W_m2K: Optional[float] = None   # Kern cross-check value
 
+    # --- overall U + resistance breakdown (populated by Step 9) ---
+    U_clean_W_m2K: Optional[float] = None
+    U_dirty_W_m2K: Optional[float] = None
+    U_overall_W_m2K: Optional[float] = None
+    cleanliness_factor: Optional[float] = None
+    resistance_breakdown: Optional[dict] = None
+    controlling_resistance: Optional[str] = None
+    U_kern_W_m2K: Optional[float] = None
+    U_kern_deviation_pct: Optional[float] = None
+    U_vs_estimated_deviation_pct: Optional[float] = None
+
+    # --- tube material properties (resolved by Step 9) ---
+    tube_material: Optional[str] = None
+    k_wall_W_mK: Optional[float] = None
+    k_wall_source: Optional[str] = None
+    k_wall_confidence: Optional[float] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
