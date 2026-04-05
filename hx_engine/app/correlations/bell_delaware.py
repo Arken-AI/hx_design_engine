@@ -464,11 +464,16 @@ def kern_shell_side_htc(
     Re_kern = De * G_s / mu
 
     # Kern j_H correlation (power-law fit from Coulson & Richardson Fig 12.29)
-    # j_H = 0.36 × Re^(-0.55) for Re in [2×10³, 1×10⁶] (25% baffle cut)
-    if Re_kern < 10:
-        j_H = 1.0  # placeholder for very low Re
-    else:
-        j_H = 0.36 * Re_kern ** (-0.55)
+    # j_H = 0.36 × Re^(-0.55) for Re in [2×10³, 1×10⁶] (25% baffle cut, turbulent only)
+    # Kern (1950) provides NO laminar shell-side correlation. Extrapolating below
+    # Re=2000 with the turbulent power-law gives wrong results — raise so the caller
+    # can suppress the cross-check result rather than use a bad number.
+    if Re_kern < 2000:
+        raise ValueError(
+            f"Kern correlation invalid for Re={Re_kern:.0f} < 2000 (laminar/transitional). "
+            "Bell-Delaware is the sole valid result."
+        )
+    j_H = 0.36 * Re_kern ** (-0.55)
 
     # Prandtl number from Cp, mu, k
     Pr = mu * Cp_J_kgK / k_W_mK

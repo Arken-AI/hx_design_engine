@@ -4,11 +4,15 @@ Priority chain
 --------------
 1. iapws         — water / steam  (IAPWS-IF97, T/P-dependent)
 2. CoolProp      — pure compounds (T/P-dependent, 124 fluids)
-3. thermo        — broad chemical database (Caleb Bell, thousands of compounds)
-4. Petroleum     — crude oils & fractions via Lee–Kesler / Beggs–Robinson /
+3. Petroleum     — crude oils & fractions via Lee–Kesler / Beggs–Robinson /
                    Cragoe correlations parameterised by API gravity (T-dependent)
-5. Specialty     — glycols, thermal oil, vegetable oil, molten salt
+4. Specialty     — glycols, thermal oil, vegetable oil, molten salt
                    (T-dependent engineering fits)
+5. thermo        — broad chemical database (Caleb Bell, thousands of compounds)
+
+Petroleum and specialty backends are checked BEFORE thermo because petroleum
+fluids are multi-component mixtures that thermo's Chemical class (pure-compound)
+cannot model correctly — it may silently return wrong properties.
 
 Public API
 ----------
@@ -340,9 +344,15 @@ def get_fluid_properties(
     Resolution order:
     1. iapws      — water / steam
     2. CoolProp   — pure compounds (fast, 124 fluids)
-    3. thermo     — broad chemical database (thousands of compounds)
-    4. Petroleum  — crude oils & fractions (correlation-based, T-dependent)
-    5. Specialty  — glycols, thermal oil, vegetable oil, molten salt
+    3. Petroleum  — crude oils & fractions (correlation-based, T-dependent)
+    4. Specialty  — glycols, thermal oil, vegetable oil, molten salt
+    5. thermo     — broad chemical database (thousands of compounds)
+
+    Petroleum and specialty backends are checked BEFORE thermo because
+    petroleum fluids (lubricating oil, diesel, crude, fuel oil, etc.) are
+    multi-component mixtures. The ``thermo`` library's ``Chemical`` class
+    can only model pure compounds and may silently return wrong properties
+    for mixture names — e.g. water-like viscosity for "lubricating oil".
 
     Raises ``CalculationError`` if the fluid cannot be resolved.
     """
@@ -379,29 +389,32 @@ def get_fluid_properties(
     if cp_name is not None and _CP is not None:
         return _get_props_coolprop(cp_name, temperature_C, pressure_Pa)
 
-    # 3. thermo — broad chemical database
-    if _Chemical is not None:
-        try:
-            return _get_props_thermo(normalised, temperature_C, pressure_Pa)
-        except CalculationError:
-            pass  # fall through to petroleum / specialty
-
-    # 4. Petroleum correlations — crude oils & fractions
+    # 3. Petroleum correlations — crude oils & fractions
+    # Checked BEFORE thermo: petroleum fluids are multi-component mixtures
+    # that thermo's Chemical class cannot model (returns wrong pure-compound
+    # properties, e.g. water-like viscosity for "lubricating oil").
     resolved = resolve_petroleum_name(normalised)
     if resolved is not None:
         char, petro_source = resolved
         return get_petroleum_properties(char, temperature_C, source=petro_source)
 
-    # 5. Specialty fluids — T-dependent fits
+    # 4. Specialty fluids — T-dependent fits
     specialty_fn = _SPECIALTY_FLUIDS.get(normalised)
     if specialty_fn is not None:
         return specialty_fn(temperature_C)
+
+    # 5. thermo — broad chemical database (pure compounds only)
+    if _Chemical is not None:
+        try:
+            return _get_props_thermo(normalised, temperature_C, pressure_Pa)
+        except CalculationError:
+            pass  # fall through to error
 
     # Nothing matched
     raise CalculationError(
         _STEP_ID,
         f"Unknown fluid '{fluid_name}' — not found in any property source "
-        f"(iapws, CoolProp, thermo, petroleum database, or specialty fluids). "
+        f"(iapws, CoolProp, petroleum database, specialty fluids, or thermo). "
         f"Provide fluid properties directly via DesignState or specify a "
         f"recognised fluid name.",
     )
