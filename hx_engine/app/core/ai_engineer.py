@@ -588,9 +588,18 @@ a partial product from individual J values
 investigate — do NOT rationalise it as "gas-like".
 
 3. KERN CROSS-CHECK:
-   - < 15% divergence: normal (Bell-Delaware accounts for bypass/leakage)
-   - 15–20%: noteworthy — WARN
-   - > 20%: geometry may have issues — ESCALATE
+   **IMPORTANT**: The Kern method (1950) systematically underpredicts h_o compared \
+to Bell-Delaware by 40-60% for turbulent liquid flows. This is a well-documented \
+limitation (Serth 2007, Thulukkanam 2013) — the Kern correlation uses a simplified \
+equivalent diameter and does NOT account for crossflow enhancement, bypass, or \
+leakage corrections that Bell-Delaware provides.
+   - < 100% divergence: NORMAL — within expected Kern underprediction range
+   - 100–200% divergence: NOTEWORTHY but still expected for high-Re liquid flows — \
+do NOT escalate if h_shell is within the expected range for the shell-side fluid
+   - > 200% divergence: ANOMALOUS — suggests geometry or property input error, ESCALATE
+   - The Kern value should NEVER override the Bell-Delaware result
+   - Focus your validation on whether h_shell falls in the expected range for \
+the identified shell-side fluid (Section 2 above), NOT on the Kern divergence percentage
 
 4. WALL TEMPERATURE EFFECT:
    - Cross-check `mu_wall_Pa_s` against expected viscosity for the shell-side fluid:
@@ -609,6 +618,7 @@ CORRECTION OPTIONS:
 
 DO NOT:
 - Escalate for normal J-factor products in [0.35, 0.80] range
+- Escalate for Kern divergence < 200% when h_shell is within the expected fluid range
 - Override h_shell with Kern value — Bell-Delaware is the primary method\
 """
 
@@ -636,9 +646,11 @@ YOUR REVIEW FOCUS:
    - If no single resistance dominates (all < 20%), this is balanced — note it
 
 3. Kern cross-check (if available):
-   - < 15% deviation: normal
-   - 15–25% deviation: WARN
-   - > 25% deviation: consider ESCALATE
+   - Kern systematically underpredicts vs Bell-Delaware by 40-60% for turbulent \
+liquid flows — this is expected (see Step 8 Kern note)
+   - < 100% deviation: normal
+   - 100–200% deviation: noteworthy but not grounds for escalation if U is in range
+   - > 200% deviation: consider ESCALATE
 
 4. Cleanliness factor:
    - 0.80–0.95: typical

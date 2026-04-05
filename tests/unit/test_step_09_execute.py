@@ -371,8 +371,8 @@ class TestStep09Warnings:
 
     @pytest.mark.asyncio
     async def test_kern_divergence_warning(self, step):
-        """Kern U deviation > 15% should trigger a warning."""
-        state = _make_state(h_shell=2000.0, h_shell_kern=1200.0)
+        """Kern U deviation > 40% should trigger a warning."""
+        state = _make_state(h_shell=2000.0, h_shell_kern=400.0)
         result = await step.execute(state)
         assert any("Kern" in w for w in result.warnings)
 
