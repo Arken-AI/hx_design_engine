@@ -913,6 +913,63 @@ def _build_step_context_inner(
             lines.append(f"T_wall estimate = {t_wall:.1f} °C")
         return "\n".join(lines)
 
+    if step_id == 8:
+        # Shell-side HTC context
+        lines = []
+        shell_side = state.shell_side_fluid or "?"
+        shell_fluid_name = (
+            state.hot_fluid_name if shell_side == "hot"
+            else state.cold_fluid_name if shell_side == "cold"
+            else "?"
+        )
+        lines.append(f"Shell-side fluid: {shell_side} ({shell_fluid_name})")
+
+        h_shell = result.outputs.get("h_shell_W_m2K")
+        re_shell = result.outputs.get("Re_shell")
+        g_s = result.outputs.get("G_s_kg_m2s")
+        visc_corr = result.outputs.get("visc_correction")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+        mu_wall = result.outputs.get("mu_wall_Pa_s")
+        kern_div = result.outputs.get("kern_divergence_pct")
+        h_kern = result.outputs.get("h_shell_kern_W_m2K")
+        j_product = result.outputs.get("J_product")
+
+        # Include bulk fluid properties so the AI can cross-check
+        if shell_side == "hot" and state.hot_fluid_props:
+            fp = state.hot_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+        elif shell_side == "cold" and state.cold_fluid_props:
+            fp = state.cold_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+
+        if h_shell is not None:
+            lines.append(f"h_shell (Bell-Delaware) = {h_shell:.1f} W/m²K")
+        if h_kern is not None:
+            lines.append(f"h_shell (Kern) = {h_kern:.1f} W/m²K")
+        if kern_div is not None:
+            lines.append(f"Kern divergence = {kern_div:.1f}%")
+        if re_shell is not None:
+            lines.append(f"Re_shell = {re_shell:.0f}")
+        if g_s is not None:
+            lines.append(f"G_s = {g_s:.1f} kg/m²s")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction (μ_bulk/μ_wall)^0.14 = {visc_corr:.4f}")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        if mu_wall is not None:
+            lines.append(f"μ_wall = {mu_wall:.6f} Pa·s")
+        if j_product is not None:
+            lines.append(f"J-factor product = {j_product:.4f}")
+        return "\n".join(lines)
+
     if step_id == 9:
         # Overall U + resistance breakdown context
         lines = []
@@ -1082,6 +1139,7 @@ class AIEngineer:
             "### Design Context",
             f"- Hot fluid: {state.hot_fluid_name or 'N/A'}",
             f"- Cold fluid: {state.cold_fluid_name or 'N/A'}",
+            f"- Shell-side fluid: {state.shell_side_fluid or 'N/A'}",
             f"- T_hot: {state.T_hot_in_C}→{state.T_hot_out_C} °C",
             f"- T_cold: {state.T_cold_in_C}→{state.T_cold_out_C} °C",
             f"- Duty: {state.Q_W or 'N/A'} W",
