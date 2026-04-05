@@ -166,7 +166,7 @@ Q = ṁ × Cp × ΔT for both streams and checks energy balance.
 
 YOUR REVIEW FOCUS:
 1. ENERGY BALANCE — Is the imbalance between Q_hot and Q_cold acceptable?
-   - < 2%: Normal (rounding, Cp variation) — you should NOT be called
+   - < 2%: Normal (rounding, Cp variation) — proceed unless another issue is present
    - 2–5%: Acceptable if Cp varies with temperature — use "warn"
    - > 5%: Likely a data error — use "correct" or "escalate"
 2. BACK-CALCULATED TEMPERATURE — If a 4th temperature was computed:
@@ -224,7 +224,22 @@ YOUR REVIEW FOCUS:
    - Pr = μ × Cp / k — if this is off by > 5%, the property set is wrong
    - If ρ says "liquid" but μ says "gas", there is a backend mismatch
 
-3. CORNER CASES TO WATCH:
+3. PROPERTY SOURCE VALIDATION:
+   - Each fluid result includes a `property_source` field. Check it.
+   - Petroleum fluids (lubricating oil, diesel, fuel oil, gas oil, crude, \
+HFO, heavy fuel oil) MUST come from `petroleum_*` sources \
+(e.g. `petroleum_beggs_robinson`, `petroleum_generic`).
+   - If a petroleum fluid has `property_source = "thermo"`, ESCALATE immediately. \
+The thermo library models pure compounds and returns wrong water-like properties \
+for petroleum mixtures — every downstream step will be corrupted.
+   - Expected sources by fluid type:
+     • Water/steam → `iapws` (or `coolprop` as fallback)
+     • Pure compounds (ethanol, ammonia, etc.) → `coolprop`
+     • Petroleum fractions → `petroleum_beggs_robinson` or `petroleum_generic`
+     • Glycols, thermal oil, molten salt → `specialty`
+     • Other chemicals → `thermo`
+
+4. CORNER CASES TO WATCH:
    - Crude oil: properties are approximate (generic API gravity). \
 Use "warn" to flag uncertainty, do NOT escalate.
    - Water near 100°C at 1 atm: close to boiling — flag if T > 95°C
@@ -243,7 +258,8 @@ DO NOT:
 - Escalate for crude oil properties being approximate — "warn" is correct
 - Change fluid names at this step — that was Step 1's job
 - Accept gas-phase property values (ρ < 50 kg/m³) — that means the \
-fluid is not liquid at operating conditions, which violates engine scope\
+fluid is not liquid at operating conditions, which violates engine scope
+- Accept `property_source = "thermo"` for petroleum fluids — always escalate this\
 """
 
 _STEP_4_PROMPT = """\
@@ -257,16 +273,19 @@ YOUR REVIEW FOCUS:
 
 ### A. Fluid Allocation (Shell vs Tube)
 The engine uses this priority for tube-side allocation:
-1. High pressure (> 20 bar) → tube side (cheaper to contain)
+0. **User preference** — if `tema_preference` explicitly names a fluid or side, \
+this overrides all rules below. If the allocation matches a user preference, \
+do NOT flag it as a rule violation even if it would otherwise fail rules 1–4.
+1. High pressure (> 30 bar) → tube side (cheaper to contain)
 2. Crude oil / heavy oil → shell side (AES for bundle cleaning)
 3. Higher fouling fluid → tube side (easier to clean)
 4. More viscous fluid → shell side (better mixing with baffles)
 5. Default: hot fluid → tube side
 
 CHECK:
-- Does the allocation match the priority rules?
+- Was Rule 0 (user preference) applied? If yes, accept the allocation and note it.
+- Does the allocation otherwise match the priority rules?
 - Is crude/heavy oil correctly on the shell side?
-- If user specified a preference, was it respected or overridden with reason?
 
 ### B. TEMA Type Selection
 Valid types: BEM, AES, AEP, AEU, AEL, AEW
@@ -419,12 +438,13 @@ This step uses a starting-guess U from published fluid-pair tables to compute:
 
 YOUR REVIEW FOCUS:
 1. U ASSUMPTION — Is the assumed U reasonable for this fluid pair?
+   (Engine scope: single-phase liquids only — no gas-phase, no steam/condensing)
    - Water/water: 800–1800 W/m²K (typical ~1200)
    - Light organic/water: 200–800 W/m²K
    - Heavy organic/water: 100–500 W/m²K
-   - Gas/gas: 5–50 W/m²K
-   - Steam/water: 1000–4000 W/m²K
-   - If a gas-phase fluid is using a liquid-liquid U, this is WRONG
+   - Oil/oil: 50–200 W/m²K
+   - If U < 50 W/m²K for a liquid/liquid pair, this is WRONG — investigate \
+fluid classification or property source
    - If the fluid pair used the generic fallback, verify classification
 
 2. AREA REASONABLENESS:
@@ -510,7 +530,11 @@ fall here.
    - Glycols: 200–1,000 W/m²K
    If h_tube is outside these ranges for the stated fluid, investigate.
 
-4. VISCOSITY CORRECTION:
+4. VISCOSITY CORRECTION (high-viscosity fluids — μ_bulk > 0.1 Pa·s):
+   - For μ_bulk > 0.1 Pa·s, the Sieder-Tate wall correction applies. \
+`viscosity_correction` should be meaningfully different from 1.0 — \
+if it is ≈ 1.0 for a viscous fluid, the wall viscosity lookup likely failed \
+(wall props returned bulk props as fallback).
    - If (μ_bulk / μ_wall) > 1.3 or < 0.7, note significant wall effect.
    - Heating case: μ_bulk / μ_wall > 1 (fluid thins at wall → higher h)
    - Cooling case: μ_bulk / μ_wall < 1 (fluid thickens at wall → lower h)
@@ -550,30 +574,41 @@ YOUR REVIEW FOCUS:
    - J_b (bundle): 0.3–1.0 typical
    - J_s (sealing): 0.7–1.0 typical
    - J_r (inlet/exit): 0.3–0.9 typical
-   - Product J_c × J_l × J_b ≥ 0.30 (hard rule — cannot override)
-   - If any J-factor < 0.3, geometry has significant leakage/bypass
+   - **Full product J_c × J_l × J_b × J_s × J_r ≥ 0.35** — if `J_product` < 0.35, \
+escalate with recommendation to reduce clearances or add sealing strips
+   - Use `J_product` from outputs (all five factors combined) — do NOT compute \
+a partial product from individual J values
 
-2. h_shell RANGES:
-   - Water: 2,000–8,000 W/m²K
-   - Light organics: 300–1,500 W/m²K
-   - Heavy oil / crude: 50–500 W/m²K
-   - Gas: 20–300 W/m²K
+2. h_shell RANGES — apply based on the shell-side fluid identified in Design Context:
+   (Engine scope: single-phase liquids only — no gas-phase service)
+   - Water / cooling water: 2,000–8,000 W/m²K
+   - Light organics (toluene, ethanol, glycol): 300–1,500 W/m²K
+   - Heavy oil / crude / lube oil: 50–500 W/m²K
+   If h_shell is outside the expected range for the identified shell-side fluid, \
+investigate — do NOT rationalise it as "gas-like".
 
 3. KERN CROSS-CHECK:
    - < 15% divergence: normal (Bell-Delaware accounts for bypass/leakage)
    - 15–20%: noteworthy — WARN
-   - > 20%: geometry may have issues — consider ESCALATE
+   - > 20%: geometry may have issues — ESCALATE
 
 4. WALL TEMPERATURE EFFECT:
-   - Large viscosity ratio (μ_bulk/μ_wall > 2) indicates significant viscous heating
-   - Check if T_wall estimate is physically reasonable
+   - Cross-check `mu_wall_Pa_s` against expected viscosity for the shell-side fluid:
+     • Water: 0.0002–0.001 Pa·s
+     • Light organics: 0.001–0.005 Pa·s
+     • Heavy oil / lube oil: 0.005–0.5 Pa·s
+   - If `mu_wall` falls outside the expected range for the identified shell-side fluid, \
+ESCALATE — the wall viscosity lookup used the wrong property backend \
+(most likely thermo returning water-like values for a petroleum fluid).
+   - Large viscosity ratio (μ_bulk/μ_wall > 2) indicates significant viscous heating — \
+note this as an observation
 
 CORRECTION OPTIONS:
 - Adjust baffle cut, baffle spacing, or sealing strips to improve J-factors
 - DO NOT change tube geometry or shell diameter — those are Step 4/6 decisions
 
 DO NOT:
-- Escalate for normal J-factor products in [0.30, 0.80] range
+- Escalate for normal J-factor products in [0.35, 0.80] range
 - Override h_shell with Kern value — Bell-Delaware is the primary method\
 """
 
@@ -589,15 +624,16 @@ FORMULA REVIEWED:
 
 YOUR REVIEW FOCUS:
 1. Is U_dirty in the typical range for this fluid pair?
+   (Engine scope: single-phase liquids only — no gas-phase service)
    - Water/water: 800–1500 W/m²K
-   - Oil/water: 100–350 W/m²K
-   - Gas/liquid: 20–250 W/m²K
+   - Oil/water (heavy organic): 100–500 W/m²K
    - Oil/oil: 60–150 W/m²K
+   - Light organic/water: 200–800 W/m²K
 
 2. Is the controlling resistance physically expected?
    - Viscous fluid side should dominate
-   - Gas side should dominate for gas/liquid service
-   - If wall resistance > 10%, verify material
+   - If wall resistance > 10%, verify material (carbon steel vs stainless/titanium)
+   - If no single resistance dominates (all < 20%), this is balanced — note it
 
 3. Kern cross-check (if available):
    - < 15% deviation: normal
@@ -774,7 +810,7 @@ def _build_step_context_inner(
         return "\n".join(lines)
 
     if step_id == 3:
-        # Pr consistency context
+        # Pr consistency context + property source validation
         lines = []
         for label, key in [("Hot", "hot_fluid_props"), ("Cold", "cold_fluid_props")]:
             props = result.outputs.get(key)
@@ -784,6 +820,11 @@ def _build_step_context_inner(
             cp = getattr(props, "cp_J_kgK", None)
             k = getattr(props, "k_W_mK", None)
             pr = getattr(props, "Pr", None)
+            source = getattr(props, "property_source", None) or "unknown"
+            confidence = getattr(props, "property_confidence", None)
+            lines.append(f"{label} — property_source = {source}" + (
+                f", confidence = {confidence:.0%}" if confidence is not None else ""
+            ))
             if all(v is not None and v > 0 for v in (mu, cp, k, pr)):
                 expected_pr = mu * cp / k
                 delta_pct = abs(pr - expected_pr) / expected_pr * 100
