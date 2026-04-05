@@ -18,6 +18,7 @@ from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.core.validation_rules import check as check_validation_rules
+from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
@@ -61,6 +62,49 @@ USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
 # How long (seconds) to wait for user response on actionable WARNING
 # (shorter than ESCALATE — auto-proceeds with current values on timeout)
 WARNING_PAUSE_TIMEOUT = 120
+
+
+def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
+    """Re-fetch fluid properties for the shell-side fluid at the mean shell temperature.
+
+    This ensures that after a fluid-swap or viscosity-verification escalation,
+    Step 8 re-runs with the correct (fresh) thermophysical properties rather
+    than the stale values cached by Step 3.
+    """
+    from hx_engine.app.models.design_state import FluidProperties
+
+    shell_side = state.shell_side_fluid  # "hot" or "cold"
+    if shell_side == "hot":
+        fluid_name = state.hot_fluid_name
+        T_in = state.T_hot_in_C
+        T_out = state.T_hot_out_C
+        pressure = state.P_hot_Pa
+    else:
+        fluid_name = state.cold_fluid_name
+        T_in = state.T_cold_in_C
+        T_out = state.T_cold_out_C
+        pressure = state.P_cold_Pa
+
+    if fluid_name is None or T_in is None or T_out is None:
+        logger.warning("Cannot refresh shell-side fluid props — missing fluid name or temps")
+        return
+
+    T_mean = (T_in + T_out) / 2.0
+    effective_pressure = pressure if pressure is not None else 101325.0  # fallback: atmospheric
+    try:
+        new_props = get_fluid_properties(fluid_name, T_mean, effective_pressure)
+        if shell_side == "hot":
+            state.hot_fluid_props = new_props
+        else:
+            state.cold_fluid_props = new_props
+        logger.info(
+            "Refreshed %s-side (shell) fluid props for %s at T_mean=%.1f°C: "
+            "mu=%.6f Pa·s, rho=%.1f kg/m³",
+            shell_side, fluid_name, T_mean,
+            new_props.viscosity_Pa_s, new_props.density_kg_m3,
+        )
+    except Exception:
+        logger.exception("Failed to refresh shell-side fluid properties for %s", fluid_name)
 
 
 class PipelineRunner:
@@ -283,33 +327,49 @@ class PipelineRunner:
                         continue  # Re-run the step with updated state
 
                     # Step completed (non-ESCALATE, or escalations exhausted).
-                    # If escalations were exhausted (still ESCALATE here), emit a
-                    # warning so the frontend doesn't freeze on the input box.
+                    # If escalations were exhausted (still ESCALATE here), the step
+                    # has failed — halt the pipeline instead of silently continuing.
                     if (
                         result.ai_review
                         and result.ai_review.decision == AIDecisionEnum.ESCALATE
                     ):
+                        state.pipeline_status = "error"
+                        # Build a detailed observation from escalation history
+                        step_key = str(step.step_id)
+                        history = state.escalation_history.get(step_key, [])
+                        history_lines = []
+                        for entry in history:
+                            user_chose = entry.get("user_chose", "")
+                            history_lines.append(
+                                f"Attempt {entry['attempt']}: user chose \"{user_chose}\""
+                            )
+                        history_summary = " | ".join(history_lines) if history_lines else "No user corrections were applied."
+
                         await self.sse_manager.emit(
                             session_id,
-                            StepWarningEvent(
+                            StepErrorEvent(
                                 session_id=session_id,
                                 step_id=step.step_id,
                                 step_name=step.step_name,
-                                confidence=result.ai_review.confidence if result.ai_review else 0.0,
-                                reasoning=result.ai_review.reasoning if result.ai_review else "",
-                                user_summary=(
-                                    f"Step {step.step_id}: escalation limit reached — "
-                                    "proceeding with current values."
+                                message=(
+                                    f"Step {step.step_id} ({step.step_name}) — "
+                                    f"max escalation attempts ({max_escalations}) reached with unresolved conflict. "
+                                    + (result.ai_review.reasoning or "Engineering decision could not be resolved.")[:200]
                                 ),
-                                warning_message=(
-                                    "Maximum escalation attempts reached. "
-                                    "Pipeline continues with unresolved conflict."
+                                observation=(
+                                    result.ai_review.reasoning
+                                    or "Engineering decision could not be resolved."
                                 ),
-                                severity="warning",
-                                duration_ms=duration_ms,
-                                outputs=_serialize_outputs(result.outputs),
+                                recommendation=(
+                                    f"Escalation history: {history_summary}. "
+                                    f"The pipeline was halted because the conflict could not be resolved "
+                                    f"after {max_escalations} attempts. Please review the input parameters "
+                                    f"(fluid assignments, fluid properties, geometry) and re-run the design."
+                                ),
                             ).model_dump(mode="json"),
                         )
+                        await self.session_store.save(session_id, state)
+                        return state
                     break
 
                 logger.info(
@@ -616,6 +676,7 @@ class PipelineRunner:
                 values = response.get("values") or {}
                 user_input_raw = values.get("user_input", "").strip()
                 user_input = user_input_raw.lower()
+                option_index = int(values.get("option_index", -1))
 
                 if response_type == "accept" or self._sounds_like_acceptance(user_input):
                     # Apply AI-recommended corrections so the re-run doesn't conflict
@@ -641,7 +702,11 @@ class PipelineRunner:
                     # User typed a specific value or clicked an option button.
                     # Check for multi-shell keywords in the full response text
                     # (covers both option-click text and typed free text).
-                    self._apply_user_text_override(state, user_input)
+                    self._apply_user_text_override(
+                        state, user_input,
+                        step_id=step.step_id,
+                        option_index=option_index,
+                    )
 
                 # "skip" — don't touch state; re-run will see unchanged inputs
 
@@ -715,8 +780,58 @@ class PipelineRunner:
             state.tema_preference = suggested
 
     @staticmethod
-    def _apply_user_text_override(state: DesignState, text: str) -> None:
-        """Parse free-text override for known field names."""
+    def _apply_user_text_override(
+        state: DesignState,
+        text: str,
+        *,
+        step_id: int = 0,
+        option_index: int = -1,
+    ) -> None:
+        """Parse free-text override for known field names.
+
+        option_index is the 0-based index of the button the user clicked (-1 = typed free text).
+        When option_index >= 0 and step_id matches, use deterministic index dispatch instead of
+        regex so the action is reliable regardless of how the AI phrases the option.
+        """
+        # --- Step 8: index-based dispatch (deterministic, regex-independent) ---
+        if step_id == 8 and option_index >= 0:
+            if option_index == 0:
+                # Option A: verify/re-fetch viscosity for the current shell-side fluid
+                logger.info("[Step8-OptionA] Refreshing shell-side fluid properties")
+                _refresh_fluid_props_for_shell_side(state)
+                return
+            if option_index == 1:
+                # Option B: swap fluid-side assignments (oil→tube, water→shell)
+                old_val = state.shell_side_fluid
+                state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+                logger.info(
+                    "[Step8-OptionB] shell_side_fluid swapped %r → %r",
+                    old_val, state.shell_side_fluid,
+                )
+                _refresh_fluid_props_for_shell_side(state)
+                return
+
+        # --- Regex fallback for typed free text and non-indexed steps ---
+
+        # --- Fluid-side swap (Step 8 escalation: swap shell/tube assignment) ---
+        if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
+            old_val = state.shell_side_fluid
+            state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+            logger.info(
+                "User override: shell_side_fluid swapped from %r to %r",
+                old_val, state.shell_side_fluid,
+            )
+            # After swapping, re-fetch fluid properties at shell-side mean temp
+            # so Step 8 re-run uses the correct fluid's viscosity.
+            _refresh_fluid_props_for_shell_side(state)
+            return
+
+        # --- Viscosity verification (Step 8 escalation: re-fetch fluid props) ---
+        if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
+            logger.info("User override: refreshing shell-side fluid properties")
+            _refresh_fluid_props_for_shell_side(state)
+            return
+
         # Multi-shell arrangement — check this first so "series"/"parallel"
         # in the text is acted on before looking for TEMA type codes.
         if re.search(r"\bseries\b", text, re.IGNORECASE):
