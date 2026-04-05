@@ -1,0 +1,143 @@
+{
+  "reference_id": "BD-REF-001",
+  "description": "Bell-Delaware reference calculator \u2014 Taborek (1983) HEDH",
+  "inputs": {
+    "shell_id_m": 0.489,
+    "tube_od_m": 0.01905,
+    "tube_id_m": 0.01483,
+    "tube_pitch_m": 0.0254,
+    "pitch_ratio": 1.3333,
+    "layout_angle_deg": 30,
+    "num_tubes": 158,
+    "tube_length_m": 4.877,
+    "tube_passes": 2,
+    "baffle_cut_pct": 25.0,
+    "baffle_spacing_central_m": 0.1956,
+    "baffle_spacing_inlet_m": 0.3048,
+    "baffle_spacing_outlet_m": 0.3048,
+    "num_baffles": 22,
+    "num_sealing_strips": 2,
+    "clearances": {
+      "tube_baffle_diametral_m": 0.0008,
+      "shell_baffle_diametral_m": 0.003175,
+      "bundle_shell_diametral_m": 0.0111
+    },
+    "fluid": {
+      "description": "Light hydrocarbon oil @ 80C mean",
+      "density_kg_m3": 820.0,
+      "viscosity_Pa_s": 0.00052,
+      "viscosity_wall_Pa_s": 0.00068,
+      "Cp_J_kgK": 2200.0,
+      "k_W_mK": 0.138,
+      "Pr": 8.2899,
+      "mass_flow_kg_s": 36.0
+    }
+  },
+  "geometry": {
+    "D_otl_m": 0.4779,
+    "theta_ctl_rad": 2.06747,
+    "theta_ds_rad": 2.094395,
+    "F_c": 0.621753,
+    "F_w": 0.189123,
+    "N_tw": 29.88,
+    "S_m_m2": 0.02554,
+    "S_w_m2": 0.028199,
+    "S_tb_m2": 0.003131,
+    "S_sb_m2": 0.001626,
+    "S_b_m2": 0.002171,
+    "r_lm": 0.186264,
+    "r_s": 0.341762,
+    "F_bp": 0.085009,
+    "P_p_m": 0.021997,
+    "N_c": 11.1151,
+    "N_cw": 4.4461,
+    "G_s_kg_m2s": 1409.5277,
+    "Re_shell": 51637.51
+  },
+  "results": {
+    "j_i": 0.004763,
+    "visc_correction": 0.96314,
+    "h_ideal_W_m2K": 3472.6013,
+    "J_c": 0.997662,
+    "J_l": 0.761169,
+    "J_b": 0.969788,
+    "J_s": 0.969802,
+    "J_r": 1.0,
+    "J_product": 0.714207,
+    "h_o_W_m2K": 2480.1573
+  },
+  "sanity_checks": [
+    {
+      "name": "F_c in [0.5, 1.0]",
+      "value": 0.6217531996780573,
+      "range": [
+        0.5,
+        1.0
+      ],
+      "passed": true
+    },
+    {
+      "name": "F_w in [0.0, 0.5]",
+      "value": 0.1891234001609714,
+      "range": [
+        0.0,
+        0.5
+      ],
+      "passed": true
+    },
+    {
+      "name": "J_c in [0.5, 1.1]",
+      "value": 0.9976623037682013,
+      "range": [
+        0.5,
+        1.1
+      ],
+      "passed": true
+    },
+    {
+      "name": "J_l in [0.3, 1.0]",
+      "value": 0.7611687674293637,
+      "range": [
+        0.3,
+        1.0
+      ],
+      "passed": true
+    },
+    {
+      "name": "J_b in [0.5, 1.0]",
+      "value": 0.9697875661341667,
+      "range": [
+        0.5,
+        1.0
+      ],
+      "passed": true
+    },
+    {
+      "name": "J_s in [0.8, 1.0]",
+      "value": 0.9698022150359943,
+      "range": [
+        0.8,
+        1.0
+      ],
+      "passed": true
+    },
+    {
+      "name": "J_r == 1.0 (turbulent)",
+      "value": 1.0,
+      "range": [
+        0.99,
+        1.01
+      ],
+      "passed": true
+    },
+    {
+      "name": "h_o in [500, 10000]",
+      "value": 2480.157293753155,
+      "range": [
+        500,
+        10000
+      ],
+      "passed": true
+    }
+  ]
+}

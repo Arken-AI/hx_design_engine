@@ -23,7 +23,7 @@ from hx_engine.app.dependencies import (
 )
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.requirements import DesignRequest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["design"])
@@ -50,6 +50,7 @@ class DesignStatusResponse(BaseModel):
     step_records: list[dict[str, Any]]
     warnings: list[str]
     notes: list[str]
+    escalation_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
 
 class UserResponse(BaseModel):
@@ -162,6 +163,7 @@ async def get_design_status(
         step_records=[r.model_dump() for r in state.step_records],
         warnings=state.warnings,
         notes=state.notes,
+        escalation_history=state.escalation_history,
     )
 
 

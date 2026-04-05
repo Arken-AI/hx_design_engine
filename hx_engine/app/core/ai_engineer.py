@@ -166,7 +166,7 @@ Q = ṁ × Cp × ΔT for both streams and checks energy balance.
 
 YOUR REVIEW FOCUS:
 1. ENERGY BALANCE — Is the imbalance between Q_hot and Q_cold acceptable?
-   - < 2%: Normal (rounding, Cp variation) — you should NOT be called
+   - < 2%: Normal (rounding, Cp variation) — proceed unless another issue is present
    - 2–5%: Acceptable if Cp varies with temperature — use "warn"
    - > 5%: Likely a data error — use "correct" or "escalate"
 2. BACK-CALCULATED TEMPERATURE — If a 4th temperature was computed:
@@ -224,7 +224,22 @@ YOUR REVIEW FOCUS:
    - Pr = μ × Cp / k — if this is off by > 5%, the property set is wrong
    - If ρ says "liquid" but μ says "gas", there is a backend mismatch
 
-3. CORNER CASES TO WATCH:
+3. PROPERTY SOURCE VALIDATION:
+   - Each fluid result includes a `property_source` field. Check it.
+   - Petroleum fluids (lubricating oil, diesel, fuel oil, gas oil, crude, \
+HFO, heavy fuel oil) MUST come from `petroleum_*` sources \
+(e.g. `petroleum_beggs_robinson`, `petroleum_generic`).
+   - If a petroleum fluid has `property_source = "thermo"`, ESCALATE immediately. \
+The thermo library models pure compounds and returns wrong water-like properties \
+for petroleum mixtures — every downstream step will be corrupted.
+   - Expected sources by fluid type:
+     • Water/steam → `iapws` (or `coolprop` as fallback)
+     • Pure compounds (ethanol, ammonia, etc.) → `coolprop`
+     • Petroleum fractions → `petroleum_beggs_robinson` or `petroleum_generic`
+     • Glycols, thermal oil, molten salt → `specialty`
+     • Other chemicals → `thermo`
+
+4. CORNER CASES TO WATCH:
    - Crude oil: properties are approximate (generic API gravity). \
 Use "warn" to flag uncertainty, do NOT escalate.
    - Water near 100°C at 1 atm: close to boiling — flag if T > 95°C
@@ -243,7 +258,8 @@ DO NOT:
 - Escalate for crude oil properties being approximate — "warn" is correct
 - Change fluid names at this step — that was Step 1's job
 - Accept gas-phase property values (ρ < 50 kg/m³) — that means the \
-fluid is not liquid at operating conditions, which violates engine scope\
+fluid is not liquid at operating conditions, which violates engine scope
+- Accept `property_source = "thermo"` for petroleum fluids — always escalate this\
 """
 
 _STEP_4_PROMPT = """\
@@ -257,16 +273,19 @@ YOUR REVIEW FOCUS:
 
 ### A. Fluid Allocation (Shell vs Tube)
 The engine uses this priority for tube-side allocation:
-1. High pressure (> 20 bar) → tube side (cheaper to contain)
+0. **User preference** — if `tema_preference` explicitly names a fluid or side, \
+this overrides all rules below. If the allocation matches a user preference, \
+do NOT flag it as a rule violation even if it would otherwise fail rules 1–4.
+1. High pressure (> 30 bar) → tube side (cheaper to contain)
 2. Crude oil / heavy oil → shell side (AES for bundle cleaning)
 3. Higher fouling fluid → tube side (easier to clean)
 4. More viscous fluid → shell side (better mixing with baffles)
 5. Default: hot fluid → tube side
 
 CHECK:
-- Does the allocation match the priority rules?
+- Was Rule 0 (user preference) applied? If yes, accept the allocation and note it.
+- Does the allocation otherwise match the priority rules?
 - Is crude/heavy oil correctly on the shell side?
-- If user specified a preference, was it respected or overridden with reason?
 
 ### B. TEMA Type Selection
 Valid types: BEM, AES, AEP, AEU, AEL, AEW
@@ -419,12 +438,13 @@ This step uses a starting-guess U from published fluid-pair tables to compute:
 
 YOUR REVIEW FOCUS:
 1. U ASSUMPTION — Is the assumed U reasonable for this fluid pair?
+   (Engine scope: single-phase liquids only — no gas-phase, no steam/condensing)
    - Water/water: 800–1800 W/m²K (typical ~1200)
    - Light organic/water: 200–800 W/m²K
    - Heavy organic/water: 100–500 W/m²K
-   - Gas/gas: 5–50 W/m²K
-   - Steam/water: 1000–4000 W/m²K
-   - If a gas-phase fluid is using a liquid-liquid U, this is WRONG
+   - Oil/oil: 50–200 W/m²K
+   - If U < 50 W/m²K for a liquid/liquid pair, this is WRONG — investigate \
+fluid classification or property source
    - If the fluid pair used the generic fallback, verify classification
 
 2. AREA REASONABLENESS:
@@ -479,6 +499,182 @@ DO NOT:
 - Escalate for normal fluid pairs with well-known U ranges — use "proceed"\
 """
 
+_STEP_7_PROMPT = """\
+## Step 7: Tube-Side Heat Transfer Coefficient — Review Focus
+
+You are reviewing the tube-side heat transfer coefficient (h_tube) calculation.
+The engine has computed velocity, Re, Pr, selected a Nusselt correlation \
+(Hausen for laminar, Gnielinski for transition/turbulent), applied a viscosity \
+correction, and returned h_tube.
+
+YOUR REVIEW FOCUS:
+1. VELOCITY — Is the tube-side velocity reasonable for liquid service?
+   - Ideal range: 0.8–2.5 m/s
+   - < 0.8 m/s: fouling risk — insufficient turbulence to keep tubes clean
+   - > 2.5 m/s: erosion risk — especially for soft metals or dirty fluids
+   - 0.3–0.8 m/s: acceptable but marginal (warn)
+   - > 3.0 m/s: likely needs geometry change (reduce n_passes)
+
+2. FLOW REGIME:
+   - Laminar (Re < 2300): acceptable for viscous fluids (heavy oil, glycol), \
+but h_i will be low. Verify this is realistic for the fluid.
+   - Transition (2300–10000): uncertain — flag instability. Flow switches \
+between laminar and turbulent unpredictably.
+   - Turbulent (> 10000): ideal for heat transfer. Most water services \
+fall here.
+
+3. h_tube RANGES BY FLUID TYPE:
+   - Water: 3,000–10,000 W/m²K
+   - Light organics (toluene, ethanol): 500–2,000 W/m²K
+   - Heavy oil / crude: 50–500 W/m²K
+   - Glycols: 200–1,000 W/m²K
+   If h_tube is outside these ranges for the stated fluid, investigate.
+
+4. VISCOSITY CORRECTION (high-viscosity fluids — μ_bulk > 0.1 Pa·s):
+   - For μ_bulk > 0.1 Pa·s, the Sieder-Tate wall correction applies. \
+`viscosity_correction` should be meaningfully different from 1.0 — \
+if it is ≈ 1.0 for a viscous fluid, the wall viscosity lookup likely failed \
+(wall props returned bulk props as fallback).
+   - If (μ_bulk / μ_wall) > 1.3 or < 0.7, note significant wall effect.
+   - Heating case: μ_bulk / μ_wall > 1 (fluid thins at wall → higher h)
+   - Cooling case: μ_bulk / μ_wall < 1 (fluid thickens at wall → lower h)
+
+5. DITTUS-BOELTER CROSSCHECK:
+   - Divergence > 20% warrants a comment (Gnielinski is primary, DB is check)
+
+CORRECTION OPTIONS:
+- Change n_passes (to adjust velocity): more passes → higher velocity → higher Re
+- Flag fouling or erosion risk for downstream attention
+- DO NOT change tube geometry (OD, ID, length) — those are Step 4 decisions
+- DO NOT change n_tubes or shell diameter — those are Step 6 decisions
+
+DECISION GUIDE:
+- PROCEED: velocity in range and h_i reasonable for the fluid type
+- WARN: borderline velocity or transition zone — human should be aware
+- CORRECT: n_passes change needed to fix velocity
+- ESCALATE: fundamentally problematic (e.g. h_i orders of magnitude off)
+
+DO NOT:
+- Change Q_W, LMTD_K, F_factor, U_W_m2K, or A_m2 — those are upstream results
+- Override fluid properties — those come from Step 3
+- Change tube OD, ID, or length — those are Step 4 geometry decisions
+- Escalate for normal turbulent water with h_i in 3000–10000 range — use proceed\
+"""
+
+_STEP_8_PROMPT = """\
+## Step 8: Shell-Side Heat Transfer Coefficient (Bell-Delaware) — Review Focus
+
+You are reviewing the shell-side heat transfer coefficient (h_shell) computed \
+using the full Bell-Delaware method with five J-correction factors.
+
+YOUR REVIEW FOCUS:
+1. J-FACTOR PRODUCTS:
+   - J_c (baffle cut): 0.4–1.0 typical
+   - J_l (leakage): 0.5–1.0 typical
+   - J_b (bundle): 0.3–1.0 typical
+   - J_s (sealing): 0.7–1.0 typical
+   - J_r (inlet/exit): 0.3–0.9 typical
+   - **Full product J_c × J_l × J_b × J_s × J_r ≥ 0.35** — if `J_product` < 0.35, \
+escalate with recommendation to reduce clearances or add sealing strips
+   - Use `J_product` from outputs (all five factors combined) — do NOT compute \
+a partial product from individual J values
+
+2. h_shell RANGES — apply based on the shell-side fluid identified in Design Context:
+   (Engine scope: single-phase liquids only — no gas-phase service)
+   - Water / cooling water: 2,000–8,000 W/m²K
+   - Light organics (toluene, ethanol, glycol): 300–1,500 W/m²K
+   - Heavy oil / crude / lube oil: 50–500 W/m²K
+   If h_shell is outside the expected range for the identified shell-side fluid, \
+investigate — do NOT rationalise it as "gas-like".
+
+3. KERN CROSS-CHECK:
+   **IMPORTANT**: The Kern method (1950) systematically underpredicts h_o compared \
+to Bell-Delaware by 40-60% for turbulent liquid flows. This is a well-documented \
+limitation (Serth 2007, Thulukkanam 2013) — the Kern correlation uses a simplified \
+equivalent diameter and does NOT account for crossflow enhancement, bypass, or \
+leakage corrections that Bell-Delaware provides.
+   - < 100% divergence: NORMAL — within expected Kern underprediction range
+   - 100–200% divergence: NOTEWORTHY but still expected for high-Re liquid flows — \
+do NOT escalate if h_shell is within the expected range for the shell-side fluid
+   - > 200% divergence: ANOMALOUS — suggests geometry or property input error, ESCALATE
+   - The Kern value should NEVER override the Bell-Delaware result
+   - Focus your validation on whether h_shell falls in the expected range for \
+the identified shell-side fluid (Section 2 above), NOT on the Kern divergence percentage
+
+4. WALL TEMPERATURE EFFECT:
+   - Cross-check `mu_wall_Pa_s` against expected viscosity for the shell-side fluid:
+     • Water: 0.0002–0.001 Pa·s
+     • Light organics: 0.001–0.005 Pa·s
+     • Heavy oil / lube oil: 0.005–0.5 Pa·s
+   - If `mu_wall` falls outside the expected range for the identified shell-side fluid, \
+ESCALATE — the wall viscosity lookup used the wrong property backend \
+(most likely thermo returning water-like values for a petroleum fluid).
+   - Large viscosity ratio (μ_bulk/μ_wall > 2) indicates significant viscous heating — \
+note this as an observation
+
+CORRECTION OPTIONS:
+- Adjust baffle cut, baffle spacing, or sealing strips to improve J-factors
+- DO NOT change tube geometry or shell diameter — those are Step 4/6 decisions
+
+DO NOT:
+- Escalate for normal J-factor products in [0.35, 0.80] range
+- Escalate for Kern divergence < 200% when h_shell is within the expected fluid range
+- Override h_shell with Kern value — Bell-Delaware is the primary method\
+"""
+
+_STEP_9_PROMPT = """\
+## Step 9: Overall Heat Transfer Coefficient + Resistance Breakdown — Review Focus
+
+You are reviewing the aggregation of all thermal resistances into the overall U value. \
+This is the critical checkpoint where Steps 7–8 film coefficients, Step 4 fouling factors, \
+and tube wall conduction combine into the design U.
+
+FORMULA REVIEWED:
+  1/U_o = 1/h_o + R_f,o + (d_o × ln(d_o/d_i))/(2×k_w) + R_f,i×(d_o/d_i) + (d_o/d_i)/h_i
+
+YOUR REVIEW FOCUS:
+1. Is U_dirty in the typical range for this fluid pair?
+   (Engine scope: single-phase liquids only — no gas-phase service)
+   - Water/water: 800–1500 W/m²K
+   - Oil/water (heavy organic): 100–500 W/m²K
+   - Oil/oil: 60–150 W/m²K
+   - Light organic/water: 200–800 W/m²K
+
+2. Is the controlling resistance physically expected?
+   - Viscous fluid side should dominate
+   - If wall resistance > 10%, verify material (carbon steel vs stainless/titanium)
+   - If no single resistance dominates (all < 20%), this is balanced — note it
+
+3. Kern cross-check (if available):
+   - Kern systematically underpredicts vs Bell-Delaware by 40-60% for turbulent \
+liquid flows — this is expected (see Step 8 Kern note)
+   - < 100% deviation: normal
+   - 100–200% deviation: noteworthy but not grounds for escalation if U is in range
+   - > 200% deviation: consider ESCALATE
+
+4. Cleanliness factor:
+   - 0.80–0.95: typical
+   - < 0.65: heavy fouling — verify assumptions
+   - > 0.95: very clean — verify R_f not underestimated
+
+5. Tube material: If k_wall_source is "stub_default", WARN that \
+ASME-sourced data was unavailable.
+
+DO NOT ESCALATE because U_dirty ≠ U_estimated (Step 6). That deviation \
+is normal and handled by Step 12 convergence. Only escalate if the \
+individual resistance values are physically unreasonable.
+
+CORRECTIONS YOU CAN MAKE:
+- Change tube_material if fluids suggest corrosion risk but carbon steel was used
+- Adjust fouling factor if breakdown shows fouling is unreasonably high/low
+- NOTE: Do not change h_tube or h_shell — those are Step 7/8 outputs
+
+DO NOT:
+- Escalate for U vs Step 6 estimate deviation — Step 12 handles convergence
+- Override h_tube or h_shell — those are upstream Step 7/8 outputs
+- Change tube geometry — those are Step 4/6 decisions\
+"""
+
 # Step prompt registry — add an entry here before wiring any new step
 _STEP_PROMPTS: dict[int, str] = {
     1: _STEP_1_PROMPT,
@@ -487,6 +683,9 @@ _STEP_PROMPTS: dict[int, str] = {
     4: _STEP_4_PROMPT,
     5: _STEP_5_PROMPT,
     6: _STEP_6_PROMPT,
+    7: _STEP_7_PROMPT,
+    8: _STEP_8_PROMPT,
+    9: _STEP_9_PROMPT,
 }
 
 
@@ -623,7 +822,7 @@ def _build_step_context_inner(
         return "\n".join(lines)
 
     if step_id == 3:
-        # Pr consistency context
+        # Pr consistency context + property source validation
         lines = []
         for label, key in [("Hot", "hot_fluid_props"), ("Cold", "cold_fluid_props")]:
             props = result.outputs.get(key)
@@ -633,6 +832,11 @@ def _build_step_context_inner(
             cp = getattr(props, "cp_J_kgK", None)
             k = getattr(props, "k_W_mK", None)
             pr = getattr(props, "Pr", None)
+            source = getattr(props, "property_source", None) or "unknown"
+            confidence = getattr(props, "property_confidence", None)
+            lines.append(f"{label} — property_source = {source}" + (
+                f", confidence = {confidence:.0%}" if confidence is not None else ""
+            ))
             if all(v is not None and v > 0 for v in (mu, cp, k, pr)):
                 expected_pr = mu * cp / k
                 delta_pct = abs(pr - expected_pr) / expected_pr * 100
@@ -725,6 +929,123 @@ def _build_step_context_inner(
             )
         if n_req is not None:
             lines.append(f"Tubes required = {n_req} (before TEMA rounding)")
+        return "\n".join(lines)
+
+    if step_id == 7:
+        # Tube-side HTC context
+        lines = []
+        velocity = result.outputs.get("tube_velocity_m_s")
+        re = result.outputs.get("Re_tube")
+        pr = result.outputs.get("Pr_tube")
+        h_i = result.outputs.get("h_tube_W_m2K")
+        regime = result.outputs.get("flow_regime_tube")
+        method = result.outputs.get("method")
+        visc_corr = result.outputs.get("viscosity_correction")
+        db_div = result.outputs.get("dittus_boelter_divergence_pct")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+
+        tube_side = "cold" if state.shell_side_fluid == "hot" else "hot"
+        lines.append(f"Tube-side fluid: {tube_side} ({getattr(state, tube_side + '_fluid_name', '?')})")
+        if velocity is not None:
+            lines.append(f"Velocity = {velocity:.3f} m/s")
+        if re is not None:
+            lines.append(f"Re = {re:.0f}")
+        if pr is not None:
+            lines.append(f"Pr = {pr:.2f}")
+        if regime:
+            lines.append(f"Flow regime = {regime}")
+        if method:
+            lines.append(f"Correlation = {method}")
+        if h_i is not None:
+            lines.append(f"h_tube = {h_i:.1f} W/m²K")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction factor = {visc_corr:.4f}")
+        if db_div is not None:
+            lines.append(f"Dittus-Boelter divergence = {db_div:.1f}%")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        return "\n".join(lines)
+
+    if step_id == 8:
+        # Shell-side HTC context
+        lines = []
+        shell_side = state.shell_side_fluid or "?"
+        shell_fluid_name = (
+            state.hot_fluid_name if shell_side == "hot"
+            else state.cold_fluid_name if shell_side == "cold"
+            else "?"
+        )
+        lines.append(f"Shell-side fluid: {shell_side} ({shell_fluid_name})")
+
+        h_shell = result.outputs.get("h_shell_W_m2K")
+        re_shell = result.outputs.get("Re_shell")
+        g_s = result.outputs.get("G_s_kg_m2s")
+        visc_corr = result.outputs.get("visc_correction")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+        mu_wall = result.outputs.get("mu_wall_Pa_s")
+        kern_div = result.outputs.get("kern_divergence_pct")
+        h_kern = result.outputs.get("h_shell_kern_W_m2K")
+        j_product = result.outputs.get("J_product")
+
+        # Include bulk fluid properties so the AI can cross-check
+        if shell_side == "hot" and state.hot_fluid_props:
+            fp = state.hot_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+        elif shell_side == "cold" and state.cold_fluid_props:
+            fp = state.cold_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+
+        if h_shell is not None:
+            lines.append(f"h_shell (Bell-Delaware) = {h_shell:.1f} W/m²K")
+        if h_kern is not None:
+            lines.append(f"h_shell (Kern) = {h_kern:.1f} W/m²K")
+        if kern_div is not None:
+            lines.append(f"Kern divergence = {kern_div:.1f}%")
+        if re_shell is not None:
+            lines.append(f"Re_shell = {re_shell:.0f}")
+        if g_s is not None:
+            lines.append(f"G_s = {g_s:.1f} kg/m²s")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction (μ_bulk/μ_wall)^0.14 = {visc_corr:.4f}")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        if mu_wall is not None:
+            lines.append(f"μ_wall = {mu_wall:.6f} Pa·s")
+        if j_product is not None:
+            lines.append(f"J-factor product = {j_product:.4f}")
+        return "\n".join(lines)
+
+    if step_id == 9:
+        # Overall U + resistance breakdown context
+        lines = []
+        u_est = state.U_W_m2K  # Step 6 estimate
+        u_calc = result.outputs.get("U_dirty_W_m2K")
+        if u_est is not None and u_calc is not None:
+            dev = (u_calc - u_est) / u_est * 100
+            lines.append(f"Step 6 estimated U: {u_est:.1f} W/m²K")
+            lines.append(f"Calculated U (dirty): {u_calc:.1f} W/m²K")
+            lines.append(f"Deviation from estimate: {dev:+.1f}%")
+        cf = result.outputs.get("cleanliness_factor")
+        if cf is not None:
+            lines.append(f"Cleanliness factor: {cf:.3f}")
+        ctrl = result.outputs.get("controlling_resistance")
+        if ctrl:
+            lines.append(f"Controlling resistance: {ctrl}")
+        k_src = result.outputs.get("k_wall_source")
+        if k_src:
+            lines.append(f"Wall conductivity source: {k_src}")
+        k_w = result.outputs.get("k_wall_W_mK")
+        mat = result.outputs.get("tube_material")
+        if k_w is not None and mat:
+            lines.append(f"Tube material: {mat} (k_w = {k_w:.1f} W/m·K)")
         return "\n".join(lines)
 
     # Step 1 and unknown steps — no extra context needed
@@ -871,6 +1192,7 @@ class AIEngineer:
             "### Design Context",
             f"- Hot fluid: {state.hot_fluid_name or 'N/A'}",
             f"- Cold fluid: {state.cold_fluid_name or 'N/A'}",
+            f"- Shell-side fluid: {state.shell_side_fluid or 'N/A'}",
             f"- T_hot: {state.T_hot_in_C}→{state.T_hot_out_C} °C",
             f"- T_cold: {state.T_cold_in_C}→{state.T_cold_out_C} °C",
             f"- Duty: {state.Q_W or 'N/A'} W",

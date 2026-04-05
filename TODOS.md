@@ -51,3 +51,34 @@ bigger project (Grafana/Prometheus) — but structured logging is the minimum us
 **Depends on:** Prompt-split PR ships first so step_id → prompt mapping is established.
 
 **Priority:** P2 — ship after Week 5 accuracy gate validates the basic split.
+
+---
+
+## P1 — External Bell-Delaware validation reference (BD-REF-002)
+
+**What:** Find a published Bell-Delaware worked example with intermediate J-factor values
+(e.g., Thulukkanam "Heat Exchanger Design Handbook", Kakaç & Liu, Coulson & Richardson
+Vol 6 BD examples, or an HTRI/HTFS benchmark). Add as `tests/fixtures/bd_ref_002.json`
+alongside the self-computed BD-REF-001.
+
+**Why:** BD-REF-001 validates self-consistency (does our code match our reference calculator?),
+not correctness (do our formulas match the published method?). If the Taborek formula
+interpretation is systematically wrong, both the reference calculator and implementation
+will agree — and both will be wrong. One external reference with published intermediate
+J-factor values proves the implementation is correct, not just self-consistent.
+
+**How to apply:** Literature search for a Bell-Delaware worked example that publishes:
+geometry inputs, all 5 J-factors, h_ideal, and h_o. Add as a second gate test in
+`test_bell_delaware_vs_ref.py`. Use looser tolerances (±5%) since different BD
+versions (Taborek 1983 vs. 1998) may differ slightly.
+
+**Pros:** Transforms validation from "self-consistent" to "independently verified."
+Catches systematic errors in formula interpretation.
+
+**Cons:** Requires ~1hr literature search. Published examples may use slightly different
+correlation versions (different year, different coefficient source).
+
+**Depends on:** Nothing. Can be done in parallel with Phase 0-3.
+
+**Priority:** P1 — should be done before or during Phase 3 implementation. Highest-value
+validation item identified by independent review.

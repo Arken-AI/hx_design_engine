@@ -337,3 +337,69 @@ def find_shell_diameter(
 def get_standard_shell_diameters() -> list[float]:
     """Return all standard shell diameters in meters, ascending."""
     return [inch * _INCH_TO_M for inch in _STANDARD_SHELL_IDS_INCH]
+
+
+# ---------------------------------------------------------------------------
+# TEMA RCB-4.3 — Shell-baffle & tube-baffle diametral clearances
+# ---------------------------------------------------------------------------
+# (shell_id_mm, delta_sb_diametral_mm, delta_tb_diametral_mm)
+# Source: TEMA Standards, Table RCB-4.3 (normal fit class)
+
+_CLEARANCE_TABLE: list[tuple[float, float, float]] = [
+    (200,  1.6, 0.4),
+    (300,  2.0, 0.4),
+    (400,  2.4, 0.4),
+    (500,  2.8, 0.8),
+    (600,  3.2, 0.8),
+    (800,  3.6, 0.8),
+    (1000, 4.0, 0.8),
+    (1200, 4.4, 0.8),
+    (1500, 4.8, 0.8),
+]
+
+
+def _snap_clearance_shell(shell_id_m: float) -> tuple[float, float]:
+    """Find nearest clearance table entry for the given shell ID.
+
+    Returns (delta_sb_mm, delta_tb_mm) for the closest shell size.
+    Raises ValueError if shell_id_m is wildly out of range.
+    """
+    shell_mm = shell_id_m * 1000.0
+    best_row = None
+    best_diff = float("inf")
+    for row_mm, sb, tb in _CLEARANCE_TABLE:
+        diff = abs(shell_mm - row_mm)
+        if diff < best_diff:
+            best_diff = diff
+            best_row = (sb, tb)
+    if best_row is None or best_diff > 200:
+        raise ValueError(
+            f"shell_id_m={shell_id_m} ({shell_mm:.0f} mm) outside "
+            f"TEMA clearance table range [200, 1500] mm"
+        )
+    return best_row
+
+
+def get_tema_clearances(
+    shell_id_m: float,
+    fit_class: str = "normal",
+) -> dict[str, float]:
+    """Look up TEMA RCB-4.3 clearances for a given shell diameter.
+
+    Parameters
+    ----------
+    shell_id_m : Shell inner diameter in meters.
+    fit_class : "normal" (only class currently supported).
+
+    Returns
+    -------
+    {"delta_sb_m": float, "delta_tb_m": float}
+        Shell-baffle and tube-baffle diametral clearances in meters.
+    """
+    if fit_class != "normal":
+        raise ValueError(f"Only 'normal' fit class supported, got '{fit_class}'")
+    sb_mm, tb_mm = _snap_clearance_shell(shell_id_m)
+    return {
+        "delta_sb_m": sb_mm / 1000.0,
+        "delta_tb_m": tb_mm / 1000.0,
+    }
