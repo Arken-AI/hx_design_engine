@@ -141,3 +141,23 @@ class TestDesignState:
         assert s2.T_hot_in_C == 150.0
         assert s2.hot_fluid_name == "crude oil"
         assert s2.session_id == s.session_id
+
+    def test_shell_id_finalised_defaults_false(self):
+        s = DesignState()
+        assert s.shell_id_finalised is False
+
+    def test_shell_id_finalised_round_trip(self):
+        s = DesignState(shell_id_finalised=True)
+        assert s.shell_id_finalised is True
+        s2 = DesignState.model_validate_json(s.model_dump_json())
+        assert s2.shell_id_finalised is True
+
+    def test_area_uncertainty_fields_default_none(self):
+        s = DesignState()
+        assert s.A_required_low_m2 is None
+        assert s.A_required_high_m2 is None
+
+    def test_design_strengths_risks_default_empty(self):
+        s = DesignState()
+        assert s.design_strengths == []
+        assert s.design_risks == []

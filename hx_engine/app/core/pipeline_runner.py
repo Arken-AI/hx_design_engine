@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
-from typing import Any
+from typing import Any, Optional
 
 from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
@@ -55,7 +56,11 @@ PIPELINE_STEPS = [
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
-USER_RESPONSE_TIMEOUT = 300
+USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
+
+# How long (seconds) to wait for user response on actionable WARNING
+# (shorter than ESCALATE — auto-proceeds with current values on timeout)
+WARNING_PAUSE_TIMEOUT = 120
 
 
 class PipelineRunner:
@@ -86,7 +91,11 @@ class PipelineRunner:
 
                 # --- orphan check ---
                 if await self.session_store.is_orphaned(session_id):
-                    logger.warning("Session %s orphaned, aborting", session_id)
+                    logger.warning(
+                        "Session %s orphaned at step %d, aborting pipeline",
+                        session_id, step.step_id,
+                    )
+                    state.pipeline_status = "orphaned"
                     break
 
                 # --- heartbeat ---
@@ -102,85 +111,231 @@ class PipelineRunner:
                     ).model_dump(),
                 )
 
-                # --- execute step with AI review loop ---
-                start_ms = time.monotonic()
-                try:
-                    result: StepResult = await step.run_with_review_loop(
-                        state, self.ai_engineer
-                    )
-                except CalculationError as exc:
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step, str(exc),
-                        recommendation="Check input parameters and retry.",
-                    )
-                    return state
-                except StepHardFailure as exc:
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step,
-                        "; ".join(exc.validation_errors),
-                        recommendation="Hard validation failure — cannot continue.",
-                    )
-                    return state
-                except Exception as exc:
-                    logger.exception(
-                        "Unexpected error in step %d", step.step_id
-                    )
-                    state.pipeline_status = "error"
-                    await self._emit_step_error(
-                        session_id, step, str(exc),
-                        recommendation="An unexpected error occurred.",
-                    )
-                    return state
+                # --- execute step with AI review loop (re-runs on ESCALATE/WARNING) ---
+                max_escalations = 2
+                escalation_count = 0
+                max_actionable_warnings = 1
+                warning_pause_count = 0
+                while True:
+                    start_ms = time.monotonic()
+                    try:
+                        result: StepResult = await step.run_with_review_loop(
+                            state, self.ai_engineer
+                        )
+                    except CalculationError as exc:
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step, str(exc),
+                            recommendation="Check input parameters and retry.",
+                        )
+                        return state
+                    except StepHardFailure as exc:
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step,
+                            "; ".join(exc.validation_errors),
+                            recommendation="Hard validation failure — cannot continue.",
+                        )
+                        return state
+                    except Exception as exc:
+                        logger.exception(
+                            "Unexpected error in step %d", step.step_id
+                        )
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step, str(exc),
+                            recommendation="An unexpected error occurred.",
+                        )
+                        return state
 
-                duration_ms = int((time.monotonic() - start_ms) * 1000)
+                    duration_ms = int((time.monotonic() - start_ms) * 1000)
 
-                # --- Layer 2: hard validation rules ---
-                vr = check_validation_rules(step.step_id, result)
-                result.validation_passed = vr.passed
-                result.validation_errors = vr.errors
-                if not vr.passed:
-                    raise StepHardFailure(step.step_id, vr.errors)
+                    # --- Layer 2: hard validation rules ---
+                    vr = check_validation_rules(step.step_id, result)
+                    result.validation_passed = vr.passed
+                    result.validation_errors = vr.errors
+                    if not vr.passed:
+                        logger.error(
+                            "[PIPELINE] Layer 2 validation failed for step %d: %s",
+                            step.step_id, vr.errors,
+                        )
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step,
+                            "; ".join(vr.errors),
+                            recommendation="Hard validation failure — cannot continue.",
+                        )
+                        return state
 
-                # --- log step result ---
-                self._log_step_result(step, result, duration_ms)
+                    # --- log step result ---
+                    self._log_step_result(step, result, duration_ms)
 
-                # --- apply outputs to state ---
-                self._apply_outputs(state, result)
-                state.current_step = step.step_id
-                if step.step_id not in state.completed_steps:
-                    state.completed_steps.append(step.step_id)
+                    # --- apply outputs to state ---
+                    self._apply_outputs(state, result)
+                    state.current_step = step.step_id
+                    if step.step_id not in state.completed_steps:
+                        state.completed_steps.append(step.step_id)
 
-                # --- emit decision-based event ---
-                await self._emit_decision_event(
-                    session_id, step, result, duration_ms
+                    # --- emit decision-based event ---
+                    await self._emit_decision_event(
+                        session_id, step, result, duration_ms
+                    )
+
+                    # --- handle ESCALATE: pause, wait for user, then re-run ---
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.ESCALATE
+                        and escalation_count < max_escalations
+                    ):
+                        escalation_count += 1
+                        state.waiting_for_user = True
+                        await self.session_store.save(session_id, state)
+                        updated_state, user_response_text = await self._wait_for_user(
+                            session_id, state, step, result
+                        )
+                        if updated_state is None:
+                            # Timeout — pipeline already emitted StepErrorEvent
+                            state.pipeline_status = "error"
+                            return state
+                        state = updated_state
+                        state.waiting_for_user = False
+
+                        # Record this escalation attempt in history so the AI
+                        # gets context on the next call and avoids repeating itself.
+                        step_key = str(step.step_id)
+                        if step_key not in state.escalation_history:
+                            state.escalation_history[step_key] = []
+                        state.escalation_history[step_key].append({
+                            "attempt": escalation_count,
+                            "options": result.ai_review.options,
+                            "recommendation": result.ai_review.recommendation,
+                            "user_chose": user_response_text or "(no text — accepted recommendation)",
+                        })
+
+                        # Refresh heartbeat — it may have expired while waiting
+                        await self.session_store.heartbeat(session_id)
+
+                        # Drop the step record from the escalated run so the
+                        # re-run's record is the only one persisted for this step.
+                        state.step_records = [
+                            r for r in state.step_records
+                            if r.step_id != step.step_id
+                        ]
+                        # Re-emit step_started so the frontend resets the card
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepStartedEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                            ).model_dump(),
+                        )
+                        logger.info(
+                            "[ESCALATE] Re-running step %d (%s) after user response "
+                            "(attempt %d/%d)",
+                            step.step_id, step.step_name,
+                            escalation_count, max_escalations,
+                        )
+                        continue  # Re-run the step with updated state
+
+                    # --- handle actionable WARNING: pause, wait for user, then re-run ---
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.WARN
+                        and result.ai_review.options  # actionable (has choices)
+                        and warning_pause_count < max_actionable_warnings
+                    ):
+                        warning_pause_count += 1
+                        state.waiting_for_user = True
+                        await self.session_store.save(session_id, state)
+                        updated_state, _ = await self._wait_for_user(
+                            session_id, state, step, result,
+                            timeout=WARNING_PAUSE_TIMEOUT,
+                            on_timeout="proceed",
+                        )
+                        state = updated_state
+                        state.waiting_for_user = False
+
+                        # Refresh heartbeat — it may have expired while waiting
+                        await self.session_store.heartbeat(session_id)
+
+                        # Drop the step record from the warning run so the
+                        # re-run's record is the only one persisted for this step.
+                        state.step_records = [
+                            r for r in state.step_records
+                            if r.step_id != step.step_id
+                        ]
+                        # Re-emit step_started so the frontend resets the card
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepStartedEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                            ).model_dump(),
+                        )
+                        logger.info(
+                            "[WARNING-PAUSE] Re-running step %d (%s) after user response "
+                            "(warning attempt %d/%d)",
+                            step.step_id, step.step_name,
+                            warning_pause_count, max_actionable_warnings,
+                        )
+                        continue  # Re-run the step with updated state
+
+                    # Step completed (non-ESCALATE, or escalations exhausted).
+                    # If escalations were exhausted (still ESCALATE here), emit a
+                    # warning so the frontend doesn't freeze on the input box.
+                    if (
+                        result.ai_review
+                        and result.ai_review.decision == AIDecisionEnum.ESCALATE
+                    ):
+                        await self.sse_manager.emit(
+                            session_id,
+                            StepWarningEvent(
+                                session_id=session_id,
+                                step_id=step.step_id,
+                                step_name=step.step_name,
+                                confidence=result.ai_review.confidence if result.ai_review else 0.0,
+                                reasoning=result.ai_review.reasoning if result.ai_review else "",
+                                user_summary=(
+                                    f"Step {step.step_id}: escalation limit reached — "
+                                    "proceeding with current values."
+                                ),
+                                warning_message=(
+                                    "Maximum escalation attempts reached. "
+                                    "Pipeline continues with unresolved conflict."
+                                ),
+                                severity="warning",
+                                duration_ms=duration_ms,
+                                outputs=_serialize_outputs(result.outputs),
+                            ).model_dump(mode="json"),
+                        )
+                    break
+
+                logger.info(
+                    "[PIPELINE] Step %d (%s) finished — continuing to next step",
+                    step.step_id, step.step_name,
                 )
-
-                # --- handle ESCALATE: pause and wait for user ---
-                if (
-                    result.ai_review
-                    and result.ai_review.decision == AIDecisionEnum.ESCALATE
-                ):
-                    state.waiting_for_user = True
-                    await self.session_store.save(session_id, state)
-                    state = await self._wait_for_user(session_id, state, step)
-                    state.waiting_for_user = False
-
                 # --- persist state after each step ---
                 await self.session_store.save(session_id, state)
 
             # --- pipeline complete ---
-            state.pipeline_status = "completed"
-            state.is_complete = True
-            await self.session_store.save(session_id, state)
-            await self.sse_manager.emit(
-                session_id,
-                DesignCompleteEvent(
-                    session_id=session_id,
-                    summary=self._build_summary(state),
-                ).model_dump(),
-            )
+            # Only mark complete if pipeline wasn't aborted by orphan/error
+            if state.pipeline_status == "running":
+                logger.info(
+                    "[PIPELINE] All steps done — completed_steps=%s",
+                    state.completed_steps,
+                )
+                state.pipeline_status = "completed"
+                state.is_complete = True
+                await self.session_store.save(session_id, state)
+                await self.sse_manager.emit(
+                    session_id,
+                    DesignCompleteEvent(
+                        session_id=session_id,
+                        summary=self._build_summary(state),
+                    ).model_dump(),
+                )
 
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
@@ -269,6 +424,10 @@ class PipelineRunner:
             "shell_side_fluid": "shell_side_fluid",
             "R_f_hot_m2KW": "R_f_hot_m2KW",
             "R_f_cold_m2KW": "R_f_cold_m2KW",
+            "multi_shell_arrangement": "multi_shell_arrangement",
+            "shell_id_finalised": "shell_id_finalised",
+            "A_required_low_m2": "A_required_low_m2",
+            "A_required_high_m2": "A_required_high_m2",
             "h_tube_W_m2K": "h_tube_W_m2K",
             "tube_velocity_m_s": "tube_velocity_m_s",
             "Re_tube": "Re_tube",
@@ -321,12 +480,18 @@ class PipelineRunner:
         safe_outputs = _serialize_outputs(result.outputs)
 
         if decision == AIDecisionEnum.PROCEED:
+            # Only surface reasoning when AI was actually called with a real review.
+            # An empty string causes the frontend <Reasoning> component to render
+            # nothing, hiding the pointless "▸ view reasoning" toggle.
+            _reasoning = ""
+            if review and review.ai_called and review.reasoning:
+                _reasoning = review.reasoning
             event = StepApprovedEvent(
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=review.confidence if review else 1.0,
-                reasoning=review.reasoning if review else "No AI review required.",
+                reasoning=_reasoning,
                 user_summary=f"Step {step.step_id} ({step.step_name}) completed.",
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
@@ -352,21 +517,34 @@ class PipelineRunner:
             # Mirror the routing rule in base.py: corrections present = real concern,
             # no corrections = informational observation only.
             severity = "warning" if (review and review.corrections) else "note"
+            short_summary = (
+                f"Step {step.step_id} approved with warning."
+                if severity == "warning"
+                else f"Step {step.step_id} — AI note."
+            )
+            # warning_message is a short one-liner shown above the KV table;
+            # reasoning is the full AI review text shown in the collapsible
+            # section.  Previously both were set to review.reasoning, which
+            # caused the same long text to render twice on the frontend.
+            warn_msg = (
+                review.recommendation
+                or review.observation
+                or short_summary
+            ) if review else ""
             event = StepWarningEvent(
                 session_id=session_id,
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=review.confidence if review else 0.0,
                 reasoning=review.reasoning if review else "",
-                user_summary=(
-                    f"Step {step.step_id} approved with warning."
-                    if severity == "warning"
-                    else f"Step {step.step_id} — AI note."
-                ),
-                warning_message=review.reasoning if review else "",
+                user_summary=short_summary,
+                warning_message=warn_msg,
                 severity=severity,
                 duration_ms=duration_ms,
                 outputs=safe_outputs,
+                options=review.options if review else [],
+                option_ratings=review.option_ratings if review else [],
+                recommendation=review.recommendation if review else None,
             )
 
         elif decision == AIDecisionEnum.ESCALATE:
@@ -375,6 +553,9 @@ class PipelineRunner:
                 step_id=step.step_id,
                 step_name=step.step_name,
                 message=review.reasoning if review else "AI requests user input.",
+                options=review.options if review else [],
+                option_ratings=review.option_ratings if review else [],
+                recommendation=review.recommendation if review else None,
             )
 
         else:
@@ -406,24 +587,79 @@ class PipelineRunner:
         session_id: str,
         state: DesignState,
         step: Any,
-    ) -> DesignState:
-        """Block the pipeline until the user responds via POST /respond."""
+        result: StepResult,
+        *,
+        timeout: int = USER_RESPONSE_TIMEOUT,
+        on_timeout: str = "abort",
+    ) -> tuple[Optional[DesignState], str]:
+        """Block the pipeline until the user responds via POST /respond.
+
+        Returns (updated_state, user_input_text).
+        updated_state is None on timeout when on_timeout='abort' (caller must abort).
+        When on_timeout='proceed', returns (current_state, "") on timeout.
+
+        Response types:
+          accept  — user accepts the AI's recommendation; apply suggested
+                    corrections from result.ai_review.corrections to state.
+          override — user provided free-text; parse values.user_input and
+                     map recognised fields (e.g. tema_type) onto state.
+          skip    — user wants to proceed with current outputs unchanged.
+        """
         future = self.sse_manager.create_user_response_future(session_id)
+        user_input = ""
         try:
             response = await asyncio.wait_for(
-                future, timeout=USER_RESPONSE_TIMEOUT
+                future, timeout=timeout
             )
-            # Apply any user-provided overrides
             if isinstance(response, dict):
-                for key, val in response.items():
-                    if hasattr(state, key):
-                        setattr(state, key, val)
+                response_type = response.get("type", "accept")
+                values = response.get("values") or {}
+                user_input_raw = values.get("user_input", "").strip()
+                user_input = user_input_raw.lower()
+
+                if response_type == "accept" or self._sounds_like_acceptance(user_input):
+                    # Apply AI-recommended corrections so the re-run doesn't conflict
+                    review = result.ai_review
+                    if review and review.corrections:
+                        for correction in review.corrections:
+                            if hasattr(state, correction.field):
+                                setattr(state, correction.field, correction.new_value)
+                                logger.info(
+                                    "User accepted AI suggestion: %s = %r",
+                                    correction.field,
+                                    correction.new_value,
+                                )
+                    # Apply recommendation hint only when corrections didn't
+                    # already cover tema_preference to avoid overwriting the
+                    # user's explicit choice with a hint from the AI's text.
+                    if review and review.recommendation:
+                        correction_fields = {c.field for c in (review.corrections or [])}
+                        if "tema_preference" not in correction_fields:
+                            self._apply_recommendation_hint(state, review.recommendation)
+
+                elif response_type == "override":
+                    # User typed a specific value or clicked an option button.
+                    # Check for multi-shell keywords in the full response text
+                    # (covers both option-click text and typed free text).
+                    self._apply_user_text_override(state, user_input)
+
+                # "skip" — don't touch state; re-run will see unchanged inputs
+
         except asyncio.TimeoutError:
             logger.warning(
-                "User response timeout for session %s step %d",
+                "User response timeout for session %s step %d (on_timeout=%s)",
                 session_id,
                 step.step_id,
+                on_timeout,
             )
+            if on_timeout == "proceed":
+                # Actionable WARNING timeout — proceed with current values
+                logger.info(
+                    "[WARNING-TIMEOUT] Proceeding with current values for step %d",
+                    step.step_id,
+                )
+                return state, ""
+            # Default: abort pipeline (ESCALATE behavior)
             await self.sse_manager.emit(
                 session_id,
                 StepErrorEvent(
@@ -433,7 +669,74 @@ class PipelineRunner:
                     message="User response timeout — aborting pipeline.",
                 ).model_dump(),
             )
-        return state
+            return None, ""  # Signal caller to abort
+        return state, user_input_raw
+
+    # ------------------------------------------------------------------
+    # User response interpretation helpers
+    # ------------------------------------------------------------------
+
+    _NEGATION_WORDS = frozenset(
+        ("no", "not", "don't", "dont", "do not", "never", "disagree", "reject",
+         "keep", "stay", "remain", "cancel", "abort", "stop")
+    )
+
+    @classmethod
+    def _sounds_like_acceptance(cls, text: str) -> bool:
+        """Return True if free-text input signals acceptance of the AI suggestion.
+
+        Checks for explicit negation first so phrases like "don't proceed"
+        or "I don't agree" are correctly treated as rejections.
+        """
+        # Explicit negation takes priority
+        if any(word in text for word in cls._NEGATION_WORDS):
+            return False
+        accept_phrases = (
+            "as per suggestion", "use suggestion", "use your suggestion",
+            "yes", "ok", "okay", "accept", "agree", "go ahead",
+            "use that", "sounds good", "looks good",
+        )
+        return any(phrase in text for phrase in accept_phrases)
+
+    @staticmethod
+    def _apply_recommendation_hint(state: DesignState, recommendation: str) -> None:
+        """Extract TEMA type hints from the AI's recommendation text."""
+        # Match patterns like "Use AES" / "recommend AEP" / "switch to AEU"
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
+            recommendation,
+            re.IGNORECASE,
+        )
+        if match:
+            suggested = match.group(1).upper()
+            logger.info(
+                "Applying recommendation hint: tema_preference = %r", suggested
+            )
+            state.tema_preference = suggested
+
+    @staticmethod
+    def _apply_user_text_override(state: DesignState, text: str) -> None:
+        """Parse free-text override for known field names."""
+        # Multi-shell arrangement — check this first so "series"/"parallel"
+        # in the text is acted on before looking for TEMA type codes.
+        if re.search(r"\bseries\b", text, re.IGNORECASE):
+            state.multi_shell_arrangement = "series"
+            logger.info("User override: multi_shell_arrangement = 'series'")
+            return
+        if re.search(r"\bparallel\b", text, re.IGNORECASE):
+            state.multi_shell_arrangement = "parallel"
+            logger.info("User override: multi_shell_arrangement = 'parallel'")
+            return
+
+        # TEMA type mentioned explicitly
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b", text, re.IGNORECASE
+        )
+        if match:
+            state.tema_preference = match.group(1).upper()
+            logger.info(
+                "User override: tema_preference = %r", state.tema_preference
+            )
 
     @staticmethod
     def _build_summary(state: DesignState) -> dict[str, Any]:
@@ -449,6 +752,8 @@ class PipelineRunner:
             "A_m2": state.A_m2,
             "tema_type": state.tema_type,
             "tema_class": state.tema_class,
+            "multi_shell_arrangement": state.multi_shell_arrangement,
+            "n_shells": state.geometry.n_shells if state.geometry else None,
             "warnings": state.warnings,
             "notes": state.notes,
             "geometry": state.geometry.model_dump() if state.geometry else None,

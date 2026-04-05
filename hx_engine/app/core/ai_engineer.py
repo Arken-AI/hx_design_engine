@@ -80,7 +80,8 @@ Respond ONLY with a JSON object in this exact format — no text before or after
     ],
     "observation": "<optional forward-looking note for downstream steps, max 200 chars>",
     "recommendation": "<required when escalating — what the engineer should do>",
-    "options": ["<option 1>", "<option 2>"]
+    "options": ["<option 1>", "<option 2>"],
+    "option_ratings": [<int 1-10>, <int 1-10>]
 }
 
 Decision guide:
@@ -92,6 +93,10 @@ Decision guide:
   Do NOT use "warn" just to echo that the calculation looks correct.
 - "correct": specific field(s) need adjustment — provide corrections array
 - "escalate": cannot resolve automatically — needs human judgment
+
+option_ratings: when escalating, rate each option 1–10 for engineering completeness.
+10 = complete solution (all edge cases handled), 7 = covers main case but skips some
+edges, 3 = shortcut that defers significant work. Always recommend the highest-rated option.
 
 Do NOT include any text outside the JSON object.\
 """
@@ -310,6 +315,32 @@ Review the `escalation_hints` array. If you see triggers like:
 - `extreme_pressure`: > 100 bar → verify materials
 - `fouling_factor_uncertain`: Low confidence R_f → ask user to confirm
 
+### F. Auto-Correction Rules (WARN with corrections)
+When you identify a clear engineering rule violation, return decision="warn" \
+WITH a non-empty "corrections" array so the pipeline auto-resolves it. \
+Reserve corrections-free "warn" for judgment calls only.
+
+RULE 1 — Fouling-prone fluid in U-tube bundle:
+If the tube-side fluid is fouling-prone (lube oil, crude oil, heavy fuel oil, \
+heavy organics) AND tema_type == "AEU", this is a clear rule violation: \
+U-tube bundles cannot be mechanically cleaned on the tube side.
+→ Return decision="warn" with corrections:
+  [{"field": "tema_type", "old_value": "AEU", "new_value": "AES", \
+    "reason": "Fouling-prone fluid on tube side — U-tube cannot be mechanically cleaned. Switching to AES floating head."}]
+Also populate options for user override:
+  options: ["Switch to AES floating head (recommended)", "Keep AEU — fouling risk is acceptable", "Switch to BEM fixed tube-sheet"]
+  recommendation: "Switch to AES floating head (recommended)"
+
+RULE 2 — Shell-side crude/heavy oil in non-cleanable shell:
+If the shell-side fluid is crude or heavy oil AND pitch_layout is triangular \
+(not square), warn with correction to square pitch for cleaning lane access.
+
+JUDGMENT CALLS (warn WITHOUT corrections):
+- Light fouling fluids (light organics, clean process water) in AEU — marginal risk
+- Debate on tube vs shell allocation with no clear priority violation
+- Borderline fouling factor confidence
+These should remain as informational warnings — let the user decide.
+
 DO NOT:
 - Change the fluid allocation unless it clearly violates the priority rules
 - Override TEMA type without explaining which condition is violated
@@ -416,6 +447,30 @@ COMMON ISSUES WHEN YOU ARE CALLED:
 - Gas-phase fluid misclassified as liquid → U far too high → area too small
 - Very viscous fluid not classified as heavy_organic → U too high
 - Extremely large or small area suggesting U is off by an order of magnitude
+
+### Auto-Correction Rules (WARN with corrections)
+When you identify a clear engineering rule violation, return decision="warn" \
+WITH a non-empty "corrections" array so the pipeline auto-resolves it. \
+Reserve corrections-free "warn" for judgment calls only.
+
+RULE 1 — High-viscosity fluid misclassified:
+If the kinematic viscosity at the mean operating temperature exceeds 50 cSt \
+(indicating a heavy organic), but the fluid is classified as something lighter \
+(e.g. light_organic, water), the U assumption is too high.
+→ Return decision="warn" with corrections:
+  [{"field": "fluid_category", "old_value": "<current>", "new_value": "heavy_organic", \
+    "reason": "Kinematic viscosity > 50 cSt at mean temp — reclassifying as heavy organic."},
+   {"field": "U_W_m2K", "old_value": <current_U>, "new_value": 175, \
+    "reason": "Heavy organic/water U range is 150–200 W/m²K. Using midpoint 175."}]
+Also populate options for user override:
+  options: ["Accept reclassification to heavy_organic (recommended)", "Keep current classification", "Use custom U value"]
+  recommendation: "Accept reclassification to heavy_organic (recommended)"
+
+JUDGMENT CALLS (warn WITHOUT corrections):
+- Zero overdesign margin (overdesign_pct ≈ 0%) — this is a design choice, not a rule.
+  Warn the user but do NOT correct it. The user may accept tight margins.
+- Viscosity between 20–50 cSt — borderline, depends on fouling history.
+  Flag the concern but do NOT force reclassification.
 
 DO NOT:
 - Change Q_W, LMTD_K, or F_factor — these are upstream results from Steps 2 and 5
@@ -620,7 +675,8 @@ _STEP_PROMPTS: dict[int, str] = {
 #     ],
 #     "observation": "<optional forward-looking note for downstream steps, max 200 chars>",
 #     "recommendation": "<required when escalating — what the engineer should do>",
-#     "options": ["<option 1>", "<option 2>"]
+#     "options": ["<option 1>", "<option 2>"],
+#     "option_ratings": [<int 1-10>, <int 1-10>]
 # }
 #
 # Decision guide:
@@ -1081,6 +1137,28 @@ class AIEngineer:
         if step_context:
             prompt_parts.extend(["", "### Computed Context", step_context])
 
+        # Inject escalation history so the AI doesn't repeat itself on re-escalation
+        esc_history = getattr(state, "escalation_history", {})
+        step_history = esc_history.get(str(step.step_id), [])
+        if step_history:
+            prompt_parts.extend([
+                "",
+                "### Previous Escalation Attempts for This Step",
+                "The user has already responded to escalation(s) for this step. "
+                "Do NOT present the same options again. Build on what was tried.",
+            ])
+            for entry in step_history:
+                prompt_parts.append(
+                    f"- Attempt {entry['attempt']}: presented options "
+                    f"{entry['options']}. User chose: \"{entry['user_chose']}\". "
+                    f"Recommended: \"{entry.get('recommendation', '')}\""
+                )
+            prompt_parts.append(
+                "Given the above history, if you must escalate again: "
+                "explain WHY the previous choice was insufficient, and offer "
+                "NEW options that address the remaining constraint."
+            )
+
         # Append failure context on retry calls
         if failure_context is not None:
             failure_block = self._build_failure_context_prompt(failure_context)
@@ -1158,6 +1236,9 @@ class AIEngineer:
         options_raw = data.get("options", [])
         if not isinstance(options_raw, list):
             options_raw = []
+        ratings_raw = data.get("option_ratings", [])
+        if not isinstance(ratings_raw, list):
+            ratings_raw = []
 
         return AIReview(
             decision=decision,
@@ -1167,5 +1248,6 @@ class AIEngineer:
             observation=str(data.get("observation", "")),
             recommendation=recommendation_raw or None,
             options=[str(o) for o in options_raw],
+            option_ratings=[int(r) for r in ratings_raw if isinstance(r, (int, float))],
             ai_called=True,
         )

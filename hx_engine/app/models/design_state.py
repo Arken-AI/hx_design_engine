@@ -102,6 +102,7 @@ class GeometrySpec(BaseModel):
     n_passes: Optional[int] = None
     pitch_layout: Optional[str] = None
     shell_passes: Optional[int] = None
+    n_shells: Optional[int] = None   # Number of shells (multi-shell arrangement)
 
     # --- Bell-Delaware specific (populated by Step 8 preconditions) ---
     tube_pitch_m: Optional[float] = None
@@ -209,6 +210,15 @@ class GeometrySpec(BaseModel):
             )
         return v
 
+    @field_validator("n_shells")
+    @classmethod
+    def _check_n_shells(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 1 or v > 4):
+            raise ValueError(
+                f"n_shells={v} outside range [1, 4]"
+            )
+        return v
+
     @field_validator("tube_pitch_m")
     @classmethod
     def _check_tube_pitch(cls, v: Optional[float]) -> Optional[float]:
@@ -312,6 +322,12 @@ class DesignState(BaseModel):
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
 
+    # --- multi-shell arrangement (set by user response to Step 6 escalation) ---
+    # "series"   — 2 shells in series, each handles full flow with full temperature program
+    # "parallel" — 2 shells in parallel, each handles half the flow and half the duty
+    # None       — single-shell design (default)
+    multi_shell_arrangement: Optional[str] = None
+
     # --- mean temperatures (arithmetic mean of inlet/outlet, °C) ---
     T_mean_hot_C: Optional[float] = None
     T_mean_cold_C: Optional[float] = None
@@ -322,6 +338,11 @@ class DesignState(BaseModel):
     F_factor: Optional[float] = None
     U_W_m2K: Optional[float] = None
     A_m2: Optional[float] = None
+
+    # --- area uncertainty band (FE-3, populated by Step 6 when tube-side ---
+    # fluid source confidence < 0.80; None when confidence is sufficient) ---
+    A_required_low_m2: Optional[float] = None
+    A_required_high_m2: Optional[float] = None
 
     # --- tube-side heat transfer (populated by Step 7) ---
     h_tube_W_m2K: Optional[float] = None
@@ -374,6 +395,16 @@ class DesignState(BaseModel):
     # --- confidence breakdown (populated by Step 16) ---
     confidence_breakdown: Optional[dict[str, float]] = None
 
+    # --- shell ID finalisation flag (FE-4) ---
+    # False for floating-head types (AES/AEU) until Step 15 applies the
+    # +50-75 mm clearance. True for fixed-tubesheet types (BEM, etc.) and
+    # after Step 15 confirms the shell ID.
+    shell_id_finalised: bool = False
+
+    # --- design strengths / risks (FE-5, populated by Step 16) ---
+    design_strengths: list[str] = Field(default_factory=list)
+    design_risks: list[str] = Field(default_factory=list)
+
     # --- fouling resistances (populated by Step 4; AI can correct these) ---
     # When set, Step 4 skips the lookup and uses these values directly,
     # breaking the correction loop caused by unresolvable fouling uncertainty.
@@ -393,6 +424,13 @@ class DesignState(BaseModel):
     # deterministic selection logic (e.g. TEMA type) respects the AI's correction
     # instead of re-running its own decision tree and overriding it.
     applied_corrections: dict[str, Any] = Field(default_factory=dict)
+
+    # --- escalation history (per step) ---
+    # Records what options the AI presented and what the user chose on each
+    # escalation attempt. Injected into the AI prompt on re-escalation so the
+    # AI generates different, more targeted options instead of repeating itself.
+    # Format: { step_id: [{ "attempt": int, "options": [...], "user_chose": str }, ...] }
+    escalation_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # State snapshot / restore helpers (used by correction loop in base.py)
