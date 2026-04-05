@@ -537,6 +537,96 @@ DO NOT:
 - Escalate for normal turbulent water with h_i in 3000–10000 range — use proceed\
 """
 
+_STEP_8_PROMPT = """\
+## Step 8: Shell-Side Heat Transfer Coefficient (Bell-Delaware) — Review Focus
+
+You are reviewing the shell-side heat transfer coefficient (h_shell) computed \
+using the full Bell-Delaware method with five J-correction factors.
+
+YOUR REVIEW FOCUS:
+1. J-FACTOR PRODUCTS:
+   - J_c (baffle cut): 0.4–1.0 typical
+   - J_l (leakage): 0.5–1.0 typical
+   - J_b (bundle): 0.3–1.0 typical
+   - J_s (sealing): 0.7–1.0 typical
+   - J_r (inlet/exit): 0.3–0.9 typical
+   - Product J_c × J_l × J_b ≥ 0.30 (hard rule — cannot override)
+   - If any J-factor < 0.3, geometry has significant leakage/bypass
+
+2. h_shell RANGES:
+   - Water: 2,000–8,000 W/m²K
+   - Light organics: 300–1,500 W/m²K
+   - Heavy oil / crude: 50–500 W/m²K
+   - Gas: 20–300 W/m²K
+
+3. KERN CROSS-CHECK:
+   - < 15% divergence: normal (Bell-Delaware accounts for bypass/leakage)
+   - 15–20%: noteworthy — WARN
+   - > 20%: geometry may have issues — consider ESCALATE
+
+4. WALL TEMPERATURE EFFECT:
+   - Large viscosity ratio (μ_bulk/μ_wall > 2) indicates significant viscous heating
+   - Check if T_wall estimate is physically reasonable
+
+CORRECTION OPTIONS:
+- Adjust baffle cut, baffle spacing, or sealing strips to improve J-factors
+- DO NOT change tube geometry or shell diameter — those are Step 4/6 decisions
+
+DO NOT:
+- Escalate for normal J-factor products in [0.30, 0.80] range
+- Override h_shell with Kern value — Bell-Delaware is the primary method\
+"""
+
+_STEP_9_PROMPT = """\
+## Step 9: Overall Heat Transfer Coefficient + Resistance Breakdown — Review Focus
+
+You are reviewing the aggregation of all thermal resistances into the overall U value. \
+This is the critical checkpoint where Steps 7–8 film coefficients, Step 4 fouling factors, \
+and tube wall conduction combine into the design U.
+
+FORMULA REVIEWED:
+  1/U_o = 1/h_o + R_f,o + (d_o × ln(d_o/d_i))/(2×k_w) + R_f,i×(d_o/d_i) + (d_o/d_i)/h_i
+
+YOUR REVIEW FOCUS:
+1. Is U_dirty in the typical range for this fluid pair?
+   - Water/water: 800–1500 W/m²K
+   - Oil/water: 100–350 W/m²K
+   - Gas/liquid: 20–250 W/m²K
+   - Oil/oil: 60–150 W/m²K
+
+2. Is the controlling resistance physically expected?
+   - Viscous fluid side should dominate
+   - Gas side should dominate for gas/liquid service
+   - If wall resistance > 10%, verify material
+
+3. Kern cross-check (if available):
+   - < 15% deviation: normal
+   - 15–25% deviation: WARN
+   - > 25% deviation: consider ESCALATE
+
+4. Cleanliness factor:
+   - 0.80–0.95: typical
+   - < 0.65: heavy fouling — verify assumptions
+   - > 0.95: very clean — verify R_f not underestimated
+
+5. Tube material: If k_wall_source is "stub_default", WARN that \
+ASME-sourced data was unavailable.
+
+DO NOT ESCALATE because U_dirty ≠ U_estimated (Step 6). That deviation \
+is normal and handled by Step 12 convergence. Only escalate if the \
+individual resistance values are physically unreasonable.
+
+CORRECTIONS YOU CAN MAKE:
+- Change tube_material if fluids suggest corrosion risk but carbon steel was used
+- Adjust fouling factor if breakdown shows fouling is unreasonably high/low
+- NOTE: Do not change h_tube or h_shell — those are Step 7/8 outputs
+
+DO NOT:
+- Escalate for U vs Step 6 estimate deviation — Step 12 handles convergence
+- Override h_tube or h_shell — those are upstream Step 7/8 outputs
+- Change tube geometry — those are Step 4/6 decisions\
+"""
+
 # Step prompt registry — add an entry here before wiring any new step
 _STEP_PROMPTS: dict[int, str] = {
     1: _STEP_1_PROMPT,
@@ -546,6 +636,8 @@ _STEP_PROMPTS: dict[int, str] = {
     5: _STEP_5_PROMPT,
     6: _STEP_6_PROMPT,
     7: _STEP_7_PROMPT,
+    8: _STEP_8_PROMPT,
+    9: _STEP_9_PROMPT,
 }
 
 
@@ -819,6 +911,31 @@ def _build_step_context_inner(
             lines.append(f"Dittus-Boelter divergence = {db_div:.1f}%")
         if t_wall is not None:
             lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        return "\n".join(lines)
+
+    if step_id == 9:
+        # Overall U + resistance breakdown context
+        lines = []
+        u_est = state.U_W_m2K  # Step 6 estimate
+        u_calc = result.outputs.get("U_dirty_W_m2K")
+        if u_est is not None and u_calc is not None:
+            dev = (u_calc - u_est) / u_est * 100
+            lines.append(f"Step 6 estimated U: {u_est:.1f} W/m²K")
+            lines.append(f"Calculated U (dirty): {u_calc:.1f} W/m²K")
+            lines.append(f"Deviation from estimate: {dev:+.1f}%")
+        cf = result.outputs.get("cleanliness_factor")
+        if cf is not None:
+            lines.append(f"Cleanliness factor: {cf:.3f}")
+        ctrl = result.outputs.get("controlling_resistance")
+        if ctrl:
+            lines.append(f"Controlling resistance: {ctrl}")
+        k_src = result.outputs.get("k_wall_source")
+        if k_src:
+            lines.append(f"Wall conductivity source: {k_src}")
+        k_w = result.outputs.get("k_wall_W_mK")
+        mat = result.outputs.get("tube_material")
+        if k_w is not None and mat:
+            lines.append(f"Tube material: {mat} (k_w = {k_w:.1f} W/m·K)")
         return "\n".join(lines)
 
     # Step 1 and unknown steps — no extra context needed

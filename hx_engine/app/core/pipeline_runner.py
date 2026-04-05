@@ -37,6 +37,8 @@ from hx_engine.app.steps.step_04_tema_geometry import Step04TEMAGeometry
 from hx_engine.app.steps.step_05_lmtd import Step05LMTD
 from hx_engine.app.steps.step_06_initial_u import Step06InitialU
 from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
+from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
+from hx_engine.app.steps.step_09_overall_u import Step09OverallU
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ PIPELINE_STEPS = [
     Step05LMTD,
     Step06InitialU,
     Step07TubeSideH,
+    Step08ShellSideH,
+    Step09OverallU,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
