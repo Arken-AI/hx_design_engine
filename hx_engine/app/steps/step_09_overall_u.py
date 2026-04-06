@@ -258,10 +258,11 @@ class Step09OverallU(BaseStep):
                 f"Cleanliness factor {CF:.2f} is low — fouling dominates design"
             )
 
-        if U_kern_deviation_pct is not None and U_kern_deviation_pct > 15:
+        if U_kern_deviation_pct is not None and U_kern_deviation_pct > 40:
             warnings.append(
                 f"Bell-Delaware/Kern U deviation: {U_kern_deviation_pct:.1f}% — "
-                "check geometry assumptions"
+                "Kern underpredicts h_shell by 40-60% for turbulent liquid flows "
+                "(expected); check geometry only if deviation > 40%"
             )
 
         if U_vs_estimated_deviation_pct is not None and abs(U_vs_estimated_deviation_pct) > 30:
@@ -283,16 +284,17 @@ class Step09OverallU(BaseStep):
             escalation_hints.append({
                 "trigger": "very_low_U",
                 "recommendation": (
-                    f"U = {U_dirty:.1f} W/m²K — extremely low, "
-                    "check for gas-side controlling resistance"
+                    f"U = {U_dirty:.1f} W/m²K — extremely low for liquid service. "
+                    "Check fluid properties (viscosity, k) and film coefficients "
+                    "from Steps 7-8."
                 ),
             })
-        if U_kern_deviation_pct is not None and U_kern_deviation_pct > 25:
+        if U_kern_deviation_pct is not None and U_kern_deviation_pct > 50:
             escalation_hints.append({
                 "trigger": "kern_u_divergence",
                 "recommendation": (
-                    f"BD/Kern U deviation {U_kern_deviation_pct:.1f}% > 25% — "
-                    "geometry may have issues"
+                    f"BD/Kern U deviation {U_kern_deviation_pct:.1f}% > 50% — "
+                    "extreme divergence, review geometry inputs"
                 ),
             })
         if CF < 0.50:
