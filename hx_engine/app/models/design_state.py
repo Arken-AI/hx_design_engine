@@ -376,6 +376,26 @@ class DesignState(BaseModel):
     k_wall_source: Optional[str] = None
     k_wall_confidence: Optional[float] = None
 
+    # --- pressure drops (populated by Step 10) ---
+    dP_tube_Pa: Optional[float] = None
+    dP_shell_Pa: Optional[float] = None
+    dP_tube_friction_Pa: Optional[float] = None
+    dP_tube_minor_Pa: Optional[float] = None
+    dP_tube_nozzle_Pa: Optional[float] = None
+    dP_shell_crossflow_Pa: Optional[float] = None
+    dP_shell_window_Pa: Optional[float] = None
+    dP_shell_end_Pa: Optional[float] = None
+    dP_shell_nozzle_Pa: Optional[float] = None
+    Fb_prime_dP: Optional[float] = None
+    FL_prime_dP: Optional[float] = None
+    nozzle_id_tube_m: Optional[float] = None
+    nozzle_id_shell_m: Optional[float] = None
+    rho_v2_tube_nozzle: Optional[float] = None
+    rho_v2_shell_nozzle: Optional[float] = None
+    dP_shell_simplified_delaware_Pa: Optional[float] = None
+    dP_shell_kern_Pa: Optional[float] = None
+    dP_shell_bell_vs_kern_pct: Optional[float] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)

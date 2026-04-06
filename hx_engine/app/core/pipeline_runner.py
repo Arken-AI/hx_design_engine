@@ -39,6 +39,7 @@ from hx_engine.app.steps.step_06_initial_u import Step06InitialU
 from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
 from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
 from hx_engine.app.steps.step_09_overall_u import Step09OverallU
+from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ PIPELINE_STEPS = [
     Step07TubeSideH,
     Step08ShellSideH,
     Step09OverallU,
+    Step10PressureDrops,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
@@ -436,6 +438,25 @@ class PipelineRunner:
             "flow_regime_tube": "flow_regime_tube",
             "T_mean_hot_C": "T_mean_hot_C",
             "T_mean_cold_C": "T_mean_cold_C",
+            # Step 10 pressure drops
+            "dP_tube_Pa": "dP_tube_Pa",
+            "dP_shell_Pa": "dP_shell_Pa",
+            "dP_tube_friction_Pa": "dP_tube_friction_Pa",
+            "dP_tube_minor_Pa": "dP_tube_minor_Pa",
+            "dP_tube_nozzle_Pa": "dP_tube_nozzle_Pa",
+            "dP_shell_crossflow_Pa": "dP_shell_crossflow_Pa",
+            "dP_shell_window_Pa": "dP_shell_window_Pa",
+            "dP_shell_end_Pa": "dP_shell_end_Pa",
+            "dP_shell_nozzle_Pa": "dP_shell_nozzle_Pa",
+            "Fb_prime_dP": "Fb_prime_dP",
+            "FL_prime_dP": "FL_prime_dP",
+            "nozzle_id_tube_m": "nozzle_id_tube_m",
+            "nozzle_id_shell_m": "nozzle_id_shell_m",
+            "rho_v2_tube_nozzle": "rho_v2_tube_nozzle",
+            "rho_v2_shell_nozzle": "rho_v2_shell_nozzle",
+            "dP_shell_simplified_delaware_Pa": "dP_shell_simplified_delaware_Pa",
+            "dP_shell_kern_Pa": "dP_shell_kern_Pa",
+            "dP_shell_bell_vs_kern_pct": "dP_shell_bell_vs_kern_pct",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:
