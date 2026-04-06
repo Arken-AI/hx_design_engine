@@ -1132,7 +1132,7 @@ class AIEngineer:
             # On API failure, proceed with warning rather than blocking
             return AIReview(
                 decision=AIDecisionEnum.WARN,
-                confidence=0.5,
+                confidence=0.70,
                 corrections=[],
                 reasoning=f"AI review failed ({e}). Proceeding with caution.",
                 ai_called=True,
@@ -1312,7 +1312,7 @@ class AIEngineer:
             logger.warning("Unparseable AI review: %s", text[:200])
             return AIReview(
                 decision=AIDecisionEnum.WARN,
-                confidence=0.5,
+                confidence=0.70,
                 corrections=[],
                 reasoning=f"AI response unparseable. Proceeding with caution.",
                 ai_called=True,
@@ -1328,7 +1328,7 @@ class AIEngineer:
         }
         decision = decision_map.get(decision_str, AIDecisionEnum.WARN)
 
-        confidence = float(data.get("confidence", 0.5))
+        confidence = float(data.get("confidence", 0.70))
         confidence = max(0.0, min(1.0, confidence))
 
         # Parse corrections

@@ -488,7 +488,7 @@ Respond with JSON: {decision, confidence, reasoning, correction, user_summary}
 **Try-first instruction [Decision ENG-1A]:** `engineer_review.txt` must include this instruction before the JSON schema:
 > "Before choosing `escalate`, attempt to resolve the issue using sound engineering judgment — apply the conservative standard, select the safer geometry, or use the TEMA default. Only choose `escalate` if you have genuinely exhausted all reasonable options and cannot proceed without user input. When you do escalate, populate `attempts`, `observation`, `recommendation`, and `options` so the user has full context."
 
-**Confidence gate [Decision ENG-1B]:** After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.5`, treat the decision as `escalate` regardless of what the AI returned. This prevents low-confidence corrections from silently degrading the design.
+**Confidence gate [Decision ENG-1B]:** After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, treat the decision as `escalate` regardless of what the AI returned. This prevents low-confidence corrections from silently degrading the design.
 
 ### 5.6 The AI Returns Structured JSON
 
@@ -525,7 +525,7 @@ Respond with JSON: {decision, confidence, reasoning, correction, user_summary}
 }
 ```
 
-**Confidence gate [Decision ENG-1B]:** `pipeline_runner.py` checks `confidence` after every AI call. If `confidence < 0.5`, override the decision to `escalate` regardless of what the AI returned. Log `confidence_gate_triggered=True` in the step record.
+**Confidence gate [Decision ENG-1B]:** `pipeline_runner.py` checks `confidence` after every AI call. If `confidence < 0.70`, override the decision to `escalate` regardless of what the AI returned. Log `confidence_gate_triggered=True` in the step record.
 
 ### 5.7 Helper Function Contracts
 
@@ -859,7 +859,7 @@ finally:
   4. Recommendations if confidence < 0.80
 - **Save to Supermemory:** If confidence ≥ 0.75, store design summary to past_designs
 - **Corner cases:**
-  - Confidence < 0.50 — design may be unreliable. Strong warning to user.
+  - Confidence < 0.70 — design may be unreliable. Strong warning to user.
   - Multiple corrections made — compound uncertainty. Reduce confidence.
   - Key input was assumed (viscosity, fouling factor) — note in assumptions list
   - Cross-method deviation > 15% but U in typical range — conflicting signals. AI must interpret.
@@ -1005,7 +1005,7 @@ class BaseStep(ABC):
                 → correct → re-run Layer 1 → re-review  (attempt 3)
                 → escalate (with all 3 attempts in payload)
 
-        Confidence gate: after every review, if confidence < 0.5 → force escalate.
+        Confidence gate: after every review, if confidence < 0.70 → force escalate.
         Snapshot/restore: take DesignState snapshot before each correction;
         restore on Layer 2 hard fail so state is never left partially mutated.
         """
@@ -1020,10 +1020,10 @@ class BaseStep(ABC):
             )
 
             # Confidence gate [Decision ENG-1B]
-            if review.confidence < 0.5:
+            if review.confidence < 0.70:
                 review.decision = "escalate"
                 review.observation = (
-                    f"Confidence {review.confidence:.2f} below threshold (0.50) — escalating."
+                    f"Confidence {review.confidence:.2f} below threshold (0.70) — escalating."
                 )
 
             if review.decision == "correct" and attempt < MAX_CORRECTIONS:
@@ -2518,8 +2518,8 @@ def mock_supermemory():
 - 3 corrections exhausted [ENG-1A]: mock AI always 'correct' → verify force-escalate on attempt 3, `review.attempts` has 3 entries, `step_escalated` emitted
 - **3 corrections exhausted + user response fails Layer 2 [CEO Review 3 gap fix]:** mock correction exhaustion → escalate → mock user response that still fails Layer 2 → verify `step_error` SSE emitted + `StepHardFailure` raised. Confirms the `else` branch in the correction-exhaustion path (not the direct-escalate path).
 - Correction + Layer 2 hard fail → rollback: mock correction that causes validation fail → verify `state.shell_id_mm` restored to pre-correction value
-- Confidence gate override [ENG-1B]: mock AI returns `decision='correct', confidence=0.4` → verify overridden to `decision='escalate'`, `confidence_gate_triggered=True` logged
-- Confidence gate on re-review: mock AI proceed on attempt 1 but confidence=0.3 → verify force escalate even on 'proceed'
+- Confidence gate override [ENG-1B]: mock AI returns `decision='correct', confidence=0.65` → verify overridden to `decision='escalate'`, `confidence_gate_triggered=True` logged
+- Confidence gate on re-review: mock AI proceed on attempt 1 but confidence=0.65 → verify force escalate even on 'proceed'
 - Warn path: mock AI → 'warn' → verify `step_warning` emitted, no `wait_for_user` called
 - Direct escalate: mock AI → 'escalate' → verify `wait_for_user` called exactly once
 - **review_notes propagation [Eng Review]:** pre-populate `state.review_notes = ["[Step 7] Shell-side Re=650, baffle spacing sensitive"]` before calling `run_with_review_loop()` → verify that `ai_engineer.review()` is called with a `book_context` or `past_designs` string that contains the review note text (or that `_build_prompt()` embeds it — spy on `_build_prompt` if needed). Ensures review_notes reach the AI prompt and aren't silently dropped.
@@ -2833,7 +2833,7 @@ STEP_8_CHECKS = {
 | AI suggests correction that violates hard rules | Reject correction. Proceed without it. |
 | AI takes > 10 seconds to respond | Timeout → retry [CEO-3A]. After 3 attempts, proceed with hard rules. |
 | AI suggests correcting a parameter that doesn't exist | Ignore correction. Log error. Proceed. |
-| AI confidence < 0.5 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
+| AI confidence < 0.70 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
 | User doesn't respond to escalation | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
 | Layer 2 still fails after user response (re-escalation) | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts. |
 
@@ -3025,7 +3025,7 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | ID | Decision | Description |
 |----|----------|-------------|
 | ENG-1A | Try-first + 3-correction limit | AI must attempt resolution before escalating. Max 3 correction attempts per step. After 3 failures, force escalate with all attempts in payload. `escalate` JSON includes `attempts`, `observation`, `recommendation`, `options`. |
-| ENG-1B | Confidence gate (threshold 0.5) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.5`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record. |
+| ENG-1B | Confidence gate (threshold 0.70) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record. |
 | 1B | Direct SSE | Frontend connects directly to HX Engine for SSE (via nginx proxy per CEO-1A) |
 | 2B | Pydantic DesignState | Single Pydantic model, not a dict |
 | 3A | Convergence loop AI skip | `in_convergence_loop` flag skips conditional AI in Steps 7/10/11 |

@@ -64,7 +64,7 @@ class StepProtocol(Protocol):
 # ---------------------------------------------------------------------------
 
 MAX_CORRECTIONS = 3
-MIN_AI_CONFIDENCE = 0.5
+MIN_AI_CONFIDENCE = 0.70
 
 
 class BaseStep(ABC):

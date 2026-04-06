@@ -728,7 +728,7 @@ def _build_escalation_hints(
 
     # --- Fouling factor uncertainty ---
     # Use already-resolved fouling_metadata (from 3-tier async lookup) when available.
-    # Only flag as uncertain if the resolved value still needs_ai=True or confidence<0.5.
+    # Only flag as uncertain if the resolved value still needs_ai=True or confidence<0.70.
     resolved_fm = fouling_metadata or {}
     for side_label, fluid_name, T_mean in [
         ("hot", state.hot_fluid_name or "", T_hot_mean),
@@ -739,7 +739,7 @@ def _build_escalation_hints(
         resolved = resolved_fm.get(side_label)
         if resolved is not None:
             # Already resolved via MongoDB/AI — only flag if still uncertain
-            if resolved.get("needs_ai") or resolved.get("confidence", 1.0) < 0.5:
+            if resolved.get("needs_ai") or resolved.get("confidence", 1.0) < 0.70:
                 raw_conf = resolved.get("confidence")
                 source = resolved.get("source", "unknown")
                 # Table values with location-dependent uncertainty are usable
