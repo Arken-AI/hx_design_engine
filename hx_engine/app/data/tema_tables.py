@@ -372,7 +372,7 @@ def _snap_clearance_shell(shell_id_m: float) -> tuple[float, float]:
         if diff < best_diff:
             best_diff = diff
             best_row = (sb, tb)
-    if best_row is None or best_diff > 200:
+    if best_row is None or best_diff > 100:
         raise ValueError(
             f"shell_id_m={shell_id_m} ({shell_mm:.0f} mm) outside "
             f"TEMA clearance table range [200, 1500] mm"

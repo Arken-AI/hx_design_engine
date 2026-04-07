@@ -317,7 +317,7 @@ class Step05LMTD(BaseStep):
                     return True
 
         # Trigger 2: Highly asymmetric duty (steep F-P curve)
-        if R is not None and R > 3.0:
+        if R is not None and R >= 3.0:
             return True
 
         # Trigger 3: Temperature cross risk (minimum terminal approach < 3°C)
