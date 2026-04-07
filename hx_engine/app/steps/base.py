@@ -83,13 +83,15 @@ class BaseStep(ABC):
     # ------------------------------------------------------------------
 
     def _should_call_ai(self, state: "DesignState") -> bool:
+        # Convergence loop suppresses ALL AI calls — even FULL-mode steps.
+        # Layer 1 deterministic math + Layer 2 hard rules still run.
+        if state.in_convergence_loop:
+            return False
         if self.ai_mode == AIModeEnum.FULL:
             return True
         if self.ai_mode == AIModeEnum.NONE:
             return False
         # CONDITIONAL
-        if state.in_convergence_loop:
-            return False
         return self._conditional_ai_trigger(state)
 
     def _conditional_ai_trigger(self, state: "DesignState") -> bool:  # noqa: ARG002

@@ -402,6 +402,13 @@ class DesignState(BaseModel):
     overdesign_pct: Optional[float] = None          # (A_provided - A_required) / A_required × 100
     A_estimated_vs_required_pct: Optional[float] = None  # (A_m2 - area_required_m2) / area_required_m2 × 100
 
+    # --- convergence loop tracking (populated by Step 12) ---
+    convergence_iteration: Optional[int] = None       # Which iteration converged (None if not run yet)
+    convergence_converged: Optional[bool] = None       # True = converged, False = hit max iterations
+    convergence_max_iterations: int = 20               # Configurable max
+    convergence_trajectory: list[dict] = Field(default_factory=list)
+    convergence_restart_count: int = 0                 # How many structural restarts so far
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)

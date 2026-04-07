@@ -34,6 +34,11 @@ class IterationProgressEvent(SSEBaseEvent):
     current_U: Optional[float] = None
     delta_U_pct: Optional[float] = None
     constraints_met: bool = False
+    overdesign_pct: Optional[float] = None
+    dP_tube_pct_of_limit: Optional[float] = None
+    dP_shell_pct_of_limit: Optional[float] = None
+    velocity_m_s: Optional[float] = None
+    adjustment_made: Optional[str] = None
 
 
 class StepApprovedEvent(SSEBaseEvent):
