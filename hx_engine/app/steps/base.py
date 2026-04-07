@@ -83,13 +83,15 @@ class BaseStep(ABC):
     # ------------------------------------------------------------------
 
     def _should_call_ai(self, state: "DesignState") -> bool:
+        # Convergence loop suppresses ALL AI calls — even FULL-mode steps.
+        # Layer 1 deterministic math + Layer 2 hard rules still run.
+        if state.in_convergence_loop:
+            return False
         if self.ai_mode == AIModeEnum.FULL:
             return True
         if self.ai_mode == AIModeEnum.NONE:
             return False
         # CONDITIONAL
-        if state.in_convergence_loop:
-            return False
         return self._conditional_ai_trigger(state)
 
     def _conditional_ai_trigger(self, state: "DesignState") -> bool:  # noqa: ARG002
@@ -187,7 +189,7 @@ class BaseStep(ABC):
 
                         if layer2_passed:
                             result = new_result
-                            state.notes.append(f"[auto-resolved] {review.reasoning}")
+                            state.warnings.append(f"[auto-resolved] {review.reasoning}")
                             resolved = review.model_copy(update={
                                 "decision": AIDecisionEnum.CORRECT,
                                 "reasoning": f"[auto-resolved] {review.reasoning}",
@@ -204,14 +206,10 @@ class BaseStep(ABC):
                             state.applied_corrections.pop(c.field, None)
 
                     # Informational WARN (or rollback) — pass through, pipeline continues
-                    # Corrections were attempted but layer2 failed → real concern → warnings
-                    # No corrections at all → AI observation only → notes
+                    # All WARN decisions record reasoning in state.warnings
                     review = review.model_copy(update={"attempts": attempts})
                     result.ai_review = review
-                    if review.corrections:
-                        state.warnings.append(review.reasoning)
-                    else:
-                        state.notes.append(review.reasoning)
+                    state.warnings.append(review.reasoning)
                     self._append_review_note(state, review)
                     self._record(state, result, start)
                     return result

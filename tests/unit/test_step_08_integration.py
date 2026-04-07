@@ -281,8 +281,8 @@ class TestStep08AIMode:
         assert step._should_call_ai(state) is True
 
     def test_should_call_ai_even_in_convergence(self, step: Step08ShellSideH) -> None:
-        """FULL mode overrides convergence loop suppression."""
+        """Convergence loop suppresses AI even for FULL-mode steps (D1 decision)."""
         state = _make_state()
         state.in_convergence_loop = True
-        # FULL mode always calls AI
-        assert step._should_call_ai(state) is True
+        # D1: convergence loop check now comes BEFORE FULL mode check
+        assert step._should_call_ai(state) is False

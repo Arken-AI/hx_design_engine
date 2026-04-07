@@ -73,6 +73,13 @@ class TestStartDesign:
             json={
                 "raw_request": "Design HX for water-to-water 80C to 40C",
                 "user_id": "test-user",
+                "hot_fluid_name": "water",
+                "cold_fluid_name": "water",
+                "T_hot_in_C": 80.0,
+                "T_hot_out_C": 40.0,
+                "T_cold_in_C": 25.0,
+                "T_cold_out_C": 45.0,
+                "m_dot_hot_kg_s": 5.0,
             },
         )
         assert resp.status_code == 200
@@ -145,6 +152,13 @@ class TestDesignStatus:
             json={
                 "raw_request": "Design HX for steam condensation",
                 "user_id": "test-user",
+                "hot_fluid_name": "steam",
+                "cold_fluid_name": "water",
+                "T_hot_in_C": 120.0,
+                "T_hot_out_C": 80.0,
+                "T_cold_in_C": 25.0,
+                "T_cold_out_C": 60.0,
+                "m_dot_hot_kg_s": 2.0,
             },
         )
         session_id = create_resp.json()["session_id"]
@@ -188,12 +202,22 @@ class TestRespondToEscalation:
             json={
                 "raw_request": "Design HX",
                 "user_id": "test-user",
+                "hot_fluid_name": "water",
+                "cold_fluid_name": "water",
+                "T_hot_in_C": 80.0,
+                "T_hot_out_C": 40.0,
+                "T_cold_in_C": 25.0,
+                "T_cold_out_C": 45.0,
+                "m_dot_hot_kg_s": 5.0,
             },
         )
         session_id = create_resp.json()["session_id"]
 
-        # Give session time to be persisted
+        # Stub AI never escalates, so manually mark the session as waiting
         await asyncio.sleep(0.3)
+        state = await dependencies._session_store.load(session_id)
+        state.waiting_for_user = True
+        await dependencies._session_store.save(session_id, state)
 
         resp = await client.post(
             f"/api/v1/hx/design/{session_id}/respond",
@@ -210,10 +234,22 @@ class TestRespondToEscalation:
             json={
                 "raw_request": "Design HX",
                 "user_id": "test-user",
+                "hot_fluid_name": "water",
+                "cold_fluid_name": "water",
+                "T_hot_in_C": 80.0,
+                "T_hot_out_C": 40.0,
+                "T_cold_in_C": 25.0,
+                "T_cold_out_C": 45.0,
+                "m_dot_hot_kg_s": 5.0,
             },
         )
         session_id = create_resp.json()["session_id"]
+
+        # Stub AI never escalates, so manually mark the session as waiting
         await asyncio.sleep(0.3)
+        state = await dependencies._session_store.load(session_id)
+        state.waiting_for_user = True
+        await dependencies._session_store.save(session_id, state)
 
         resp = await client.post(
             f"/api/v1/hx/design/{session_id}/respond",

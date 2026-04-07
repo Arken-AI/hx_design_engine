@@ -376,6 +376,39 @@ class DesignState(BaseModel):
     k_wall_source: Optional[str] = None
     k_wall_confidence: Optional[float] = None
 
+    # --- pressure drops (populated by Step 10) ---
+    dP_tube_Pa: Optional[float] = None
+    dP_shell_Pa: Optional[float] = None
+    dP_tube_friction_Pa: Optional[float] = None
+    dP_tube_minor_Pa: Optional[float] = None
+    dP_tube_nozzle_Pa: Optional[float] = None
+    dP_shell_crossflow_Pa: Optional[float] = None
+    dP_shell_window_Pa: Optional[float] = None
+    dP_shell_end_Pa: Optional[float] = None
+    dP_shell_nozzle_Pa: Optional[float] = None
+    Fb_prime_dP: Optional[float] = None
+    FL_prime_dP: Optional[float] = None
+    nozzle_id_tube_m: Optional[float] = None
+    nozzle_id_shell_m: Optional[float] = None
+    rho_v2_tube_nozzle: Optional[float] = None
+    rho_v2_shell_nozzle: Optional[float] = None
+    dP_shell_simplified_delaware_Pa: Optional[float] = None
+    dP_shell_kern_Pa: Optional[float] = None
+    dP_shell_bell_vs_kern_pct: Optional[float] = None
+
+    # --- area + overdesign (populated by Step 11) ---
+    area_required_m2: Optional[float] = None       # Q / (U_dirty × F × LMTD)
+    area_provided_m2: Optional[float] = None       # π × d_o × L × N_t
+    overdesign_pct: Optional[float] = None          # (A_provided - A_required) / A_required × 100
+    A_estimated_vs_required_pct: Optional[float] = None  # (A_m2 - area_required_m2) / area_required_m2 × 100
+
+    # --- convergence loop tracking (populated by Step 12) ---
+    convergence_iteration: Optional[int] = None       # Which iteration converged (None if not run yet)
+    convergence_converged: Optional[bool] = None       # True = converged, False = hit max iterations
+    convergence_max_iterations: int = 20               # Configurable max
+    convergence_trajectory: list[dict] = Field(default_factory=list)
+    convergence_restart_count: int = 0                 # How many structural restarts so far
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
