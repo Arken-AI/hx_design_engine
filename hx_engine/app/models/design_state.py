@@ -396,6 +396,12 @@ class DesignState(BaseModel):
     dP_shell_kern_Pa: Optional[float] = None
     dP_shell_bell_vs_kern_pct: Optional[float] = None
 
+    # --- area + overdesign (populated by Step 11) ---
+    area_required_m2: Optional[float] = None       # Q / (U_dirty × F × LMTD)
+    area_provided_m2: Optional[float] = None       # π × d_o × L × N_t
+    overdesign_pct: Optional[float] = None          # (A_provided - A_required) / A_required × 100
+    A_estimated_vs_required_pct: Optional[float] = None  # (A_m2 - area_required_m2) / area_required_m2 × 100
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)

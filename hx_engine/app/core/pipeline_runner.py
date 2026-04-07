@@ -41,6 +41,7 @@ from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
 from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
 from hx_engine.app.steps.step_09_overall_u import Step09OverallU
 from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
+from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ PIPELINE_STEPS = [
     Step08ShellSideH,
     Step09OverallU,
     Step10PressureDrops,
+    Step11AreaOverdesign,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
@@ -517,6 +519,11 @@ class PipelineRunner:
             "dP_shell_simplified_delaware_Pa": "dP_shell_simplified_delaware_Pa",
             "dP_shell_kern_Pa": "dP_shell_kern_Pa",
             "dP_shell_bell_vs_kern_pct": "dP_shell_bell_vs_kern_pct",
+            # Step 11 area + overdesign
+            "area_required_m2": "area_required_m2",
+            "area_provided_m2": "area_provided_m2",
+            "overdesign_pct": "overdesign_pct",
+            "A_estimated_vs_required_pct": "A_estimated_vs_required_pct",
         }
         for out_key, state_field in mapping.items():
             if out_key in result.outputs:
