@@ -42,7 +42,23 @@ CRUDE_OIL_REQUEST = (
 
 
 def _make_state(raw_request: str = CRUDE_OIL_REQUEST) -> DesignState:
-    return DesignState(raw_request=raw_request, user_id="integration-test")
+    """Create a pre-populated DesignState matching the crude-oil request.
+
+    Step 1 is a passthrough — it expects structured fields to already be
+    populated (NL parsing is done by POST /requirements before the pipeline).
+    """
+    return DesignState(
+        raw_request=raw_request,
+        user_id="integration-test",
+        hot_fluid_name="crude oil",
+        cold_fluid_name="water",
+        T_hot_in_C=150.0,
+        T_hot_out_C=80.0,
+        T_cold_in_C=25.0,
+        T_cold_out_C=45.0,
+        m_dot_hot_kg_s=10.0,
+        P_hot_Pa=500_000.0,
+    )
 
 
 def _apply_outputs(state: DesignState, outputs: dict) -> None:

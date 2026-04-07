@@ -1,12 +1,15 @@
-"""Pure-math correlations for shell-side heat transfer coefficient.
+"""Pure-math correlations for shell-side heat transfer and pressure drop.
 
 Bell-Delaware method (Taborek, 1983 — HEDH correlations):
   - Ideal tube-bank j-factor (Žukauskas)
-  - Five correction factors: J_c, J_l, J_b, J_s, J_r
+  - Five HTC correction factors: J_c, J_l, J_b, J_s, J_r
+  - Pressure drop correction factors: F'_b (bypass), F'_L (leakage)
+  - Ideal bank friction factor j_f (Sinnott Figure 12.36)
   - Geometry computation (crossflow areas, leakage areas, bypass areas)
 
 Kern / Simplified Delaware method (cross-check only):
   - Equivalent diameter, crossflow area, j_H correlation
+  - Kern ΔP (Sinnott Eq. 12.26)
 
 No side effects, no model imports. All functions are independently testable.
 """
@@ -494,4 +497,335 @@ def kern_shell_side_htc(
         "G_s_kg_m2s": G_s,
         "j_H": j_H,
         "Pr_kern": Pr,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Kern shell-side ΔP — Sinnott Eq. 12.26 (cross-check only)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def kern_shell_side_dP(
+    shell_id_m: float,
+    tube_od_m: float,
+    tube_pitch_m: float,
+    pitch_layout: str,
+    baffle_spacing_m: float,
+    n_baffles: int,
+    viscosity_Pa_s: float,
+    viscosity_wall_Pa_s: float,
+    density_kg_m3: float,
+    mass_flow_kg_s: float,
+) -> dict:
+    """Kern method shell-side pressure drop (cross-check only).
+
+    Sinnott Eq. 12.26:
+        ΔP_s = 8 × j_f × (D_s/D_e) × (L/l_B) × ρ×u_s²/2 × (μ/μ_w)^(-0.14)
+
+    Returns dict with dP_kern_Pa, Re_kern, De_m, u_s_m_s, j_f_kern.
+    """
+    D_s = shell_id_m
+    d_o = tube_od_m
+    P_t = tube_pitch_m
+
+    # Equivalent diameter
+    if pitch_layout == "square":
+        De = 4.0 * (P_t ** 2 - math.pi * d_o ** 2 / 4.0) / (math.pi * d_o)
+    else:
+        De = (4.0 * (P_t ** 2 * math.sqrt(3) / 4.0 - math.pi * d_o ** 2 / 8.0)
+              / (math.pi * d_o / 2.0))
+
+    # Crossflow area
+    C_prime = P_t - d_o
+    A_s = D_s * baffle_spacing_m * C_prime / P_t
+
+    # Mass velocity, velocity, Reynolds
+    G_s = mass_flow_kg_s / A_s
+    u_s = G_s / density_kg_m3
+    Re_kern = De * G_s / viscosity_Pa_s
+
+    # Friction factor — Kern j_f from Coulson & Richardson Fig 12.30
+    if Re_kern < 10:
+        j_f_kern = 1.0
+    elif Re_kern < 300:
+        j_f_kern = 1.0 * Re_kern ** (-0.5)
+    else:
+        j_f_kern = 0.36 * Re_kern ** (-0.55)
+
+    # Viscosity correction
+    if viscosity_wall_Pa_s > 0:
+        visc_corr = (viscosity_Pa_s / viscosity_wall_Pa_s) ** (-0.14)
+    else:
+        visc_corr = 1.0
+
+    # Pressure drop — Sinnott Eq. 12.26
+    # L/l_B = (n_b + 1)  since L = (n_b + 1) × l_B
+    dP = (8.0 * j_f_kern * (D_s / De) * (n_baffles + 1)
+          * density_kg_m3 * u_s ** 2 / 2.0 * visc_corr)
+
+    return {
+        "dP_kern_Pa": dP,
+        "Re_kern": Re_kern,
+        "De_m": De,
+        "u_s_m_s": u_s,
+        "j_f_kern": j_f_kern,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PRESSURE DROP — Bell's method (Sinnott §12.9.4)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# -----------------------------------------------------------------------
+# Digitised friction factor j_f from Sinnott Figure 12.36
+# Pitch ratio 1.25, triangular and square layouts
+# -----------------------------------------------------------------------
+_JF_TRI_RE = [10, 100, 1_000, 10_000, 100_000, 500_000]
+_JF_TRI_JF = [2.0, 0.38, 0.10, 0.052, 0.046, 0.044]
+
+_JF_SQ_RE = [10, 100, 1_000, 10_000, 100_000, 500_000]
+_JF_SQ_JF = [1.6, 0.32, 0.094, 0.052, 0.046, 0.044]
+
+
+def _log_interp(x: float, xs: list[float], ys: list[float]) -> float:
+    """Log-log piecewise linear interpolation (pure Python, no numpy)."""
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+
+    log_x = math.log(x)
+    for i in range(len(xs) - 1):
+        if xs[i] <= x <= xs[i + 1]:
+            log_x0 = math.log(xs[i])
+            log_x1 = math.log(xs[i + 1])
+            log_y0 = math.log(ys[i])
+            log_y1 = math.log(ys[i + 1])
+            t = (log_x - log_x0) / (log_x1 - log_x0)
+            return math.exp(log_y0 + t * (log_y1 - log_y0))
+
+    return ys[-1]  # fallback
+
+
+def ideal_bank_jf(Re: float, layout_angle_deg: int) -> float:
+    """Ideal tube-bank friction factor from Sinnott Figure 12.36.
+
+    Log-log interpolation on digitised data for pitch ratio 1.25.
+
+    Args:
+        Re: Shell-side Reynolds number (> 0).
+        layout_angle_deg: 30/60 → triangular, 45/90 → square.
+
+    Returns:
+        j_f (dimensionless).
+    """
+    if Re <= 0:
+        raise ValueError(f"Re must be > 0, got {Re}")
+
+    if layout_angle_deg in (30, 60):
+        return _log_interp(Re, _JF_TRI_RE, _JF_TRI_JF)
+    elif layout_angle_deg in (45, 90):
+        return _log_interp(Re, _JF_SQ_RE, _JF_SQ_JF)
+    else:
+        raise ValueError(f"layout_angle_deg must be 30/45/60/90, got {layout_angle_deg}")
+
+
+# -----------------------------------------------------------------------
+# F'_b — bypass correction for pressure drop
+# -----------------------------------------------------------------------
+
+def compute_Fb_pressure(
+    A_b_m2: float,
+    A_s_m2: float,
+    N_ss: int,
+    N_cv: float,
+    Re: float,
+) -> float:
+    """Sinnott Eq. 12.30: bypass correction F'_b for pressure drop.
+
+    F'_b = exp[-α × (A_b/A_s) × (1 − √(2×N_ss/N_cv))]
+    α = 4.0 (Re ≥ 100), α = 5.0 (Re < 100)
+
+    Note: α is larger than HTC version (1.25/1.35) because bypass
+    effect on ΔP is more severe than on HTC.
+    """
+    alpha = 4.0 if Re >= 100.0 else 5.0
+    r_ss = N_ss / N_cv if N_cv > 0 else 0.0
+
+    if r_ss >= 0.5:
+        return 1.0
+
+    bypass_ratio = A_b_m2 / A_s_m2 if A_s_m2 > 0 else 0.0
+    return math.exp(-alpha * bypass_ratio * (1.0 - math.sqrt(2.0 * r_ss)))
+
+
+# -----------------------------------------------------------------------
+# F'_L — leakage correction for pressure drop
+# -----------------------------------------------------------------------
+
+# Digitised β'_L from Sinnott Figure 12.38
+_BETA_L_RATIO = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+_BETA_L_VAL = [0.68, 0.58, 0.48, 0.38, 0.30, 0.24]
+
+
+def compute_FL_pressure(
+    A_tb_m2: float,
+    A_sb_m2: float,
+) -> float:
+    """Sinnott Eq. 12.31 + Figure 12.38: leakage correction F'_L.
+
+    A_L = A_tb + A_sb
+    r_tb = A_tb / A_L
+    β'_L = interpolated from digitised Figure 12.38
+    F'_L = 1 − β'_L × (A_tb + 2×A_sb) / A_L
+    """
+    A_L = A_tb_m2 + A_sb_m2
+    if A_L <= 0:
+        return 1.0
+
+    r_tb = A_tb_m2 / A_L
+
+    # Linear interpolation for β'_L
+    beta_L = _BETA_L_VAL[-1]
+    for i in range(len(_BETA_L_RATIO) - 1):
+        if _BETA_L_RATIO[i] <= r_tb <= _BETA_L_RATIO[i + 1]:
+            t = ((r_tb - _BETA_L_RATIO[i])
+                 / (_BETA_L_RATIO[i + 1] - _BETA_L_RATIO[i]))
+            beta_L = _BETA_L_VAL[i] + t * (_BETA_L_VAL[i + 1] - _BETA_L_VAL[i])
+            break
+
+    FL = 1.0 - beta_L * (A_tb_m2 + 2.0 * A_sb_m2) / A_L
+    return max(FL, 0.01)  # floor to prevent non-physical zero
+
+
+# -----------------------------------------------------------------------
+# shell_side_dP — main orchestrator for Bell's method ΔP
+# -----------------------------------------------------------------------
+
+def shell_side_dP(
+    # Geometry
+    shell_id_m: float,
+    tube_od_m: float,
+    tube_pitch_m: float,
+    layout_angle_deg: int,
+    n_tubes: int,
+    tube_passes: int,
+    baffle_cut_pct: float,
+    baffle_spacing_central_m: float,
+    baffle_spacing_inlet_m: float,
+    baffle_spacing_outlet_m: float,
+    n_baffles: int,
+    n_sealing_strip_pairs: int,
+    # Clearances
+    delta_tb_m: float,
+    delta_sb_m: float,
+    delta_bundle_shell_m: float,
+    # Fluid props
+    density_kg_m3: float,
+    viscosity_Pa_s: float,
+    viscosity_wall_Pa_s: float,
+    mass_flow_kg_s: float,
+    # Pitch ratio
+    pitch_ratio: float,
+) -> dict:
+    """Shell-side pressure drop using Bell's method (Sinnott §12.9.4).
+
+    Total ΔP = 2×ΔP_e + (N_b−1)×ΔP_c + N_b×ΔP_w   (Eq. 12.37)
+
+    Returns dict with keys:
+        dP_shell_Pa, dP_crossflow_Pa, dP_window_Pa, dP_end_Pa,
+        dP_ideal_Pa, Fb_prime, FL_prime, j_f,
+        u_s_m_s, Re_shell, warnings
+    """
+    warnings: list[str] = []
+
+    # 1. Geometry (reuse the existing compute_geometry)
+    geom = compute_geometry(
+        shell_id_m=shell_id_m,
+        tube_od_m=tube_od_m,
+        tube_pitch_m=tube_pitch_m,
+        layout_angle_deg=layout_angle_deg,
+        n_tubes=n_tubes,
+        tube_passes=tube_passes,
+        baffle_cut_pct=baffle_cut_pct,
+        baffle_spacing_central_m=baffle_spacing_central_m,
+        baffle_spacing_inlet_m=baffle_spacing_inlet_m,
+        baffle_spacing_outlet_m=baffle_spacing_outlet_m,
+        n_baffles=n_baffles,
+        n_sealing_strip_pairs=n_sealing_strip_pairs,
+        delta_tb_m=delta_tb_m,
+        delta_sb_m=delta_sb_m,
+        delta_bundle_shell_m=delta_bundle_shell_m,
+        mass_flow_kg_s=mass_flow_kg_s,
+        viscosity_Pa_s=viscosity_Pa_s,
+    )
+
+    Re = geom["Re_shell"]
+    G_s = geom["G_s_kg_m2s"]
+    S_m = geom["S_m_m2"]
+    N_c = geom["N_c"]
+    N_cw = geom["N_cw"]
+    S_w = geom["S_w_m2"]
+    S_b = geom["S_b_m2"]
+    S_tb = geom["S_tb_m2"]
+    S_sb = geom["S_sb_m2"]
+    N_b = n_baffles
+
+    # Shell-side velocity
+    u_s = G_s / density_kg_m3
+
+    # 2. Ideal bank friction factor
+    j_f = ideal_bank_jf(Re, layout_angle_deg)
+
+    # 3. Viscosity correction
+    if viscosity_wall_Pa_s > 0:
+        visc_corr = (viscosity_Pa_s / viscosity_wall_Pa_s) ** (-0.14)
+    else:
+        visc_corr = 1.0
+
+    # 4. Ideal crossflow ΔP per baffle (Sinnott Eq. 12.33)
+    dP_ideal = 8.0 * j_f * N_c * density_kg_m3 * u_s ** 2 / 2.0 * visc_corr
+
+    # 5. Correction factors
+    Fb_prime = compute_Fb_pressure(S_b, S_m, n_sealing_strip_pairs, N_c, Re)
+    FL_prime = compute_FL_pressure(S_tb, S_sb)
+
+    # 6. Corrected crossflow ΔP (Eq. 12.32)
+    dP_crossflow = dP_ideal * Fb_prime * FL_prime
+
+    # 7. Window ΔP (Eq. 12.34)
+    # u_w = m_dot / (S_w × ρ), u_z = √(u_w × u_s)
+    if S_w > 0:
+        u_w = mass_flow_kg_s / (S_w * density_kg_m3)
+    else:
+        u_w = u_s
+        warnings.append("S_w ≤ 0 — window area calculation suspect")
+
+    u_z = math.sqrt(abs(u_w * u_s))
+    dP_window = FL_prime * (2.0 + 0.6 * N_cw) * density_kg_m3 * u_z ** 2 / 2.0
+
+    # 8. End-zone ΔP (Eq. 12.36)
+    if N_c > 0:
+        dP_end = dP_ideal * (N_c + N_cw) / N_c * Fb_prime
+    else:
+        dP_end = dP_ideal * Fb_prime
+
+    # 9. Total (Eq. 12.37)
+    dP_total = 2.0 * dP_end + dP_crossflow * max(N_b - 1, 0) + N_b * dP_window
+
+    if dP_total < 0:
+        warnings.append(f"Negative shell-side ΔP ({dP_total:.1f} Pa) — check inputs")
+        dP_total = abs(dP_total)
+
+    return {
+        "dP_shell_Pa": dP_total,
+        "dP_crossflow_Pa": dP_crossflow,
+        "dP_window_Pa": dP_window,
+        "dP_end_Pa": dP_end,
+        "dP_ideal_Pa": dP_ideal,
+        "Fb_prime": Fb_prime,
+        "FL_prime": FL_prime,
+        "j_f": j_f,
+        "u_s_m_s": u_s,
+        "Re_shell": Re,
+        "warnings": warnings,
     }

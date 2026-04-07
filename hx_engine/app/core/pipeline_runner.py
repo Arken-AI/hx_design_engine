@@ -17,11 +17,13 @@ from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
+from hx_engine.app.core.state_utils import apply_outputs
 from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
+    IterationProgressEvent,
     StepApprovedEvent,
     StepCorrectedEvent,
     StepErrorEvent,
@@ -40,6 +42,9 @@ from hx_engine.app.steps.step_06_initial_u import Step06InitialU
 from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
 from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
 from hx_engine.app.steps.step_09_overall_u import Step09OverallU
+from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
+from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
+from hx_engine.app.steps.step_12_convergence import Step12Convergence
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,8 @@ PIPELINE_STEPS = [
     Step07TubeSideH,
     Step08ShellSideH,
     Step09OverallU,
+    Step10PressureDrops,
+    Step11AreaOverdesign,
 ]
 
 # How long (seconds) to wait for user response on ESCALATE
@@ -379,6 +386,10 @@ class PipelineRunner:
                 # --- persist state after each step ---
                 await self.session_store.save(session_id, state)
 
+            # --- Step 12: Convergence Loop ---
+            if state.pipeline_status == "running":
+                state = await self._run_convergence_loop(state, session_id)
+
             # --- pipeline complete ---
             # Only mark complete if pipeline wasn't aborted by orphan/error
             if state.pipeline_status == "running":
@@ -415,6 +426,135 @@ class PipelineRunner:
             )
         finally:
             await self.session_store.save(session_id, state)
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Step 12 convergence loop
+    # ------------------------------------------------------------------
+
+    async def _run_convergence_loop(
+        self,
+        state: DesignState,
+        session_id: str,
+    ) -> DesignState:
+        """Execute Step 12 convergence loop with restart handling."""
+        max_restarts = 2
+
+        while True:
+            step12 = Step12Convergence()
+
+            await self.sse_manager.emit(
+                session_id,
+                StepStartedEvent(
+                    session_id=session_id,
+                    step_id=12,
+                    step_name="Convergence Loop",
+                ).model_dump(),
+            )
+
+            try:
+                result = await step12.run(
+                    state, self.ai_engineer, self.sse_manager, session_id,
+                )
+            except Exception as exc:
+                logger.exception("Step 12 convergence loop failed")
+                state.pipeline_status = "error"
+                await self._emit_step_error(
+                    session_id, step12, str(exc),
+                    recommendation="Convergence loop encountered an error.",
+                )
+                return state
+
+            # Apply convergence outputs
+            self._apply_outputs(state, result)
+            state.current_step = 12
+            if 12 not in state.completed_steps:
+                state.completed_steps.append(12)
+
+            # Check for restart request
+            if result.outputs.get("convergence_action") == "restart":
+                restart_from = result.outputs.get("restart_from_step")
+                state.convergence_restart_count += 1
+
+                if state.convergence_restart_count > max_restarts:
+                    logger.warning(
+                        "Max convergence restarts (%d) exceeded", max_restarts,
+                    )
+                    state.pipeline_status = "error"
+                    await self._emit_step_error(
+                        session_id, step12,
+                        f"Max convergence restarts ({max_restarts}) exceeded. "
+                        "Design cannot converge with current configuration.",
+                        recommendation="Review thermal requirements and geometry constraints.",
+                    )
+                    return state
+
+                # Handle ESCALATE — wait for user decision
+                if (
+                    result.ai_review
+                    and result.ai_review.decision == AIDecisionEnum.ESCALATE
+                ):
+                    await self._emit_decision_event(session_id, step12, result, 0)
+                    state.waiting_for_user = True
+                    await self.session_store.save(session_id, state)
+                    updated_state, user_response = await self._wait_for_user(
+                        session_id, state, step12, result,
+                    )
+                    if updated_state is None:
+                        state.pipeline_status = "error"
+                        return state
+                    state = updated_state
+                    state.waiting_for_user = False
+
+                    # If user chose "keep best result", don't restart
+                    if user_response and "keep" in user_response.lower():
+                        logger.info("User chose to keep best result — skipping restart")
+                        state.warnings.append(
+                            "Design not fully converged — user accepted best iteration."
+                        )
+                        break
+
+                # Re-run from restart step
+                logger.info(
+                    "Convergence restart #%d from Step %d",
+                    state.convergence_restart_count, restart_from,
+                )
+                restart_steps = [
+                    s for s in PIPELINE_STEPS if s().step_id >= restart_from
+                ]
+                for step_cls in restart_steps:
+                    step = step_cls()
+                    await self.sse_manager.emit(
+                        session_id,
+                        StepStartedEvent(
+                            session_id=session_id,
+                            step_id=step.step_id,
+                            step_name=step.step_name,
+                        ).model_dump(),
+                    )
+                    try:
+                        r = await step.run_with_review_loop(state, self.ai_engineer)
+                    except (CalculationError, StepHardFailure) as exc:
+                        state.pipeline_status = "error"
+                        await self._emit_step_error(
+                            session_id, step,
+                            str(exc) if isinstance(exc, CalculationError)
+                            else "; ".join(exc.validation_errors),
+                        )
+                        return state
+                    self._apply_outputs(state, r)
+                    state.current_step = step.step_id
+                    await self.session_store.save(session_id, state)
+
+                # Re-run convergence loop (continues the while loop)
+                state.convergence_trajectory.clear()
+                continue
+
+            # Normal completion (converged or accept_best)
+            await self._emit_decision_event(session_id, step12, result, 0)
+            await self.session_store.save(session_id, state)
+            break
 
         return state
 
@@ -461,71 +601,12 @@ class PipelineRunner:
         logger.info("\n" + "\n".join(lines))
 
     def _apply_outputs(self, state: DesignState, result: StepResult) -> None:
-        """Apply step outputs to DesignState fields."""
-        mapping: dict[str, str] = {
-            "Q_W": "Q_W",
-            "LMTD_K": "LMTD_K",
-            "F_factor": "F_factor",
-            "U_W_m2K": "U_W_m2K",
-            "A_m2": "A_m2",
-            "T_hot_in_C": "T_hot_in_C",
-            "T_hot_out_C": "T_hot_out_C",
-            "T_cold_in_C": "T_cold_in_C",
-            "T_cold_out_C": "T_cold_out_C",
-            "m_dot_hot_kg_s": "m_dot_hot_kg_s",
-            "m_dot_cold_kg_s": "m_dot_cold_kg_s",
-            "hot_fluid_name": "hot_fluid_name",
-            "cold_fluid_name": "cold_fluid_name",
-            "P_hot_Pa": "P_hot_Pa",
-            "P_cold_Pa": "P_cold_Pa",
-            "tema_type": "tema_type",
-            "tema_class": "tema_class",
-            "tema_preference": "tema_preference",
-            "shell_side_fluid": "shell_side_fluid",
-            "R_f_hot_m2KW": "R_f_hot_m2KW",
-            "R_f_cold_m2KW": "R_f_cold_m2KW",
-            "multi_shell_arrangement": "multi_shell_arrangement",
-            "shell_id_finalised": "shell_id_finalised",
-            "A_required_low_m2": "A_required_low_m2",
-            "A_required_high_m2": "A_required_high_m2",
-            "h_tube_W_m2K": "h_tube_W_m2K",
-            "tube_velocity_m_s": "tube_velocity_m_s",
-            "Re_tube": "Re_tube",
-            "Pr_tube": "Pr_tube",
-            "Nu_tube": "Nu_tube",
-            "flow_regime_tube": "flow_regime_tube",
-            "T_mean_hot_C": "T_mean_hot_C",
-            "T_mean_cold_C": "T_mean_cold_C",
-        }
-        for out_key, state_field in mapping.items():
-            if out_key in result.outputs:
-                setattr(state, state_field, result.outputs[out_key])
+        """Apply step outputs to DesignState fields.
 
-        # FluidProperties (nested)
-        if "hot_fluid_props" in result.outputs:
-            from hx_engine.app.models.design_state import FluidProperties
-            val = result.outputs["hot_fluid_props"]
-            if isinstance(val, dict):
-                state.hot_fluid_props = FluidProperties(**val)
-            elif isinstance(val, FluidProperties):
-                state.hot_fluid_props = val
-
-        if "cold_fluid_props" in result.outputs:
-            from hx_engine.app.models.design_state import FluidProperties
-            val = result.outputs["cold_fluid_props"]
-            if isinstance(val, dict):
-                state.cold_fluid_props = FluidProperties(**val)
-            elif isinstance(val, FluidProperties):
-                state.cold_fluid_props = val
-
-        # Geometry (nested)
-        if "geometry" in result.outputs:
-            from hx_engine.app.models.design_state import GeometrySpec
-            val = result.outputs["geometry"]
-            if isinstance(val, dict):
-                state.geometry = GeometrySpec(**val)
-            elif isinstance(val, GeometrySpec):
-                state.geometry = val
+        Delegates to the module-level ``apply_outputs`` in state_utils so
+        that Step 12 (convergence loop) can reuse the same logic.
+        """
+        apply_outputs(state, result)
 
     async def _emit_decision_event(
         self,

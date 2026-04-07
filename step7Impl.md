@@ -10,23 +10,23 @@
 
 All design decisions were discussed and finalized before this plan was written.
 
-| # | Question | Decision | Confidence |
-|---|----------|----------|:---:|
-| 1 | Laminar correlation | **Hausen** (no wall temp needed) | 9/10 |
-| 2 | Transition zone | **Gnielinski down to Re=2300**, Hausen below | 8/10 |
-| 3 | Friction factor | **Petukhov now**, Churchill deferred to Step 10 | 9/10 |
-| 4 | Viscosity correction | **Option B** — rough T_wall estimate, exponent 0.14 universally | 8/10 |
-| 5 | Tube-side fluid ID | **Simple inversion** of `shell_side_fluid` | 10/10 |
-| 6 | DesignState fields | **Add Re, Pr, Nu, regime** to state (6 new fields + 2 T_mean fields) | 9/10 |
-| 7 | Velocity limits | **Hardcode liquid** (0.3–5.0 m/s), defer gas to Phase B | 9/10 |
-| 8 | DB crosscheck | **Warning at >20%**, no AI escalation | 8/10 |
-| 9 | Module structure | **Dict return**, stateless pure-math functions | 9/10 |
-| 10 | Test data | **Incropera + Serth** + boundary cases | 7/10 |
-| F1 | gnielinski.py purity | **Option A** — pure math, Step 7 passes μ_wall in | 10/10 |
-| F2 | Phase detection | **Hardcode liquid**, defer gas to Phase B | 9/10 |
-| F3 | T_mean on DesignState | **Persist via pipeline_runner mapping** (Path 1 — no Step 3 changes) | 9/10 |
-| F4 | Viscosity exponent | **0.14 universally**, ratio self-corrects for heating/cooling | 8/10 |
-| F5 | Hausen floor | **Explicit `max(3.66, Nu)`** defensive floor | 9/10 |
+| #   | Question              | Decision                                                             | Confidence |
+| --- | --------------------- | -------------------------------------------------------------------- | :--------: |
+| 1   | Laminar correlation   | **Hausen** (no wall temp needed)                                     |    9/10    |
+| 2   | Transition zone       | **Gnielinski down to Re=2300**, Hausen below                         |    8/10    |
+| 3   | Friction factor       | **Petukhov now**, Churchill deferred to Step 10                      |    9/10    |
+| 4   | Viscosity correction  | **Option B** — rough T_wall estimate, exponent 0.14 universally      |    8/10    |
+| 5   | Tube-side fluid ID    | **Simple inversion** of `shell_side_fluid`                           |   10/10    |
+| 6   | DesignState fields    | **Add Re, Pr, Nu, regime** to state (6 new fields + 2 T_mean fields) |    9/10    |
+| 7   | Velocity limits       | **Hardcode liquid** (0.3–5.0 m/s), defer gas to Phase B              |    9/10    |
+| 8   | DB crosscheck         | **Warning at >20%**, no AI escalation                                |    8/10    |
+| 9   | Module structure      | **Dict return**, stateless pure-math functions                       |    9/10    |
+| 10  | Test data             | **Incropera + Serth** + boundary cases                               |    7/10    |
+| F1  | gnielinski.py purity  | **Option A** — pure math, Step 7 passes μ_wall in                    |   10/10    |
+| F2  | Phase detection       | **Hardcode liquid**, defer gas to Phase B                            |    9/10    |
+| F3  | T_mean on DesignState | **Persist via pipeline_runner mapping** (Path 1 — no Step 3 changes) |    9/10    |
+| F4  | Viscosity exponent    | **0.14 universally**, ratio self-corrects for heating/cooling        |    8/10    |
+| F5  | Hausen floor          | **Explicit `max(3.66, Nu)`** defensive floor                         |    9/10    |
 
 ---
 
@@ -125,12 +125,15 @@ Main entry point. Logic:
 2. **Compute Nu** from selected correlation
 
 3. **Apply viscosity correction:**
+
    ```
    Nu_corrected = Nu × (mu_bulk / mu_wall)^0.14
    ```
+
    Guard: if `mu_wall` is None or ≤ 0, skip correction (ratio = 1.0), add warning
 
 4. **Compute h_i:**
+
    ```
    h_i = Nu_corrected × k / D_i
    ```
@@ -221,17 +224,17 @@ Class `Step07TubeSideH(BaseStep)` with `step_id=7`, `ai_mode=AIModeEnum.CONDITIO
 
 Required from prior steps:
 
-| Field | Source Step |
-|---|---|
-| `state.shell_side_fluid` | Step 4 |
-| `state.geometry.tube_id_m` | Step 6 |
-| `state.geometry.n_tubes` | Step 6 |
-| `state.geometry.n_passes` | Step 4/6 |
-| `state.geometry.tube_length_m` | Step 4 |
-| Tube-side `m_dot_*_kg_s` | Step 1/2 |
-| Tube-side `*_fluid_props` (density, viscosity, k, Pr) | Step 3 |
-| Tube-side `*_fluid_name` | Step 1 |
-| `T_hot_in_C`, `T_hot_out_C`, `T_cold_in_C`, `T_cold_out_C` | Step 1/2 |
+| Field                                                      | Source Step |
+| ---------------------------------------------------------- | ----------- |
+| `state.shell_side_fluid`                                   | Step 4      |
+| `state.geometry.tube_id_m`                                 | Step 6      |
+| `state.geometry.n_tubes`                                   | Step 6      |
+| `state.geometry.n_passes`                                  | Step 4/6    |
+| `state.geometry.tube_length_m`                             | Step 4      |
+| Tube-side `m_dot_*_kg_s`                                   | Step 1/2    |
+| Tube-side `*_fluid_props` (density, viscosity, k, Pr)      | Step 3      |
+| Tube-side `*_fluid_name`                                   | Step 1      |
+| `T_hot_in_C`, `T_hot_out_C`, `T_cold_in_C`, `T_cold_out_C` | Step 1/2    |
 
 Returns list of missing field names. If non-empty, `execute()` raises `CalculationError`.
 
@@ -243,18 +246,22 @@ Sequence:
 Call `_check_preconditions`, raise if missing.
 
 **Step 2 — Identify tube-side fluid:**
+
 ```python
 tube_side = "cold" if state.shell_side_fluid == "hot" else "hot"
 ```
+
 Select the appropriate `m_dot`, `fluid_props`, `fluid_name`, T_in, T_out, pressure.
 
 **Step 3 — Compute mean temperatures:**
+
 ```python
 T_mean_tube = (T_tube_in + T_tube_out) / 2.0
 T_mean_shell = (T_shell_in + T_shell_out) / 2.0
 ```
 
 **Step 4 — Extract geometry:**
+
 ```python
 D_i = state.geometry.tube_id_m
 L = state.geometry.tube_length_m
@@ -263,6 +270,7 @@ n_passes = state.geometry.n_passes
 ```
 
 **Step 5 — Compute velocity:**
+
 ```python
 A_cross_per_tube = math.pi / 4 * D_i**2
 tubes_per_pass = n_tubes / n_passes
@@ -271,12 +279,14 @@ velocity = m_dot / (rho * A_flow)
 ```
 
 **Step 6 — Compute Re and extract Pr:**
+
 ```python
 Re = rho * velocity * D_i / mu
 Pr = fluid_props.Pr
 ```
 
 **Step 7 — Get μ_wall via thermo adapter:**
+
 ```python
 T_wall_est = (T_mean_tube + T_mean_shell) / 2.0
 wall_props = get_fluid_properties(fluid_name, T_wall_est, pressure_Pa)
@@ -284,16 +294,19 @@ mu_wall = wall_props.viscosity_Pa_s
 ```
 
 **Step 8 — Call correlation:**
+
 ```python
 htc_result = gnielinski.tube_side_h(Re, Pr, D_i, L, k, mu_bulk, mu_wall)
 ```
 
 **Step 9 — Collect warnings** from `htc_result["warnings"]` plus regime-specific:
+
 - If Re 2300–4000: `"Transition zone (Re={Re:.0f}): flow genuinely unstable"`
 - If velocity < 0.8: `"Low velocity ({v:.2f} m/s): fouling risk"`
 - If velocity > 2.5: `"High velocity ({v:.2f} m/s): erosion risk"`
 
 **Step 10 — Cache values** for `_conditional_ai_trigger`:
+
 ```python
 self._velocity = velocity
 self._Re = Re
@@ -301,6 +314,7 @@ self._h_i = htc_result["h_i"]
 ```
 
 **Step 11 — Write state directly** (matching Step 6 pattern):
+
 ```python
 state.h_tube_W_m2K = htc_result["h_i"]
 state.tube_velocity_m_s = velocity
@@ -311,6 +325,7 @@ state.flow_regime_tube = htc_result["flow_regime"]
 ```
 
 **Step 12 — Build outputs dict:**
+
 ```python
 outputs = {
     "h_tube_W_m2K": htc_result["h_i"],
@@ -328,6 +343,7 @@ outputs = {
     "dittus_boelter_divergence_pct": htc_result["dittus_boelter_divergence_pct"],
 }
 ```
+
 Include `escalation_hints` list if any trigger conditions are met.
 
 **Step 13 — Return `StepResult`** with `step_id=7`, outputs, warnings.
@@ -337,6 +353,7 @@ Include `escalation_hints` list if any trigger conditions are met.
 Note: `state.in_convergence_loop` is already checked by `BaseStep._should_call_ai()` before this method is called. No need to check it here.
 
 Returns `True` if ANY of:
+
 - `self._velocity < 0.8` (fouling risk)
 - `self._velocity > 2.5` (erosion risk)
 - `2300 < self._Re < 10000` (transition zone)
@@ -436,52 +453,52 @@ PIPELINE_STEPS = [
 
 ### 7.1 — Correlation unit tests
 
-| Test | Input | Expected | Purpose |
-|---|---|---|---|
-| `test_petukhov_turbulent` | Re=35000 | f ≈ 0.022 | Basic friction factor |
-| `test_hausen_laminar` | Re=500, Pr=120, D=14.83mm, L=4.877m | Nu > 3.66, h ~ 50–100 W/m²K | Laminar oil (Serth Ch4) |
-| `test_hausen_floor` | Re=10, Pr=1, D=0.01, L=10 | Nu = 3.66 exactly | Floor works |
-| `test_gnielinski_turbulent_water` | Re=35000, Pr=3.0, D=14.83mm, k=0.65 | h ~ 7500–8500 W/m²K | Incropera 8.4 |
-| `test_gnielinski_transition` | Re=3500, Pr=4.5 | method="gnielinski", regime="transition" | Correct method selected |
-| `test_cutover_at_2300` | Re=2299 → Hausen, Re=2301 → Gnielinski | Different methods | Boundary behavior |
-| `test_dittus_boelter_crosscheck` | Re=35000, Pr=3.0 | divergence < 20% | Crosscheck passes |
-| `test_viscosity_correction` | mu_bulk=0.001, mu_wall=0.0005 | correction = 2.0^0.14 ≈ 1.104 | Heating case |
-| `test_viscosity_no_wall` | mu_wall=None | correction = 1.0, warning emitted | Graceful fallback |
+| Test                              | Input                                  | Expected                                 | Purpose                 |
+| --------------------------------- | -------------------------------------- | ---------------------------------------- | ----------------------- |
+| `test_petukhov_turbulent`         | Re=35000                               | f ≈ 0.022                                | Basic friction factor   |
+| `test_hausen_laminar`             | Re=500, Pr=120, D=14.83mm, L=4.877m    | Nu > 3.66, h ~ 50–100 W/m²K              | Laminar oil (Serth Ch4) |
+| `test_hausen_floor`               | Re=10, Pr=1, D=0.01, L=10              | Nu = 3.66 exactly                        | Floor works             |
+| `test_gnielinski_turbulent_water` | Re=35000, Pr=3.0, D=14.83mm, k=0.65    | h ~ 7500–8500 W/m²K                      | Incropera 8.4           |
+| `test_gnielinski_transition`      | Re=3500, Pr=4.5                        | method="gnielinski", regime="transition" | Correct method selected |
+| `test_cutover_at_2300`            | Re=2299 → Hausen, Re=2301 → Gnielinski | Different methods                        | Boundary behavior       |
+| `test_dittus_boelter_crosscheck`  | Re=35000, Pr=3.0                       | divergence < 20%                         | Crosscheck passes       |
+| `test_viscosity_correction`       | mu_bulk=0.001, mu_wall=0.0005          | correction = 2.0^0.14 ≈ 1.104            | Heating case            |
+| `test_viscosity_no_wall`          | mu_wall=None                           | correction = 1.0, warning emitted        | Graceful fallback       |
 
 ### 7.2 — Step 7 execution tests
 
-| Test | Scenario | Assert |
-|---|---|---|
-| `test_step07_normal_turbulent` | Water, Re~30000 | h_i > 0, velocity in range, regime="turbulent" |
-| `test_step07_laminar_oil` | Heavy oil, Re~500 | h_i > 0, regime="laminar", warning about low h |
-| `test_step07_low_velocity_warning` | v < 0.8 m/s | warning contains "fouling" |
-| `test_step07_high_velocity_warning` | v > 2.5 m/s | warning contains "erosion" |
-| `test_step07_transition_warning` | 2300 < Re < 4000 | warning contains "transition" or "unstable" |
-| `test_step07_precondition_missing_geometry` | state.geometry=None | raises CalculationError |
-| `test_step07_precondition_missing_fluid_props` | tube-side props=None | raises CalculationError |
-| `test_step07_state_fields_populated` | Normal run | state.h_tube_W_m2K, Re_tube, etc. all set |
-| `test_step07_outputs_dict_complete` | Normal run | StepResult.outputs has all expected keys |
+| Test                                           | Scenario             | Assert                                         |
+| ---------------------------------------------- | -------------------- | ---------------------------------------------- |
+| `test_step07_normal_turbulent`                 | Water, Re~30000      | h_i > 0, velocity in range, regime="turbulent" |
+| `test_step07_laminar_oil`                      | Heavy oil, Re~500    | h_i > 0, regime="laminar", warning about low h |
+| `test_step07_low_velocity_warning`             | v < 0.8 m/s          | warning contains "fouling"                     |
+| `test_step07_high_velocity_warning`            | v > 2.5 m/s          | warning contains "erosion"                     |
+| `test_step07_transition_warning`               | 2300 < Re < 4000     | warning contains "transition" or "unstable"    |
+| `test_step07_precondition_missing_geometry`    | state.geometry=None  | raises CalculationError                        |
+| `test_step07_precondition_missing_fluid_props` | tube-side props=None | raises CalculationError                        |
+| `test_step07_state_fields_populated`           | Normal run           | state.h_tube_W_m2K, Re_tube, etc. all set      |
+| `test_step07_outputs_dict_complete`            | Normal run           | StepResult.outputs has all expected keys       |
 
 ### 7.3 — AI trigger tests
 
-| Test | Scenario | Assert |
-|---|---|---|
-| `test_ai_triggered_low_velocity` | v=0.5 m/s | `_conditional_ai_trigger` returns True |
-| `test_ai_triggered_high_velocity` | v=3.0 m/s | returns True |
-| `test_ai_triggered_transition` | Re=5000 | returns True |
-| `test_ai_skipped_convergence_loop` | `state.in_convergence_loop=True` | `_should_call_ai` returns False |
-| `test_ai_not_triggered_normal` | v=1.5, Re=30000 | returns False |
+| Test                               | Scenario                         | Assert                                 |
+| ---------------------------------- | -------------------------------- | -------------------------------------- |
+| `test_ai_triggered_low_velocity`   | v=0.5 m/s                        | `_conditional_ai_trigger` returns True |
+| `test_ai_triggered_high_velocity`  | v=3.0 m/s                        | returns True                           |
+| `test_ai_triggered_transition`     | Re=5000                          | returns True                           |
+| `test_ai_skipped_convergence_loop` | `state.in_convergence_loop=True` | `_should_call_ai` returns False        |
+| `test_ai_not_triggered_normal`     | v=1.5, Re=30000                  | returns False                          |
 
 ### 7.4 — Validation rules tests
 
-| Test | Input | Assert |
-|---|---|---|
-| `test_rule_h_positive_pass` | h=5000 | passes |
-| `test_rule_h_positive_fail` | h=-1 | fails with message |
-| `test_rule_h_missing` | h not in outputs | fails |
-| `test_rule_velocity_too_low` | v=0.1 | fails |
-| `test_rule_velocity_too_high` | v=6.0 | fails |
-| `test_rule_velocity_ok` | v=1.5 | passes |
+| Test                          | Input            | Assert             |
+| ----------------------------- | ---------------- | ------------------ |
+| `test_rule_h_positive_pass`   | h=5000           | passes             |
+| `test_rule_h_positive_fail`   | h=-1             | fails with message |
+| `test_rule_h_missing`         | h not in outputs | fails              |
+| `test_rule_velocity_too_low`  | v=0.1            | fails              |
+| `test_rule_velocity_too_high` | v=6.0            | fails              |
+| `test_rule_velocity_ok`       | v=1.5            | passes             |
 
 ---
 
@@ -527,32 +544,35 @@ Phases 2 and 3 have no dependency on each other and could be done in parallel, b
 
 ## Key Engineering References
 
-| Reference | Used For |
-|---|---|
-| Gnielinski (1976), Int. Chem. Eng. 16(2) | Primary turbulent correlation |
-| Petukhov (1970), Advances in Heat Transfer 6 | Friction factor paired with Gnielinski |
-| Hausen (1943) | Laminar developing flow |
-| Dittus-Boelter (1930) | Crosscheck only |
-| Incropera, Fundamentals of Heat and Mass Transfer, Ch. 8 | Test case A (Example 8.4) |
-| Serth, Process Heat Transfer, Ch. 4 | Test case B (laminar oil) |
-| VDI Heat Atlas, Section G1 | Transition zone reference |
-| TEMA RGP-T2.4 | Velocity limit guidelines |
+| Reference                                                | Used For                               |
+| -------------------------------------------------------- | -------------------------------------- |
+| Gnielinski (1976), Int. Chem. Eng. 16(2)                 | Primary turbulent correlation          |
+| Petukhov (1970), Advances in Heat Transfer 6             | Friction factor paired with Gnielinski |
+| Hausen (1943)                                            | Laminar developing flow                |
+| Dittus-Boelter (1930)                                    | Crosscheck only                        |
+| Incropera, Fundamentals of Heat and Mass Transfer, Ch. 8 | Test case A (Example 8.4)              |
+| Serth, Process Heat Transfer, Ch. 4                      | Test case B (laminar oil)              |
+| VDI Heat Atlas, Section G1                               | Transition zone reference              |
+| TEMA RGP-T2.4                                            | Velocity limit guidelines              |
 
 ---
 
 ## Formulas Reference
 
 ### Petukhov friction factor
+
 ```
 f = (0.790 × ln(Re) − 1.64)^(−2)
 ```
 
 ### Gnielinski (Re ≥ 2300)
+
 ```
 Nu = ((f/8)(Re − 1000) × Pr) / (1 + 12.7 × √(f/8) × (Pr^(2/3) − 1))
 ```
 
 ### Hausen (Re < 2300)
+
 ```
 Gz = Re × Pr × D/L
 Nu = 3.66 + (0.0668 × Gz) / (1 + 0.04 × Gz^(2/3))
@@ -560,21 +580,25 @@ Nu = max(3.66, Nu)    ← defensive floor
 ```
 
 ### Dittus-Boelter (crosscheck only)
+
 ```
 Nu = 0.023 × Re^0.8 × Pr^0.4
 ```
 
 ### Viscosity correction
+
 ```
 Nu_corrected = Nu × (μ_bulk / μ_wall)^0.14
 ```
 
 ### Wall temperature estimate
+
 ```
 T_wall ≈ (T_mean_tube + T_mean_shell) / 2
 ```
 
 ### Velocity
+
 ```
 A_cross = (π/4) × D_i²
 tubes_per_pass = n_tubes / n_passes
@@ -583,6 +607,7 @@ v = ṁ / (ρ × A_flow)
 ```
 
 ### Reynolds number
+
 ```
 Re = ρ × v × D_i / μ
 ```

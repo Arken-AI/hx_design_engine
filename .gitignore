@@ -5,4 +5,6 @@ __pycache__/
 .venv/
 .gstack/
 *.egg-info/
+build/
+dist/
 storage/
