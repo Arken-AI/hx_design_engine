@@ -103,3 +103,23 @@ class TestStep06ConditionalTrigger:
         state = _make_state(in_convergence_loop=True)
         await step.execute(state)
         assert step._should_call_ai(state) is False
+
+    @pytest.mark.asyncio
+    async def test_viscous_oil_triggers_ai(self, step):
+        """Viscous oil service → AI trigger fires for U verification."""
+        state = _make_state(
+            hot_fluid_name="lube oil",
+            cold_fluid_name="cooling water",
+        )
+        await step.execute(state)
+        assert step._conditional_ai_trigger(state) is True
+
+    @pytest.mark.asyncio
+    async def test_viscous_oil_cold_side_triggers_ai(self, step):
+        """Viscous oil on cold side → AI trigger fires."""
+        state = _make_state(
+            hot_fluid_name="steam",
+            cold_fluid_name="lubricating oil",
+        )
+        await step.execute(state)
+        assert step._conditional_ai_trigger(state) is True

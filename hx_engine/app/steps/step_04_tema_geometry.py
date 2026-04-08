@@ -564,6 +564,8 @@ def _select_initial_geometry(
     U_data = get_U_assumption(
         state.hot_fluid_name or "liquid",
         state.cold_fluid_name or "liquid",
+        hot_properties=state.hot_fluid_props,
+        cold_properties=state.cold_fluid_props,
     )
     U_assumed = U_data["U_mid"]
 

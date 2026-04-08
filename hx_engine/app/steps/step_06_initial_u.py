@@ -15,6 +15,7 @@ ai_mode = CONDITIONAL — AI is only called when:
   3. Required area < 1 m² (unusually small)
   4. N_tubes_required exceeds largest available shell capacity
   5. U_mid outside typical range (< 50 or > 3000 W/m²K)
+  6. Viscous oil detected (laminar flow assumption — verify U is reasonable)
 """
 
 from __future__ import annotations
@@ -124,7 +125,12 @@ class Step06InitialU(BaseStep):
             u_low, u_mid, u_high = _U_TABLE.get(u_pair_key, (100, 250, 400))
             u_data = {"U_low": u_low, "U_mid": u_mid, "U_high": u_high}
         else:
-            u_data = get_U_assumption(state.hot_fluid_name, state.cold_fluid_name)
+            u_data = get_U_assumption(
+                state.hot_fluid_name,
+                state.cold_fluid_name,
+                hot_properties=state.hot_fluid_props,
+                cold_properties=state.cold_fluid_props,
+            )
         U_low = u_data["U_low"]
         U_mid = u_data["U_mid"]
         U_high = u_data["U_high"]
@@ -313,6 +319,7 @@ class Step06InitialU(BaseStep):
         self._U_mid = U_mid
         self._n_shells = n_shells
         self._arrangement = arrangement
+        self._is_viscous_oil = hot_type == "viscous_oil" or cold_type == "viscous_oil"
 
         # 10. Build escalation hints for AI context
         escalation_hints: list[dict] = []
@@ -322,6 +329,15 @@ class Step06InitialU(BaseStep):
                 "recommendation": (
                     f"Fluid pair ({hot_type}, {cold_type}) not in U table. "
                     f"Verify U = {U_mid} W/m²K is reasonable for this service."
+                ),
+            })
+        if hot_type == "viscous_oil" or cold_type == "viscous_oil":
+            escalation_hints.append({
+                "trigger": "viscous_oil_service",
+                "recommendation": (
+                    f"Viscous oil detected — U = {U_mid} W/m²K is based on "
+                    f"laminar tube-side flow assumption. Verify this is "
+                    f"reasonable for the expected flow regime."
                 ),
             })
         if at_max_shell and arrangement is None:
@@ -396,19 +412,23 @@ class Step06InitialU(BaseStep):
 
         Returns True if ANY of:
           1. U_mid came from the default fallback (fluid pair not in table)
-          2. Required area > 200 m² (unusually large)
-          3. Required area < 1 m² (unusually small)
-          4. N_tubes_required exceeds largest available shell capacity AND
+          2. Viscous oil service detected (laminar flow, verify U)
+          3. Required area > 200 m² (unusually large)
+          4. Required area < 1 m² (unusually small)
+          5. N_tubes_required exceeds largest available shell capacity AND
              no multi_shell_arrangement has been set yet by the user
-          5. U_mid outside typical range (< 50 or > 3000 W/m²K)
+          6. U_mid outside typical range (< 50 or > 3000 W/m²K)
         """
         is_fallback = getattr(self, "_is_fallback", False)
         A_required = getattr(self, "_A_required", None)
         at_max_shell = getattr(self, "_at_max_shell", False)
         U_mid = getattr(self, "_U_mid", None)
         arrangement = getattr(self, "_arrangement", None)
+        is_viscous_oil = getattr(self, "_is_viscous_oil", False)
 
         if is_fallback:
+            return True
+        if is_viscous_oil:
             return True
         if A_required is not None and A_required > 200:
             return True
