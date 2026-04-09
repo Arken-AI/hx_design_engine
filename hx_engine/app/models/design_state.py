@@ -111,6 +111,10 @@ class GeometrySpec(BaseModel):
     outlet_baffle_spacing_m: Optional[float] = None   # defaults to baffle_spacing_m
     n_baffles: Optional[int] = None
 
+    # --- Vibration-specific (Step 13) ---
+    pitch_angle_deg: Optional[int] = None       # 30, 45, 60, or 90; derived from pitch_layout if None
+    baffle_thickness_m: Optional[float] = None  # defaults to 0.00635 (1/4") if None
+
     @field_validator("baffle_spacing_m")
     @classmethod
     def _check_baffle_spacing(cls, v: Optional[float]) -> Optional[float]:
@@ -264,6 +268,24 @@ class GeometrySpec(BaseModel):
             )
         return v
 
+    @field_validator("pitch_angle_deg")
+    @classmethod
+    def _check_pitch_angle(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v not in (30, 45, 60, 90):
+            raise ValueError(
+                f"pitch_angle_deg must be 30, 45, 60, or 90; got {v}"
+            )
+        return v
+
+    @field_validator("baffle_thickness_m")
+    @classmethod
+    def _check_baffle_thickness(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.003 or v > 0.025):
+            raise ValueError(
+                f"baffle_thickness_m={v} outside range [0.003, 0.025]"
+            )
+        return v
+
     @model_validator(mode="after")
     def _check_tube_id_lt_od(self) -> "GeometrySpec":
         if (
@@ -276,6 +298,20 @@ class GeometrySpec(BaseModel):
                 f"tube_od_m ({self.tube_od_m})"
             )
         return self
+
+    def get_pitch_angle(self) -> int:
+        """Return pitch angle in degrees.
+
+        Uses ``pitch_angle_deg`` if set, otherwise derives from
+        ``pitch_layout`` (triangular → 30, square → 90).
+        """
+        if self.pitch_angle_deg is not None:
+            return self.pitch_angle_deg
+        return 90 if self.pitch_layout == "square" else 30
+
+    def get_baffle_thickness(self) -> float:
+        """Return baffle thickness in metres. Defaults to 0.00635 (1/4 inch)."""
+        return self.baffle_thickness_m if self.baffle_thickness_m is not None else 0.00635
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +444,10 @@ class DesignState(BaseModel):
     convergence_max_iterations: int = 20               # Configurable max
     convergence_trajectory: list[dict] = Field(default_factory=list)
     convergence_restart_count: int = 0                 # How many structural restarts so far
+
+    # --- vibration check (populated by Step 13) ---
+    vibration_safe: Optional[bool] = None
+    vibration_details: Optional[dict] = None
 
     # --- pipeline state ---
     current_step: int = 0

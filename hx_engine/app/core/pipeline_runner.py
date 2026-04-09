@@ -45,6 +45,7 @@ from hx_engine.app.steps.step_09_overall_u import Step09OverallU
 from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
 from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
+from hx_engine.app.steps.step_13_vibration import Step13VibrationCheck
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,12 @@ class PipelineRunner:
             if state.pipeline_status == "running":
                 state = await self._run_convergence_loop(state, session_id)
 
+            # --- Step 13: Vibration Check (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step13VibrationCheck(),
+                )
+
             # --- pipeline complete ---
             # Only mark complete if pipeline wasn't aborted by orphan/error
             if state.pipeline_status == "running":
@@ -555,6 +562,56 @@ class PipelineRunner:
             await self._emit_decision_event(session_id, step12, result, 0)
             await self.session_store.save(session_id, state)
             break
+
+        return state
+
+    # ------------------------------------------------------------------
+    # Post-convergence steps (Step 13+)
+    # ------------------------------------------------------------------
+
+    async def _run_post_convergence_step(
+        self,
+        state: DesignState,
+        session_id: str,
+        step: "BaseStep",
+    ) -> DesignState:
+        """Run a single post-convergence BaseStep (e.g. Step 13 Vibration)."""
+        await self.sse_manager.emit(
+            session_id,
+            StepStartedEvent(
+                session_id=session_id,
+                step_id=step.step_id,
+                step_name=step.step_name,
+            ).model_dump(),
+        )
+
+        try:
+            result = await step.run_with_review_loop(state, self.ai_engineer)
+        except (CalculationError, StepHardFailure) as exc:
+            state.pipeline_status = "error"
+            await self._emit_step_error(
+                session_id, step,
+                str(exc) if isinstance(exc, CalculationError)
+                else "; ".join(exc.validation_errors),
+                recommendation=f"Step {step.step_id} ({step.step_name}) failed.",
+            )
+            return state
+        except Exception as exc:
+            logger.exception("Step %d (%s) failed", step.step_id, step.step_name)
+            state.pipeline_status = "error"
+            await self._emit_step_error(
+                session_id, step, str(exc),
+                recommendation="An unexpected error occurred.",
+            )
+            return state
+
+        self._apply_outputs(state, result)
+        state.current_step = step.step_id
+        if step.step_id not in state.completed_steps:
+            state.completed_steps.append(step.step_id)
+
+        await self._emit_decision_event(session_id, step, result, 0)
+        await self.session_store.save(session_id, state)
 
         return state
 
