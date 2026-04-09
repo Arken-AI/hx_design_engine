@@ -489,9 +489,44 @@ class TestStep07Rules:
         assert passed is False
         assert "below" in msg
 
+    def test_rule_velocity_at_bug_value_0_122(self):
+        """Bug case: velocity = 0.122 m/s (viscous oil with undersized geometry)."""
+        from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
+        passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=0.122))
+        assert passed is False
+        assert "0.3" in msg or "minimum" in msg.lower()
+
+    def test_rule_velocity_at_boundary_0_3(self):
+        """Boundary: velocity = 0.3 m/s exactly — should pass (minimum is inclusive)."""
+        from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
+        passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=0.3))
+        assert passed is True
+        assert msg is None
+
+    def test_rule_velocity_just_below_boundary(self):
+        """Boundary: velocity = 0.299 m/s — should fail (just below minimum)."""
+        from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
+        passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=0.299))
+        assert passed is False
+        assert "below" in msg
+
     def test_rule_velocity_too_high(self):
         from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
         passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=6.0))
+        assert passed is False
+        assert "above" in msg
+
+    def test_rule_velocity_at_upper_boundary_5_0(self):
+        """Boundary: velocity = 5.0 m/s exactly — should pass (maximum is inclusive)."""
+        from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
+        passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=5.0))
+        assert passed is True
+        assert msg is None
+
+    def test_rule_velocity_just_above_upper_boundary(self):
+        """Boundary: velocity = 5.01 m/s — should fail (just above maximum)."""
+        from hx_engine.app.steps.step_07_rules import _rule_velocity_bounds
+        passed, msg = _rule_velocity_bounds(7, self._make_result(tube_velocity_m_s=5.01))
         assert passed is False
         assert "above" in msg
 
