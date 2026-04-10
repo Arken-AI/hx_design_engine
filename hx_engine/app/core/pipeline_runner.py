@@ -211,22 +211,44 @@ class PipelineRunner:
                             "[PIPELINE] Layer 2 validation failed for step %d: %s",
                             step.step_id, vr.errors,
                         )
-                        state.pipeline_status = "error"
-                        await self._emit_step_error(
-                            session_id, step,
-                            "; ".join(vr.errors),
-                            recommendation="Hard validation failure — cannot continue.",
+                        # Check if AI already produced an ESCALATE with diagnosis and options.
+                        # If so, route to the escalation path instead of hard-stopping —
+                        # the engineer should see the AI's reasoning and options, not just
+                        # the raw Layer 2 rule message.
+                        ai_has_escalation = (
+                            result.ai_review is not None
+                            and result.ai_review.decision == AIDecisionEnum.ESCALATE
                         )
-                        return state
+                        if not ai_has_escalation:
+                            state.pipeline_status = "error"
+                            await self._emit_step_error(
+                                session_id, step,
+                                "; ".join(vr.errors),
+                                recommendation="Hard validation failure — cannot continue.",
+                            )
+                            return state
+                        # AI already produced an escalation with diagnosis and options.
+                        # Fall through to the ESCALATE handling block below so the engineer
+                        # is presented with options rather than a terminal error.
+                        logger.info(
+                            "[PIPELINE] Layer 2 failed for step %d but AI escalation present — "
+                            "routing to escalation path instead of hard-stop",
+                            step.step_id,
+                        )
 
                     # --- log step result ---
                     self._log_step_result(step, result, duration_ms)
 
                     # --- apply outputs to state ---
-                    self._apply_outputs(state, result)
+                    # Only commit outputs and mark completed when Layer 2 passed.
+                    # On a Layer 2 fail that falls through to the ESCALATE path,
+                    # the outputs are known-bad and must not corrupt state before
+                    # the engineer responds.
+                    if vr.passed:
+                        self._apply_outputs(state, result)
+                        if step.step_id not in state.completed_steps:
+                            state.completed_steps.append(step.step_id)
                     state.current_step = step.step_id
-                    if step.step_id not in state.completed_steps:
-                        state.completed_steps.append(step.step_id)
 
                     # --- emit decision-based event ---
                     await self._emit_decision_event(
@@ -931,6 +953,49 @@ class PipelineRunner:
         When option_index >= 0 and step_id matches, use deterministic index dispatch instead of
         regex so the action is reliable regardless of how the AI phrases the option.
         """
+        # --- Step 7: index-based dispatch for velocity escalation ---
+        # Step 7 escalates when tube-side velocity is too low (< 0.5 m/s).
+        # The AI typically offers two options:
+        #   Option A (index 0): Swap fluid allocation (move viscous fluid to shell-side)
+        #   Option B (index 1): Reduce n_tubes and/or increase n_passes to increase velocity
+        if step_id == 7 and option_index >= 0:
+            if option_index == 0:
+                # Option A: Swap fluid allocation — put the higher-viscosity fluid on shell-side
+                # This effectively means: cold fluid (crude oil) → shell, hot fluid (water) → tube
+                old_val = state.shell_side_fluid
+                new_val = "cold" if old_val == "hot" else "hot"
+                state.shell_side_fluid = new_val
+                logger.info(
+                    "[Step7-OptionA] shell_side_fluid swapped %r → %r to put viscous fluid on shell-side",
+                    old_val, new_val,
+                )
+                # Need to clear geometry so Step 6 can re-select appropriate geometry
+                # for the new allocation (different TEMA type may be needed).
+                # However, we can't restart from Step 6 — we just swap and re-run Step 7.
+                # The velocity formula will use the swapped fluid's properties.
+                return
+            if option_index == 1:
+                # Option B: Reduce n_tubes and increase n_passes to increase velocity
+                # Velocity = (m_dot / rho) / (n_tubes_per_pass * A_tube_cross_section)
+                # n_tubes_per_pass = n_tubes / n_passes
+                # So: reducing n_tubes_per_pass increases velocity
+                if state.geometry is not None:
+                    old_n_tubes = state.geometry.n_tubes
+                    old_n_passes = state.geometry.n_passes
+                    # Strategy: halve n_tubes (or reduce by 30%) and double n_passes
+                    # This increases velocity by factor of ~2-4x
+                    new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
+                    new_n_passes = min(8, (old_n_passes or 1) * 2)  # Cap at 8 (TEMA limit)
+                    state.geometry.n_tubes = new_n_tubes
+                    state.geometry.n_passes = new_n_passes
+                    logger.info(
+                        "[Step7-OptionB] Geometry adjusted: n_tubes %r → %r, n_passes %r → %r",
+                        old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
+                    )
+                else:
+                    logger.warning("[Step7-OptionB] No geometry to adjust — cannot increase velocity")
+                return
+
         # --- Step 8: index-based dispatch (deterministic, regex-independent) ---
         if step_id == 8 and option_index >= 0:
             if option_index == 0:
@@ -951,7 +1016,22 @@ class PipelineRunner:
 
         # --- Regex fallback for typed free text and non-indexed steps ---
 
-        # --- Fluid-side swap (Step 8 escalation: swap shell/tube assignment) ---
+        # --- Step 7 velocity: reduce n_tubes or increase n_passes ---
+        if re.search(r"reduce.*n_?tubes|fewer.*tubes|increase.*n_?passes|more.*passes|increase.*velocity", text, re.IGNORECASE):
+            if state.geometry is not None:
+                old_n_tubes = state.geometry.n_tubes
+                old_n_passes = state.geometry.n_passes
+                new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
+                new_n_passes = min(8, (old_n_passes or 1) * 2)
+                state.geometry.n_tubes = new_n_tubes
+                state.geometry.n_passes = new_n_passes
+                logger.info(
+                    "User override (velocity): n_tubes %r → %r, n_passes %r → %r",
+                    old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
+                )
+            return
+
+        # --- Fluid-side swap (Step 7/8 escalation: swap shell/tube assignment) ---
         if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
             old_val = state.shell_side_fluid
             state.shell_side_fluid = "cold" if old_val == "hot" else "hot"

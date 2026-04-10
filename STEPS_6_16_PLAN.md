@@ -11,7 +11,7 @@
 | Asset                                                              | Status |
 | ------------------------------------------------------------------ | ------ |
 | `BaseStep` with 4-layer review loop (execute → rules → AI → state) | ✅     |
-| AI Engineer (Claude Sonnet, retry 3×, confidence gate < 0.5)       | ✅     |
+| AI Engineer (Claude Sonnet, retry 3×, confidence gate < 0.70)       | ✅     |
 | SSE streaming (8 event types)                                      | ✅     |
 | Redis session store + orphan detection                             | ✅     |
 | Thermo adapter (IAPWS → CoolProp → thermo → petroleum → specialty) | ✅     |

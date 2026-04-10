@@ -111,6 +111,35 @@ class TestStep06Execute:
         assert result.outputs["cold_fluid_type"] == "water"
 
     @pytest.mark.asyncio
+    async def test_lube_oil_water_uses_viscous_oil_u(self, step):
+        """Lube oil / cooling water → U = 60 (viscous_oil), not 300 (heavy_organic)."""
+        state = _make_state(hot_fluid="lubricating oil", cold_fluid="cooling water")
+        result = await step.execute(state)
+
+        assert result.outputs["U_W_m2K"] == 60
+        assert result.outputs["hot_fluid_type"] == "viscous_oil"
+        assert result.outputs["cold_fluid_type"] == "water"
+
+    @pytest.mark.asyncio
+    async def test_lube_oil_water_area_derived_from_u(self, step):
+        """Area is derived from U = 60, not the heavy_organic U = 300."""
+        state = _make_state(hot_fluid="lubricating oil", cold_fluid="cooling water")
+        result = await step.execute(state)
+
+        eff_LMTD = state.F_factor * state.LMTD_K
+        A_expected = state.Q_W / (60 * eff_LMTD)
+        assert result.outputs["A_m2"] == pytest.approx(A_expected, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_ethylene_glycol_water_unchanged(self, step):
+        """Ethylene glycol / water → U = 300 (heavy_organic, not viscous_oil)."""
+        state = _make_state(hot_fluid="ethylene glycol", cold_fluid="water")
+        result = await step.execute(state)
+
+        assert result.outputs["U_W_m2K"] == 300
+        assert result.outputs["hot_fluid_type"] == "heavy_organic"
+
+    @pytest.mark.asyncio
     async def test_gas_gas_pair(self, step):
         """Gas/gas → very low U (~25) → large area."""
         state = _make_state(

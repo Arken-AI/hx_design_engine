@@ -441,7 +441,8 @@ YOUR REVIEW FOCUS:
    (Engine scope: single-phase liquids only — no gas-phase, no steam/condensing)
    - Water/water: 800–1800 W/m²K (typical ~1200)
    - Light organic/water: 200–800 W/m²K
-   - Heavy organic/water: 100–500 W/m²K
+   - Heavy organic/water: 100–500 W/m²K (glycols, thermal oil)
+   - Viscous oil/water: 20–100 W/m²K (lube oil, gear oil, hydraulic oil — laminar flow)
    - Oil/oil: 50–200 W/m²K
    - If U < 50 W/m²K for a liquid/liquid pair, this is WRONG — investigate \
 fluid classification or property source
@@ -465,7 +466,8 @@ fluid classification or property source
 COMMON ISSUES WHEN YOU ARE CALLED:
 - Unknown fluid pair → generic fallback U used (may be too high or low)
 - Gas-phase fluid misclassified as liquid → U far too high → area too small
-- Very viscous fluid not classified as heavy_organic → U too high
+- Very viscous fluid (lube oil, gear oil) not classified as viscous_oil → U too high
+- Viscous oil correctly classified → verify U = 60 W/m²K is reasonable for this service
 - Extremely large or small area suggesting U is off by an order of magnitude
 
 ### Auto-Correction Rules (WARN with corrections)
@@ -475,16 +477,16 @@ Reserve corrections-free "warn" for judgment calls only.
 
 RULE 1 — High-viscosity fluid misclassified:
 If the kinematic viscosity at the mean operating temperature exceeds 50 cSt \
-(indicating a heavy organic), but the fluid is classified as something lighter \
-(e.g. light_organic, water), the U assumption is too high.
+(indicating a viscous oil), but the fluid is classified as something lighter \
+(e.g. light_organic, heavy_organic, water), the U assumption is too high.
 → Return decision="warn" with corrections:
-  [{"field": "fluid_category", "old_value": "<current>", "new_value": "heavy_organic", \
-    "reason": "Kinematic viscosity > 50 cSt at mean temp — reclassifying as heavy organic."},
-   {"field": "U_W_m2K", "old_value": <current_U>, "new_value": 175, \
-    "reason": "Heavy organic/water U range is 150–200 W/m²K. Using midpoint 175."}]
+  [{"field": "fluid_category", "old_value": "<current>", "new_value": "viscous_oil", \
+    "reason": "Kinematic viscosity > 50 cSt at mean temp — reclassifying as viscous oil."},
+   {"field": "U_W_m2K", "old_value": <current_U>, "new_value": 60, \
+    "reason": "Viscous oil/water U range is 20–100 W/m²K. Using midpoint 60."}]
 Also populate options for user override:
-  options: ["Accept reclassification to heavy_organic (recommended)", "Keep current classification", "Use custom U value"]
-  recommendation: "Accept reclassification to heavy_organic (recommended)"
+  options: ["Accept reclassification to viscous_oil (recommended)", "Keep current classification", "Use custom U value"]
+  recommendation: "Accept reclassification to viscous_oil (recommended)"
 
 JUDGMENT CALLS (warn WITHOUT corrections):
 - Zero overdesign margin (overdesign_pct ≈ 0%) — this is a design choice, not a rule.
@@ -1132,7 +1134,7 @@ class AIEngineer:
             # On API failure, proceed with warning rather than blocking
             return AIReview(
                 decision=AIDecisionEnum.WARN,
-                confidence=0.5,
+                confidence=0.70,
                 corrections=[],
                 reasoning=f"AI review failed ({e}). Proceeding with caution.",
                 ai_called=True,
@@ -1312,7 +1314,7 @@ class AIEngineer:
             logger.warning("Unparseable AI review: %s", text[:200])
             return AIReview(
                 decision=AIDecisionEnum.WARN,
-                confidence=0.5,
+                confidence=0.70,
                 corrections=[],
                 reasoning=f"AI response unparseable. Proceeding with caution.",
                 ai_called=True,
@@ -1328,7 +1330,7 @@ class AIEngineer:
         }
         decision = decision_map.get(decision_str, AIDecisionEnum.WARN)
 
-        confidence = float(data.get("confidence", 0.5))
+        confidence = float(data.get("confidence", 0.70))
         confidence = max(0.0, min(1.0, confidence))
 
         # Parse corrections

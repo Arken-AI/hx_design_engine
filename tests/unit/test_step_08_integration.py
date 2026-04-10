@@ -286,3 +286,72 @@ class TestStep08AIMode:
         state.in_convergence_loop = True
         # D1: convergence loop check now comes BEFORE FULL mode check
         assert step._should_call_ai(state) is False
+
+
+# ===================================================================
+# 8.5 — Geometry state propagation (tube_pitch_m, n_baffles)
+# ===================================================================
+
+class TestStep08GeometryPropagation:
+    """Verify Step 8 persists derived geometry fields back to state.
+
+    Step 4 creates GeometrySpec without tube_pitch_m or n_baffles
+    (it only sets pitch_ratio and baffle_spacing_m). Step 8 computes
+    these derived values; they MUST be written back to state.geometry
+    so Step 10 (pressure drops) and downstream steps can read them.
+
+    Regression test for: step_10_requires_tube_pitch_m_n_baffles.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tube_pitch_m_persisted_when_none(self, step: Step08ShellSideH) -> None:
+        """tube_pitch_m is written back to state.geometry when initially None."""
+        geometry = _make_geometry(tube_pitch_m=None)
+        assert geometry.tube_pitch_m is None  # precondition
+
+        state = _make_state(geometry=geometry)
+        await step.execute(state)
+
+        assert state.geometry.tube_pitch_m is not None
+        # Should equal pitch_ratio × tube_od_m
+        expected = geometry.pitch_ratio * geometry.tube_od_m
+        assert state.geometry.tube_pitch_m == pytest.approx(expected, rel=1e-6)
+
+    @pytest.mark.asyncio
+    async def test_n_baffles_persisted_when_none(self, step: Step08ShellSideH) -> None:
+        """n_baffles is written back to state.geometry when initially None."""
+        geometry = _make_geometry(n_baffles=None)
+        assert geometry.n_baffles is None  # precondition
+
+        state = _make_state(geometry=geometry)
+        await step.execute(state)
+
+        assert state.geometry.n_baffles is not None
+        assert state.geometry.n_baffles >= 1
+
+    @pytest.mark.asyncio
+    async def test_both_none_mimics_step4_output(self, step: Step08ShellSideH) -> None:
+        """When BOTH tube_pitch_m and n_baffles are None (as Step 4 produces),
+        Step 8 persists both so Step 10 preconditions pass."""
+        geometry = _make_geometry(tube_pitch_m=None, n_baffles=None)
+        assert geometry.tube_pitch_m is None
+        assert geometry.n_baffles is None
+
+        state = _make_state(geometry=geometry)
+        await step.execute(state)
+
+        assert state.geometry.tube_pitch_m is not None
+        assert state.geometry.n_baffles is not None
+
+    @pytest.mark.asyncio
+    async def test_explicit_values_not_overwritten(self, step: Step08ShellSideH) -> None:
+        """If tube_pitch_m and n_baffles are already set, Step 8 does not overwrite them."""
+        original_pitch = 0.0254
+        original_baffles = 22
+        geometry = _make_geometry(tube_pitch_m=original_pitch, n_baffles=original_baffles)
+
+        state = _make_state(geometry=geometry)
+        await step.execute(state)
+
+        assert state.geometry.tube_pitch_m == original_pitch
+        assert state.geometry.n_baffles == original_baffles

@@ -368,7 +368,15 @@ class Step08ShellSideH(BaseStep):
         except Exception as exc:
             warnings.append(f"Kern cross-check failed: {exc}")
 
-        # 9. Write to state
+        # 9. Persist derived geometry back to state so downstream steps
+        #    (Step 10 pressure drops, Step 12 convergence, Step 13 vibration)
+        #    can read tube_pitch_m and n_baffles from state.geometry.
+        if g.tube_pitch_m is None:
+            g.tube_pitch_m = tube_pitch_m
+        if g.n_baffles is None:
+            g.n_baffles = n_baffles
+
+        # 10. Write thermal results to state
         state.h_shell_W_m2K = bd_result["h_o_W_m2K"]
         state.Re_shell = bd_result["Re_shell"]
         state.h_shell_ideal_W_m2K = bd_result["h_ideal_W_m2K"]
