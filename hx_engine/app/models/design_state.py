@@ -449,6 +449,13 @@ class DesignState(BaseModel):
     vibration_safe: Optional[bool] = None
     vibration_details: Optional[dict] = None
 
+    # --- mechanical design check (populated by Step 14) ---
+    tube_thickness_ok: Optional[bool] = None
+    shell_thickness_ok: Optional[bool] = None
+    expansion_mm: Optional[float] = None
+    mechanical_details: Optional[dict] = None
+    shell_material: Optional[str] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)

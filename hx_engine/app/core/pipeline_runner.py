@@ -46,6 +46,7 @@ from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
 from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
 from hx_engine.app.steps.step_13_vibration import Step13VibrationCheck
+from hx_engine.app.steps.step_14_mechanical import Step14MechanicalCheck
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +418,12 @@ class PipelineRunner:
             if state.pipeline_status == "running":
                 state = await self._run_post_convergence_step(
                     state, session_id, Step13VibrationCheck(),
+                )
+
+            # --- Step 14: Mechanical Design Check (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step14MechanicalCheck(),
                 )
 
             # --- pipeline complete ---
