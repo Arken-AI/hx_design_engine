@@ -96,6 +96,9 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     "convergence_iteration": "convergence_iteration",
     "convergence_converged": "convergence_converged",
     "convergence_restart_count": "convergence_restart_count",
+    # Step 13 vibration check
+    "vibration_safe": "vibration_safe",
+    "vibration_details": "vibration_details",
 }
 
 
