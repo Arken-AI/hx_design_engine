@@ -176,19 +176,22 @@ Three services, each its own Docker container, fronted by nginx reverse proxy [D
 Frontend (React/Vite)   Backend        HX Engine
   served as static      (FastAPI        (FastAPI
   assets via nginx       :8001)          :8100)
-            │              │              │
-            │  POST /api/chat (user message)
-            │  ← {session_id, stream_url (relative), token}
-            │  GET /api/v1/hx/design/{id}/stream  [via nginx proxy → HX Engine]
-            │
-         Backend (FastAPI :8001)
-            │  Loop 1: Claude orchestration
-            │  POST /api/v1/hx/design → HX Engine (triggers design, returns session_id)
-            │  POST /internal/design-complete ← HX Engine webhook (stores result)
-            │
-         HX Engine (FastAPI :8100)
-               Loop 2: 16-step Bell-Delaware pipeline
-               Loop 3: Autoresearch optimization (200 variants)
+
+  1. POST /api/chat ──────────────────────────────►
+     (user message)         │  Loop 1: Claude orchestration
+                            │  Claude calls hx_design tool
+                            │  POST /api/v1/hx/start ─────────────►
+                            │           ◄── { session_id, stream_url }
+  2. ◄── chat response ─────┘  tool_executions: [{ tool_name: "hx_design",
+     (with tool_executions)         result: { session_id, stream_url } }]
+
+  3. Frontend reads stream_url from tool_executions
+     GET /api/v1/hx/design/{id}/stream ──────────────────────────►
+     [EventSource via nginx proxy]   Loop 2: 16-step Bell-Delaware
+     ◄── SSE events (step_started, step_approved, ..., design_complete)
+
+                    ◄── POST /internal/design-complete
+                    [HX Engine webhook on completion]
 ```
 
 ```
@@ -300,7 +303,7 @@ async def run_step_9(design_state, ai_engineer, memory):
 
 ## 4. The Three Loops
 
-### Loop 1: Backend Orchestration (existing, stays)
+### Loop 1: Backend Orchestration (existing, upgraded in Week 6)
 
 - **Location:** `backend/app/services/orchestration_service.py`
 - **Owner:** Claude LLM (decides what to do)
@@ -313,7 +316,16 @@ async def run_step_9(design_state, ai_engineer, memory):
   - Default model: claude-sonnet-4-6
   - Max tokens: 4096
 
-**What changes:** `self.mcp_registry` → `self.engine_registry` (3 call sites). Tool discovery and execution switch from MCP/SSE to HTTP REST.
+**Current state (Weeks 1–5):** Plain streaming Claude, no tools, no agentic loop. The comment in `orchestration_service.py` says "When HX Engine tools become available, they will be added here." Do not add HX tool calls before Week 6 — the HX Engine pipeline must be accurate first (HTRI gate §15.8).
+
+**Week 6 upgrade:** Promote to a proper agentic loop with tool support:
+- Register `hx_design`, `hx_rate`, `hx_get_fluid_properties` as Claude tools (schema from `engine_client.py`)
+- Claude decides intent — no frontend keyword matching or parallel requests
+- Tool executor calls `engine_client.start_design()` → gets `{ session_id, stream_url }` → returns as tool result
+- `process_message()` returns `tool_calls` list; `chat.py` maps it to `tool_executions` in the HTTP response
+- Frontend reads `tool_executions`, finds `hx_design`, calls `connectStream(result.stream_url)`
+
+**Critical rule:** The frontend NEVER calls `POST /api/v1/hx/start` directly. The only path from browser to HX Engine trigger is: chat message → Claude tool call → backend tool executor → HX Engine.
 
 ### Loop 2: HX Engine Step Pipeline (new)
 
@@ -476,7 +488,7 @@ Respond with JSON: {decision, confidence, reasoning, correction, user_summary}
 **Try-first instruction [Decision ENG-1A]:** `engineer_review.txt` must include this instruction before the JSON schema:
 > "Before choosing `escalate`, attempt to resolve the issue using sound engineering judgment — apply the conservative standard, select the safer geometry, or use the TEMA default. Only choose `escalate` if you have genuinely exhausted all reasonable options and cannot proceed without user input. When you do escalate, populate `attempts`, `observation`, `recommendation`, and `options` so the user has full context."
 
-**Confidence gate [Decision ENG-1B]:** After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.5`, treat the decision as `escalate` regardless of what the AI returned. This prevents low-confidence corrections from silently degrading the design.
+**Confidence gate [Decision ENG-1B]:** After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, treat the decision as `escalate` regardless of what the AI returned. This prevents low-confidence corrections from silently degrading the design.
 
 ### 5.6 The AI Returns Structured JSON
 
@@ -513,7 +525,7 @@ Respond with JSON: {decision, confidence, reasoning, correction, user_summary}
 }
 ```
 
-**Confidence gate [Decision ENG-1B]:** `pipeline_runner.py` checks `confidence` after every AI call. If `confidence < 0.5`, override the decision to `escalate` regardless of what the AI returned. Log `confidence_gate_triggered=True` in the step record.
+**Confidence gate [Decision ENG-1B]:** `pipeline_runner.py` checks `confidence` after every AI call. If `confidence < 0.70`, override the decision to `escalate` regardless of what the AI returned. Log `confidence_gate_triggered=True` in the step record.
 
 ### 5.7 Helper Function Contracts
 
@@ -847,7 +859,7 @@ finally:
   4. Recommendations if confidence < 0.80
 - **Save to Supermemory:** If confidence ≥ 0.75, store design summary to past_designs
 - **Corner cases:**
-  - Confidence < 0.50 — design may be unreliable. Strong warning to user.
+  - Confidence < 0.70 — design may be unreliable. Strong warning to user.
   - Multiple corrections made — compound uncertainty. Reduce confidence.
   - Key input was assumed (viscosity, fouling factor) — note in assumptions list
   - Cross-method deviation > 15% but U in typical range — conflicting signals. AI must interpret.
@@ -993,7 +1005,7 @@ class BaseStep(ABC):
                 → correct → re-run Layer 1 → re-review  (attempt 3)
                 → escalate (with all 3 attempts in payload)
 
-        Confidence gate: after every review, if confidence < 0.5 → force escalate.
+        Confidence gate: after every review, if confidence < 0.70 → force escalate.
         Snapshot/restore: take DesignState snapshot before each correction;
         restore on Layer 2 hard fail so state is never left partially mutated.
         """
@@ -1008,10 +1020,10 @@ class BaseStep(ABC):
             )
 
             # Confidence gate [Decision ENG-1B]
-            if review.confidence < 0.5:
+            if review.confidence < 0.70:
                 review.decision = "escalate"
                 review.observation = (
-                    f"Confidence {review.confidence:.2f} below threshold (0.50) — escalating."
+                    f"Confidence {review.confidence:.2f} below threshold (0.70) — escalating."
                 )
 
             if review.decision == "correct" and attempt < MAX_CORRECTIONS:
@@ -1775,18 +1787,22 @@ class EquipmentEngineRegistry:
 
 ### 11.2 Files to Change
 
-| File | Change |
-|------|--------|
-| `app/core/mcp_client.py` | **DELETE** |
-| `app/core/engine_client.py` | **CREATE** |
-| `app/config.py` | Remove MCP settings, add `hx_engine_url` |
-| `app/dependencies.py` | `get_mcp_registry()` → `get_engine_registry()` |
-| `app/services/orchestration_service.py` | Replace 6 mcp_registry references |
-| `app/core/llm_provider.py` | Rename tool conversion function |
-| `app/services/tool_registry.py` | **DELETE** |
-| `app/models/tool_metadata.py` | **DELETE** |
-| `pyproject.toml` | Remove `mcp`, `httpx-sse` |
-| `engines.yaml` | **CREATE** |
+**Status as of 2026-03-26:** MCP is already gone. The backend is a clean FastAPI app (chat, auth, stream). The table below reflects what's already done vs what Week 6 must do.
+
+| File | Status | Week 6 Change |
+|------|--------|---------------|
+| `app/core/mcp_client.py` | ✅ Already deleted | — |
+| `app/services/tool_registry.py` | ✅ Already deleted | — |
+| `app/models/tool_metadata.py` | ✅ Already deleted | — |
+| `app/core/engine_client.py` | ✅ EXISTS — `HXEngineClient` with `start_design()`, `connect()`, `close()` | Add `rate()`, `get_fluid_properties()`, `poll_status()` |
+| `app/config.py` | ✅ Has `hx_engine_url`, `hx_engine_secret` | — |
+| `app/dependencies.py` | ✅ Has `get_engine_client()` + `close_engine_client()` | — |
+| `app/api/hx.py` | ✅ EXISTS — `POST /api/v1/hx/start` with `min_length=1` validation, returns relative `stream_url` | Do not change — called by tool executor only |
+| `app/services/orchestration_service.py` | ⚠️ Plain streaming — no tools yet. Comment says "tools coming" | **Upgrade to agentic loop** — register `hx_design` tool, add tool executor, return `tool_calls` |
+| `app/core/llm_provider.py` | ✅ Already has `create_message_stream(tools=...)` support | — |
+| `frontend/src/pages/ChatPage.jsx` | ✅ Clean slate — no HX wiring yet | Add `useHXStream`, scan `tool_executions` after chat response, call `connectStream` |
+| `frontend/src/components/chat/ChatPanel.jsx` | ✅ Clean — no HX props | Do NOT add `onHXStart` — HX wiring stays in ChatPage only |
+| `frontend/src/components/chat/ChatContainer.jsx` | ✅ Clean — no HX props | Do NOT add HX intent detection — LLM is the intent detector |
 
 ### 11.3 Auth System [CEO-CP5]
 
@@ -2290,6 +2306,37 @@ await db.users.create_index([("email", 1)], unique=True)
 
 ### Week 6 — Backend Integration + Frontend SSE Split + Auth
 
+**Architectural decision [2026-03-26]:** The frontend NEVER calls the HX Engine directly or fires a parallel start-design request. The only entry point from the browser is `POST /api/chat`. The backend's Claude (Loop 1) decides whether the message is an HX design request and calls the `hx_design` tool if so. The tool result (session_id + stream_url) comes back in `tool_executions` on the chat response. The frontend reads that field and opens the SSE stream. Intent detection belongs to the LLM, not the frontend.
+
+```
+User message
+  ↓
+POST /api/chat  (single request — same as always)
+  ↓
+orchestration_service.py — Claude reads conversation + tool list
+  Claude decides: calls hx_design({raw_request, user_id})
+    ↓
+  tool executor: POST /api/v1/hx/start → HX Engine
+    ← { session_id, stream_url: "/api/v1/hx/design/{id}/stream" }
+  Claude writes response: "Starting your 16-step design..."
+  ↓
+Chat response:
+  { message: "...", tool_executions: [{ tool_name: "hx_design",
+    result: { session_id, stream_url } }] }
+  ↓
+frontend/src/pages/ChatPage.jsx — after chat response received:
+  finds tool_executions entry with tool_name === "hx_design"
+  calls connectStream(result.stream_url)
+  ↓
+useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
+```
+
+**What this means for the codebase:**
+- `ChatPage.jsx` owns HX state (`useHXStream`). After each chat response, it scans `tool_executions` for `hx_design` and calls `connectStream`. No `onHXStart` prop, no parallel fetch, no frontend intent detection.
+- `ChatPanel` / `ChatContainer` — no HX awareness at all. They only send chat messages and render responses.
+- `backend/app/api/hx.py` — `POST /api/v1/hx/start` stays but is called only by the tool executor inside `orchestration_service.py`, never by the frontend.
+- `stream_url` returned as a relative path (`/api/v1/hx/design/{id}/stream`). `useHXStream` prepends `window.location.origin`; nginx routes to HX Engine.
+
 **Auth (CEO-CP5 — add first, everything else depends on it):**
 - `backend/app/models/user.py` — User Pydantic model: id, email, hashed_password, org_id (nullable), created_at
 - `backend/app/routers/auth.py` — POST /auth/login (email + password → JWT), GET /auth/me
@@ -2301,17 +2348,19 @@ await db.users.create_index([("email", 1)], unique=True)
 - All backend endpoints except `/health` and `POST /auth/login` require `Authorization: Bearer <token>`.
 
 **Backend:**
-- `backend/app/core/engine_client.py` — Full implementation (was stub). HXEngineClient with design(), rate(), optimize(), get_fluid_properties(), poll_status().
-- `backend/app/services/orchestration_service.py` — 3 call sites: route HX tools via engine_registry instead of mcp_registry.
-- `backend/app/dependencies.py` — get_engine_registry() singleton.
-- HX Engine webhook handler: POST /internal/design-complete → store result in MongoDB.
+- `backend/app/core/engine_client.py` — Full implementation (was stub). HXEngineClient with `start_design()`, `rate()`, `optimize()`, `get_fluid_properties()`, `poll_status()`.
+- `backend/app/api/hx.py` — `POST /api/v1/hx/start` endpoint. Called by the tool executor in `orchestration_service.py`. Returns `{ session_id, stream_url (relative path) }`. `raw_request` validated `min_length=1, max_length=5000`. Frontend never calls this directly.
+- `backend/app/services/orchestration_service.py` — Upgraded from plain streaming to agentic loop with tool support. Registers `hx_design` (and later `hx_rate`, `hx_get_fluid_properties`) as Claude tools. Tool executor calls `engine_client.start_design()` when Claude invokes `hx_design`. Returns `tool_calls` list in the process_message result so `chat.py` can populate `tool_executions` in the response.
+- `backend/app/dependencies.py` — `get_engine_client()` singleton (already exists).
+- HX Engine webhook handler: `POST /internal/design-complete` → store result in MongoDB.
 
 **Frontend:**
-- `frontend/src/hooks/useHXStream.ts` — Full SSE + 2s poll fallback [CG2A]. 8 event types (no `context_note_ack` — /btw deferred [CEO Review 3]).
+- `frontend/src/pages/ChatPage.jsx` — Owns `useHXStream`. After every `handleSendMessage` response, checks `response.tool_executions` for `tool_name === "hx_design"`. If found, calls `connectStream(execution.result.stream_url)`. Passes `error` from `useHXStream` to `HXPanel`. No `onHXStart` prop anywhere.
+- `frontend/src/hooks/useHXStream.js` — Full SSE + 2s poll fallback [CG2A]. 8 event types. Exposes `error` state for SSE connection failures.
+- `frontend/src/components/hx/HXPanel.jsx` — Accepts `error` prop; shows red banner when set.
 - `frontend/src/components/hx/StepCard.jsx` — Live step card with status badge + AI reasoning.
 - `frontend/src/components/hx/IterationBadge.jsx` — Step 12 convergence progress.
 - `frontend/src/components/hx/DesignSummary.jsx` — With confidence_breakdown expandable.
-- `frontend/src/components/chat/ChatContainer.jsx` — With error state [CEO Amendment].
 
 **HX Engine — token security [Decision 3R-6A + CEO-5A]:**
 - POST /design generates short-lived JWT (1hr, HX_ENGINE_SECRET). Payload includes user_id + session_id.
@@ -2319,11 +2368,15 @@ await db.users.create_index([("email", 1)], unique=True)
 
 **Week 6 Tests**
 - `backend/tests/test_orchestration.py` [Decision 7A] — 5 golden cases (VCR cassettes for determinism):
-  1. "Design crude oil cooler" → hx_get_fluid_properties → hx_design
+  1. "Design crude oil cooler" → hx_get_fluid_properties → hx_design → tool_executions contains stream_url
   2. "Rate this exchanger [+geometry]" → hx_rate
   3. "Optimize for cost" (after design in session) → hx_optimize
   4. "Water properties at 80°C?" → hx_get_fluid_properties only
   5. "Same as last time but inlet 160°C" → hx_design with profile
+- `backend/tests/test_hx_proxy.py` — Unit tests for `POST /api/v1/hx/start`:
+  - Valid request → 200 + `{ session_id, stream_url }` where `stream_url` starts with `/api/v1/hx/`
+  - Empty `raw_request` → 422 validation error
+  - HX Engine unreachable → 502
 - `tests/integration/test_sse_stream.py` — httpx AsyncClient, full SSE event sequence + JWT auth cases [Decision 3R-6A]:
   - No token → 401
   - Expired token (1s TTL) → 401
@@ -2465,8 +2518,8 @@ def mock_supermemory():
 - 3 corrections exhausted [ENG-1A]: mock AI always 'correct' → verify force-escalate on attempt 3, `review.attempts` has 3 entries, `step_escalated` emitted
 - **3 corrections exhausted + user response fails Layer 2 [CEO Review 3 gap fix]:** mock correction exhaustion → escalate → mock user response that still fails Layer 2 → verify `step_error` SSE emitted + `StepHardFailure` raised. Confirms the `else` branch in the correction-exhaustion path (not the direct-escalate path).
 - Correction + Layer 2 hard fail → rollback: mock correction that causes validation fail → verify `state.shell_id_mm` restored to pre-correction value
-- Confidence gate override [ENG-1B]: mock AI returns `decision='correct', confidence=0.4` → verify overridden to `decision='escalate'`, `confidence_gate_triggered=True` logged
-- Confidence gate on re-review: mock AI proceed on attempt 1 but confidence=0.3 → verify force escalate even on 'proceed'
+- Confidence gate override [ENG-1B]: mock AI returns `decision='correct', confidence=0.65` → verify overridden to `decision='escalate'`, `confidence_gate_triggered=True` logged
+- Confidence gate on re-review: mock AI proceed on attempt 1 but confidence=0.65 → verify force escalate even on 'proceed'
 - Warn path: mock AI → 'warn' → verify `step_warning` emitted, no `wait_for_user` called
 - Direct escalate: mock AI → 'escalate' → verify `wait_for_user` called exactly once
 - **review_notes propagation [Eng Review]:** pre-populate `state.review_notes = ["[Step 7] Shell-side Re=650, baffle spacing sensitive"]` before calling `run_with_review_loop()` → verify that `ai_engineer.review()` is called with a `book_context` or `past_designs` string that contains the review note text (or that `_build_prompt()` embeds it — spy on `_build_prompt` if needed). Ensures review_notes reach the AI prompt and aren't silently dropped.
@@ -2780,7 +2833,7 @@ STEP_8_CHECKS = {
 | AI suggests correction that violates hard rules | Reject correction. Proceed without it. |
 | AI takes > 10 seconds to respond | Timeout → retry [CEO-3A]. After 3 attempts, proceed with hard rules. |
 | AI suggests correcting a parameter that doesn't exist | Ignore correction. Log error. Proceed. |
-| AI confidence < 0.5 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
+| AI confidence < 0.70 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
 | User doesn't respond to escalation | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
 | Layer 2 still fails after user response (re-escalation) | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts. |
 
@@ -2972,7 +3025,7 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | ID | Decision | Description |
 |----|----------|-------------|
 | ENG-1A | Try-first + 3-correction limit | AI must attempt resolution before escalating. Max 3 correction attempts per step. After 3 failures, force escalate with all attempts in payload. `escalate` JSON includes `attempts`, `observation`, `recommendation`, `options`. |
-| ENG-1B | Confidence gate (threshold 0.5) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.5`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record. |
+| ENG-1B | Confidence gate (threshold 0.70) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record. |
 | 1B | Direct SSE | Frontend connects directly to HX Engine for SSE (via nginx proxy per CEO-1A) |
 | 2B | Pydantic DesignState | Single Pydantic model, not a dict |
 | 3A | Convergence loop AI skip | `in_convergence_loop` flag skips conditional AI in Steps 7/10/11 |

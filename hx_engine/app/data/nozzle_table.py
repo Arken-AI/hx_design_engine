@@ -1,0 +1,115 @@
+"""Nozzle sizing data — Serth Table 5.3 + Schedule 40 pipe IDs.
+
+Default nozzle diameter look-up for shell-and-tube heat exchangers.
+The user can override with explicit nozzle sizes; this table is the
+engineering-standard fallback.
+
+Ref: Serth, R.W. & Lestina, T. (2014). *Process Heat Transfer*,
+     2nd ed., Table 5.3.
+"""
+
+from __future__ import annotations
+
+import math
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Serth Table 5.3 — nominal nozzle diameter by shell size
+# ═══════════════════════════════════════════════════════════════════════════
+# (shell_lower_in, shell_upper_in, nozzle_nominal_in)
+_NOZZLE_TABLE: list[tuple[float, float, float]] = [
+    (4.0, 10.0, 2.0),
+    (12.0, 17.25, 3.0),
+    (19.25, 21.25, 4.0),
+    (23.0, 29.0, 6.0),
+    (31.0, 37.0, 8.0),
+    (39.0, 42.0, 10.0),
+]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Schedule 40 nominal → actual inside diameter (inches → metres)
+# ═══════════════════════════════════════════════════════════════════════════
+_SCH40_ID_M: dict[float, float] = {
+    2.0: 0.05250,   # 2.067 in.
+    3.0: 0.07793,   # 3.068 in.
+    4.0: 0.10226,   # 4.026 in.
+    6.0: 0.15405,   # 6.065 in.
+    8.0: 0.20272,   # 7.981 in.
+    10.0: 0.25451,  # 10.020 in.
+}
+
+_M_TO_IN = 39.3701  # metres → inches conversion factor
+
+
+def get_default_nozzle_diameter_m(shell_id_m: float) -> float:
+    """Look up default nozzle ID from Serth Table 5.3.
+
+    Converts shell_id_m → inches, finds matching range, returns the
+    Schedule 40 actual inside diameter in metres.
+
+    Raises:
+        ValueError: If shell_id_m is outside the table range.
+    """
+    shell_in = shell_id_m * _M_TO_IN
+
+    for lower, upper, nom_nozzle in _NOZZLE_TABLE:
+        if lower <= shell_in <= upper:
+            return _SCH40_ID_M[nom_nozzle]
+
+    raise ValueError(
+        f"Shell ID {shell_id_m:.4f} m ({shell_in:.2f} in.) "
+        f"is outside the nozzle table range [4–42 in.]"
+    )
+
+
+def nozzle_rho_v_squared(
+    mass_flow_kg_s: float,
+    density_kg_m3: float,
+    nozzle_id_m: float,
+    n_nozzles: int = 1,
+) -> float:
+    """Compute ρv² at the nozzle (kg / m·s²).
+
+    ρv² = ṁ² / (ρ × A² × n²)
+    TEMA hard limit: 2230 kg/m·s² (= 1500 lbm/ft·s²).
+
+    Args:
+        mass_flow_kg_s: Total mass flow rate through all nozzles.
+        density_kg_m3: Bulk density at nozzle conditions.
+        nozzle_id_m: Inside diameter of one nozzle (m).
+        n_nozzles: Number of nozzles in parallel (default 1).
+
+    Returns:
+        ρv² (kg/m·s²).
+    """
+    A_nozzle = math.pi / 4.0 * nozzle_id_m ** 2
+    v_nozzle = mass_flow_kg_s / (density_kg_m3 * A_nozzle * n_nozzles)
+    return density_kg_m3 * v_nozzle ** 2
+
+
+def nozzle_dP_Pa(
+    mass_flow_kg_s: float,
+    density_kg_m3: float,
+    nozzle_id_m: float,
+    n_nozzles: int = 1,
+    K_nozzle: float = 1.0,
+) -> float:
+    """Nozzle pressure loss (Pa).
+
+    ΔP_n = K × ρ × v² / 2   (one inlet + one outlet combined when K=1.0)
+
+    Serth Eq. 5.A.3 uses K ≈ 1.0 for turbulent single-nozzle loss.
+    Total inlet + outlet ≈ 2.0 × this.
+
+    Args:
+        mass_flow_kg_s: Total mass flow.
+        density_kg_m3: Bulk density.
+        nozzle_id_m: Inside diameter of one nozzle (m).
+        n_nozzles: Number of nozzles in parallel.
+        K_nozzle: Loss coefficient (default 1.0).
+
+    Returns:
+        Pressure drop (Pa).
+    """
+    A_nozzle = math.pi / 4.0 * nozzle_id_m ** 2
+    v_nozzle = mass_flow_kg_s / (density_kg_m3 * A_nozzle * n_nozzles)
+    return K_nozzle * density_kg_m3 * v_nozzle ** 2 / 2.0
