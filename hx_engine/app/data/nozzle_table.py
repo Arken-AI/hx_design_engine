@@ -39,6 +39,23 @@ _SCH40_ID_M: dict[float, float] = {
 
 _M_TO_IN = 39.3701  # metres → inches conversion factor
 
+# Sorted nominal sizes for upsize look-up
+_NOMINAL_SIZES_SORTED: list[float] = sorted(_SCH40_ID_M.keys())
+
+
+def get_next_larger_nozzle_diameter_m(current_id_m: float) -> float | None:
+    """Return the next larger Schedule 40 nozzle ID, or None if already max.
+
+    Finds the current nozzle in the table and returns the next size up.
+    If the current diameter doesn't exactly match a table entry, returns
+    the first Schedule 40 size whose ID is strictly larger.
+    """
+    for nom in _NOMINAL_SIZES_SORTED:
+        sch40_id = _SCH40_ID_M[nom]
+        if sch40_id > current_id_m + 1e-6:
+            return sch40_id
+    return None  # already at the largest available size
+
 
 def get_default_nozzle_diameter_m(shell_id_m: float) -> float:
     """Look up default nozzle ID from Serth Table 5.3.

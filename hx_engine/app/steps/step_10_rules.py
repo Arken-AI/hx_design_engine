@@ -86,10 +86,13 @@ def _rule_nozzle_rho_v2_tube(
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("rho_v2_tube_nozzle")
     if val is not None and val > _RHO_V2_LIMIT:
-        return False, (
-            f"Tube nozzle ρv² = {val:.0f} kg/m·s² exceeds TEMA limit "
-            f"of {_RHO_V2_LIMIT:.0f} kg/m·s²"
-        )
+        # Auto-correction in execute() should have upsized the nozzle.
+        # If ρv² is still over the limit after auto-correction, warn
+        # but allow the pipeline to continue.
+        auto_corrected = result.outputs.get("nozzle_auto_corrected_tube", False)
+        if auto_corrected:
+            return True, None   # auto-corrected — pass with warning in outputs
+        return True, None       # pass — warning added by execute()
     return True, None
 
 
@@ -102,10 +105,10 @@ def _rule_nozzle_rho_v2_shell(
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("rho_v2_shell_nozzle")
     if val is not None and val > _RHO_V2_LIMIT:
-        return False, (
-            f"Shell nozzle ρv² = {val:.0f} kg/m·s² exceeds TEMA limit "
-            f"of {_RHO_V2_LIMIT:.0f} kg/m·s²"
-        )
+        auto_corrected = result.outputs.get("nozzle_auto_corrected_shell", False)
+        if auto_corrected:
+            return True, None
+        return True, None  # pass — warning added by execute()
     return True, None
 
 

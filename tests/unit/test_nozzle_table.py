@@ -8,6 +8,7 @@ import pytest
 
 from hx_engine.app.data.nozzle_table import (
     get_default_nozzle_diameter_m,
+    get_next_larger_nozzle_diameter_m,
     nozzle_dP_Pa,
     nozzle_rho_v_squared,
 )
@@ -86,3 +87,67 @@ class TestNozzleDeltaP:
 
         result = nozzle_dP_Pa(m_dot, rho, d)
         assert result == pytest.approx(expected, rel=1e-6)
+
+
+class TestGetNextLargerNozzle:
+    """Tests for the nozzle upsize helper."""
+
+    def test_2in_to_3in(self) -> None:
+        """2-in. nozzle (0.05250) → 3-in. (0.07793)."""
+        result = get_next_larger_nozzle_diameter_m(0.05250)
+        assert result == pytest.approx(0.07793, rel=1e-3)
+
+    def test_3in_to_4in(self) -> None:
+        result = get_next_larger_nozzle_diameter_m(0.07793)
+        assert result == pytest.approx(0.10226, rel=1e-3)
+
+    def test_4in_to_6in(self) -> None:
+        result = get_next_larger_nozzle_diameter_m(0.10226)
+        assert result == pytest.approx(0.15405, rel=1e-3)
+
+    def test_6in_to_8in(self) -> None:
+        result = get_next_larger_nozzle_diameter_m(0.15405)
+        assert result == pytest.approx(0.20272, rel=1e-3)
+
+    def test_8in_to_10in(self) -> None:
+        result = get_next_larger_nozzle_diameter_m(0.20272)
+        assert result == pytest.approx(0.25451, rel=1e-3)
+
+    def test_10in_returns_none(self) -> None:
+        """Largest size returns None (no bigger available)."""
+        result = get_next_larger_nozzle_diameter_m(0.25451)
+        assert result is None
+
+    def test_intermediate_value_returns_next_above(self) -> None:
+        """A diameter between 3-in. and 4-in. → returns 4-in."""
+        result = get_next_larger_nozzle_diameter_m(0.09)
+        assert result == pytest.approx(0.10226, rel=1e-3)
+
+    def test_very_small_returns_smallest(self) -> None:
+        """A very small diameter → returns 2-in. (smallest)."""
+        result = get_next_larger_nozzle_diameter_m(0.01)
+        assert result == pytest.approx(0.05250, rel=1e-3)
+
+
+class TestDualNozzles:
+    """Tests for n_nozzles parameter in ρv² and ΔP."""
+
+    def test_dual_nozzles_halves_rho_v2(self) -> None:
+        """Dual nozzles should reduce ρv² by factor of 4 (v halved → v² quartered)."""
+        m_dot = 40.0
+        rho = 995.0
+        d = 0.07793
+
+        single = nozzle_rho_v_squared(m_dot, rho, d, n_nozzles=1)
+        dual = nozzle_rho_v_squared(m_dot, rho, d, n_nozzles=2)
+        assert dual == pytest.approx(single / 4.0, rel=1e-6)
+
+    def test_dual_nozzles_quarters_dp(self) -> None:
+        """Dual nozzles should reduce ΔP by factor of 4."""
+        m_dot = 40.0
+        rho = 995.0
+        d = 0.07793
+
+        single = nozzle_dP_Pa(m_dot, rho, d, n_nozzles=1)
+        dual = nozzle_dP_Pa(m_dot, rho, d, n_nozzles=2)
+        assert dual == pytest.approx(single / 4.0, rel=1e-6)

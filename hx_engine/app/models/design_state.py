@@ -428,6 +428,10 @@ class DesignState(BaseModel):
     nozzle_id_shell_m: Optional[float] = None
     rho_v2_tube_nozzle: Optional[float] = None
     rho_v2_shell_nozzle: Optional[float] = None
+    n_nozzles_tube: int = 1
+    n_nozzles_shell: int = 1
+    nozzle_auto_corrected_tube: bool = False
+    nozzle_auto_corrected_shell: bool = False
     dP_shell_simplified_delaware_Pa: Optional[float] = None
     dP_shell_kern_Pa: Optional[float] = None
     dP_shell_bell_vs_kern_pct: Optional[float] = None

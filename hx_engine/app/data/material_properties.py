@@ -15,6 +15,9 @@ Used by:
 from __future__ import annotations
 
 import bisect
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Material data table
@@ -238,6 +241,9 @@ def _resolve_key(material: str) -> str:
       - A display label (e.g. ``"Carbon Steel (SA-179/SA-214)"``) — mapped
         back to the dict key via a case-insensitive reverse lookup.
 
+    When a label is received, the resolved key is logged so downstream
+    consumers are aware of the auto-correction.
+
     Raises
     ------
     KeyError
@@ -248,10 +254,19 @@ def _resolve_key(material: str) -> str:
     # Try case-insensitive label lookup
     resolved = _LABEL_TO_KEY.get(material.lower())
     if resolved is not None:
+        logger.warning(
+            "Material key auto-corrected: received label '%s' → "
+            "resolved to key '%s'. "
+            "Reason: material_properties expects a snake_case key, "
+            "but a human-readable label was passed (likely set by Step 9).",
+            material,
+            resolved,
+        )
         return resolved
     raise KeyError(
         f"Unknown material '{material}'. "
-        f"Valid keys: {sorted(_MATERIAL_PROPERTIES.keys())}"
+        f"Valid keys: {sorted(_MATERIAL_PROPERTIES.keys())}. "
+        f"Valid labels: {list(_LABEL_TO_KEY.keys())}."
     )
 
 
@@ -262,6 +277,7 @@ def resolve_material_key(material: str) -> str:
     before storing it on state.
     """
     return _resolve_key(material)
+
 
 
 def get_elastic_modulus(material: str, temperature_C: float = 25.0) -> float:
