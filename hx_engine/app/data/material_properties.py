@@ -218,6 +218,52 @@ def _interpolate_E(E_table: dict[int, float], temperature_C: float) -> float:
     return E_lo + frac * (E_hi - E_lo)
 
 
+# ---------------------------------------------------------------------------
+# Key resolver — accepts either a dict key or a display label
+# ---------------------------------------------------------------------------
+
+# Build a reverse map from label → key (built once at import time)
+_LABEL_TO_KEY: dict[str, str] = {}
+for _key, _props in _MATERIAL_PROPERTIES.items():
+    _label = _props.get("label", "")
+    if _label:
+        _LABEL_TO_KEY[_label.lower()] = _key
+
+
+def _resolve_key(material: str) -> str:
+    """Resolve a material identifier to its canonical dict key.
+
+    Accepts:
+      - A dict key (e.g. ``"carbon_steel"``) — returned as-is.
+      - A display label (e.g. ``"Carbon Steel (SA-179/SA-214)"``) — mapped
+        back to the dict key via a case-insensitive reverse lookup.
+
+    Raises
+    ------
+    KeyError
+        If *material* matches neither a key nor a known label.
+    """
+    if material in _MATERIAL_PROPERTIES:
+        return material
+    # Try case-insensitive label lookup
+    resolved = _LABEL_TO_KEY.get(material.lower())
+    if resolved is not None:
+        return resolved
+    raise KeyError(
+        f"Unknown material '{material}'. "
+        f"Valid keys: {sorted(_MATERIAL_PROPERTIES.keys())}"
+    )
+
+
+def resolve_material_key(material: str) -> str:
+    """Public wrapper around ``_resolve_key``.
+
+    Useful for callers that need to normalise a material identifier
+    before storing it on state.
+    """
+    return _resolve_key(material)
+
+
 def get_elastic_modulus(material: str, temperature_C: float = 25.0) -> float:
     """Return Young's modulus in Pa at the specified temperature.
 
@@ -229,7 +275,7 @@ def get_elastic_modulus(material: str, temperature_C: float = 25.0) -> float:
     KeyError
         If *material* is not in the material property table.
     """
-    props = _MATERIAL_PROPERTIES[material]
+    props = _MATERIAL_PROPERTIES[_resolve_key(material)]
     E_GPa = _interpolate_E(props["E_GPa"], temperature_C)
     return E_GPa * 1e9
 
@@ -242,7 +288,7 @@ def get_density(material: str) -> float:
     KeyError
         If *material* is not in the material property table.
     """
-    return _MATERIAL_PROPERTIES[material]["density_kg_m3"]
+    return _MATERIAL_PROPERTIES[_resolve_key(material)]["density_kg_m3"]
 
 
 def get_poisson(material: str) -> float:
@@ -253,7 +299,7 @@ def get_poisson(material: str) -> float:
     KeyError
         If *material* is not in the material property table.
     """
-    return _MATERIAL_PROPERTIES[material]["poisson"]
+    return _MATERIAL_PROPERTIES[_resolve_key(material)]["poisson"]
 
 
 def get_available_materials() -> list[str]:
@@ -271,7 +317,7 @@ def get_allowable_stress(material: str, temperature_C: float = 25.0) -> float:
     KeyError
         If *material* is not in the material property table.
     """
-    props = _MATERIAL_PROPERTIES[material]
+    props = _MATERIAL_PROPERTIES[_resolve_key(material)]
     S_MPa = _interpolate_E(props["S_MPa"], temperature_C)
     return S_MPa * 1e6
 
@@ -286,6 +332,6 @@ def get_thermal_expansion(material: str, temperature_C: float = 25.0) -> float:
     KeyError
         If *material* is not in the material property table.
     """
-    props = _MATERIAL_PROPERTIES[material]
+    props = _MATERIAL_PROPERTIES[_resolve_key(material)]
     alpha_um = _interpolate_E(props["alpha_um_mK"], temperature_C)
     return alpha_um * 1e-6
