@@ -47,6 +47,7 @@ from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
 from hx_engine.app.steps.step_13_vibration import Step13VibrationCheck
 from hx_engine.app.steps.step_14_mechanical import Step14MechanicalCheck
+from hx_engine.app.steps.step_15_cost import Step15CostEstimate
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,12 @@ class PipelineRunner:
             if state.pipeline_status == "running":
                 state = await self._run_post_convergence_step(
                     state, session_id, Step14MechanicalCheck(),
+                )
+
+            # --- Step 15: Cost Estimate (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step15CostEstimate(),
                 )
 
             # --- pipeline complete ---

@@ -456,6 +456,10 @@ class DesignState(BaseModel):
     mechanical_details: Optional[dict] = None
     shell_material: Optional[str] = None
 
+    # --- cost estimate (populated by Step 15) ---
+    cost_usd: Optional[float] = None
+    cost_breakdown: Optional[dict] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
