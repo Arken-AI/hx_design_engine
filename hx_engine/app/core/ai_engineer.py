@@ -677,6 +677,150 @@ DO NOT:
 - Change tube geometry — those are Step 4/6 decisions\
 """
 
+_STEP_10_PROMPT = """\
+## Step 10: Pressure Drops — Review Focus
+
+YOUR REVIEW FOCUS:
+1. Are tube-side and shell-side pressure drops within acceptable limits?
+2. Is there sufficient margin (>15%) below the hard limits?
+3. Are nozzle pressure drops reasonable (ρv² < 2230 kg/m·s²)?
+4. Is pressure drop distribution reasonable between tube-side and shell-side?
+
+COMMON ISSUES:
+- Pressure drop too close to limit — recommend geometry adjustment
+- Very low dP may indicate low velocity and fouling risk
+- Nozzle ρv² near limit suggests nozzle diameter too small
+
+DO NOT: Override hard dP limits. These are Layer 2 safety rules.\
+"""
+
+_STEP_11_PROMPT = """\
+## Step 11: Area + Overdesign — Review Focus
+
+YOUR REVIEW FOCUS:
+1. Is overdesign percentage in the optimal 10–25% range?
+2. Is the required area estimate consistent with the estimated U from Step 6?
+3. If overdesign is 0–10% or 25–40%, is the design still acceptable?
+
+COMMON ISSUES:
+- Overdesign < 10% — insufficient margin for fouling/uncertainty
+- Overdesign > 30% — oversized, cost inefficient
+- Large deviation between estimated and calculated area — indicates poor initial U guess
+
+DO NOT: Accept negative overdesign (hard fail). Do not recommend area changes \
+— Step 12 convergence handles this.\
+"""
+
+_STEP_12_PROMPT = """\
+## Step 12: Convergence Loop Failure — Review Focus
+
+You are reviewing a convergence failure after 20 iterations.
+
+YOUR REVIEW FOCUS:
+1. Is there an oscillating pattern in the convergence trajectory?
+2. What is preventing convergence — dP limits? overdesign? velocity?
+3. Can a structural geometry change resolve it (different shell size, tube passes)?
+
+This review is only called when automated convergence fails. Recommend specific \
+geometry changes.
+
+DO NOT: Suggest "try more iterations." The limit is 20 for good reason.\
+"""
+
+_STEP_13_PROMPT = """\
+## Step 13: Vibration Check (5 Mechanisms) — Review Focus
+
+SAFETY-CRITICAL REVIEW.
+
+YOUR REVIEW FOCUS:
+1. Are all 5 vibration mechanisms safe (fluidelastic, vortex, buffeting, acoustic, whirling)?
+2. Is the Connors criterion margin adequate (u_cross/u_crit < 0.5)?
+3. Are inlet/outlet spans checked separately (1.5× central span — most critical)?
+4. If any mechanism fails, what is the minimum safe geometry change?
+
+COMMON ISSUES:
+- Inlet span failure with safe central span — check baffle spacing
+- Acoustic resonance triggered in gas service — check Strouhal number
+- Marginal Connors ratio (0.4–0.5) — recommend conservative action
+
+DO NOT: Override vibration safety limits. These are engineering safety rules.\
+"""
+
+_STEP_14_PROMPT = """\
+## Step 14: Mechanical Design Check — Review Focus
+
+YOUR REVIEW FOCUS:
+1. Do tube and shell wall thicknesses meet ASME VIII Div 1 minimums (UG-27/UG-28)?
+2. Is the thickness margin adequate (>20%)?
+3. Is thermal expansion differential within tolerance for the TEMA type?
+4. If fixed tubesheet (BEM/NEN) and expansion > 3mm — should rear head type change?
+
+COMMON ISSUES:
+- External pressure governs over internal pressure — verify vacuum condition
+- Thin-wall tubes (BWG 16+) marginal under external pressure
+- Large expansion differential on fixed tubesheet — needs floating head
+
+DO NOT: Change TEMA type without flagging as ESCALATE. Geometry changes need \
+Step 12 re-run.\
+"""
+
+_STEP_15_PROMPT = """\
+## Step 15: Cost Estimate — Review Focus
+
+YOUR REVIEW FOCUS:
+1. Is the bare module cost reasonable for this size, material, and pressure?
+2. Is cost/m² within the expected range for the tube material?
+3. Are material factor and pressure factor reasonable?
+4. Is the CEPCI index current (< 90 days old)?
+
+COMMON ISSUES:
+- Very high cost/m² may indicate expensive material where cheaper alternative exists
+- Very low cost may indicate missing pressure or material correction
+- Interpolated material factor (not from Turton directly) — verify reasonableness
+
+DO NOT: Override cost calculations. Flag anomalies for user review.\
+"""
+
+_STEP_16_PROMPT = """\
+## Step 16: Final Validation + Confidence Score — Review Focus
+
+You are performing the FINAL ENGINEERING SIGN-OFF on a complete heat exchanger design.
+Review the entire design holistically — not just one calculation.
+
+THE DETERMINISTIC CONFIDENCE SCORE HAS ALREADY BEEN COMPUTED (shown below).
+Your job is NOT to recompute or override it. Your job is to:
+
+YOUR REVIEW FOCUS:
+1. Produce a plain-English DESIGN SUMMARY (2–4 sentences describing the design)
+2. List ALL ASSUMPTIONS made across the 16 steps — both explicit and implicit
+3. Identify DESIGN STRENGTHS — what makes this design reliable
+4. Identify DESIGN RISKS — what could go wrong or needs verification
+5. Provide RECOMMENDATIONS if confidence < 0.80
+
+COMMON ASSUMPTIONS TO CHECK FOR:
+- Fouling factors from TEMA tables (not site-specific data)
+- Single-phase liquid operation assumed throughout
+- Fluid properties at bulk mean temperature (not wall temperature)
+- Turton cost correlations (2001 base year, validity range)
+- CEPCI projection for 2026
+- Baffle-to-shell and tube-to-baffle clearances from TEMA standards
+- No phase change at any point in the exchanger
+
+WHAT MAKES A GOOD SUMMARY:
+- Mention: TEMA type, fluids, duty, key geometry (shell size, tube count, length)
+- State the overall U and overdesign percentage
+- Note any safety concerns (vibration, mechanical)
+- State the estimated cost
+- Be specific — avoid vague statements
+
+RESPOND WITH JSON including: decision, confidence, reasoning, design_summary, \
+assumptions (list), design_strengths (list), design_risks (list), \
+recommendations (list — only if confidence < 0.80), user_summary.
+
+DO NOT: Modify the confidence score. DO NOT suggest geometry changes (design is \
+finalized). DO NOT produce vague summaries like "the design looks good."\
+"""
+
 # Step prompt registry — add an entry here before wiring any new step
 _STEP_PROMPTS: dict[int, str] = {
     1: _STEP_1_PROMPT,
@@ -688,6 +832,13 @@ _STEP_PROMPTS: dict[int, str] = {
     7: _STEP_7_PROMPT,
     8: _STEP_8_PROMPT,
     9: _STEP_9_PROMPT,
+    10: _STEP_10_PROMPT,
+    11: _STEP_11_PROMPT,
+    12: _STEP_12_PROMPT,
+    13: _STEP_13_PROMPT,
+    14: _STEP_14_PROMPT,
+    15: _STEP_15_PROMPT,
+    16: _STEP_16_PROMPT,
 }
 
 
@@ -1050,6 +1201,198 @@ def _build_step_context_inner(
             lines.append(f"Tube material: {mat} (k_w = {k_w:.1f} W/m·K)")
         return "\n".join(lines)
 
+    if step_id == 10:
+        # Pressure drop context
+        lines = []
+        dp_tube = result.outputs.get("dP_tube_Pa")
+        dp_shell = result.outputs.get("dP_shell_Pa")
+        rv2_tube = result.outputs.get("rho_v2_tube_nozzle")
+        rv2_shell = result.outputs.get("rho_v2_shell_nozzle")
+        velocity = state.tube_velocity_m_s
+        if dp_tube is not None:
+            lines.append(f"dP_tube = {dp_tube:.0f} Pa")
+        if dp_shell is not None:
+            lines.append(f"dP_shell = {dp_shell:.0f} Pa")
+        if rv2_tube is not None:
+            lines.append(f"Nozzle ρv² (tube) = {rv2_tube:.0f} kg/m·s²")
+        if rv2_shell is not None:
+            lines.append(f"Nozzle ρv² (shell) = {rv2_shell:.0f} kg/m·s²")
+        if velocity is not None:
+            lines.append(f"Tube velocity = {velocity:.3f} m/s")
+        return "\n".join(lines)
+
+    if step_id == 11:
+        # Area + overdesign context
+        lines = []
+        overdesign = result.outputs.get("overdesign_pct")
+        a_req = result.outputs.get("area_required_m2")
+        a_prov = result.outputs.get("area_provided_m2")
+        u_est = state.U_W_m2K
+        u_calc = state.U_overall_W_m2K
+        if overdesign is not None:
+            lines.append(f"Overdesign = {overdesign:.1f}%")
+        if a_req is not None and a_prov is not None:
+            lines.append(f"A_required = {a_req:.2f} m², A_provided = {a_prov:.2f} m²")
+        if u_est is not None and u_calc is not None:
+            dev = (u_calc - u_est) / u_est * 100 if u_est else 0
+            lines.append(f"U_estimated = {u_est:.1f}, U_calculated = {u_calc:.1f} ({dev:+.1f}%)")
+        return "\n".join(lines)
+
+    if step_id == 12:
+        # Convergence context (only called on failure)
+        lines = []
+        n_iter = result.outputs.get("convergence_iteration")
+        converged = result.outputs.get("convergence_converged")
+        restart = result.outputs.get("convergence_restart_count")
+        if n_iter is not None:
+            lines.append(f"Iterations: {n_iter}")
+        if converged is not None:
+            lines.append(f"Converged: {converged}")
+        if restart is not None:
+            lines.append(f"Geometry restarts: {restart}")
+        return "\n".join(lines)
+
+    if step_id == 13:
+        # Vibration check context
+        lines = []
+        vib_safe = result.outputs.get("vibration_safe")
+        vib_details = result.outputs.get("vibration_details")
+        if vib_safe is not None:
+            lines.append(f"Vibration safe: {vib_safe}")
+        if isinstance(vib_details, dict):
+            for mechanism, detail in vib_details.items():
+                if isinstance(detail, dict):
+                    status = detail.get("safe", "?")
+                    ratio = detail.get("ratio")
+                    info = f"  {mechanism}: safe={status}"
+                    if ratio is not None:
+                        info += f", ratio={ratio:.3f}"
+                    lines.append(info)
+        return "\n".join(lines)
+
+    if step_id == 14:
+        # Mechanical design context
+        lines = []
+        tube_ok = result.outputs.get("tube_thickness_ok")
+        shell_ok = result.outputs.get("shell_thickness_ok")
+        expansion = result.outputs.get("expansion_mm")
+        mech = result.outputs.get("mechanical_details")
+        if tube_ok is not None:
+            lines.append(f"Tube thickness OK: {tube_ok}")
+        if shell_ok is not None:
+            lines.append(f"Shell thickness OK: {shell_ok}")
+        if expansion is not None:
+            lines.append(f"Thermal expansion: {expansion:.2f} mm")
+        if isinstance(mech, dict):
+            for comp in ("tube", "shell"):
+                info = mech.get(comp, {})
+                if isinstance(info, dict):
+                    t_act = info.get("actual_wall_mm")
+                    t_min = info.get("min_wall_mm")
+                    if t_act is not None and t_min is not None:
+                        margin = (t_act - t_min) / t_min * 100 if t_min else 0
+                        lines.append(
+                            f"  {comp}: t_actual={t_act:.2f}mm, "
+                            f"t_min={t_min:.2f}mm, margin={margin:.0f}%"
+                        )
+        if state.tema_type:
+            lines.append(f"TEMA type: {state.tema_type}")
+        return "\n".join(lines)
+
+    if step_id == 15:
+        # Cost estimate context
+        lines = []
+        cost = result.outputs.get("cost_usd")
+        bd = result.outputs.get("cost_breakdown") or {}
+        if cost is not None:
+            lines.append(f"Bare module cost: ${cost:,.0f}")
+        cost_m2 = bd.get("cost_per_m2_usd")
+        if cost_m2 is not None:
+            lines.append(f"Cost/m²: ${cost_m2:,.0f}")
+        f_m = bd.get("F_M")
+        if f_m is not None:
+            lines.append(f"Material factor F_M: {f_m:.4f}")
+        f_p = bd.get("F_P")
+        if f_p is not None:
+            lines.append(f"Pressure factor F_P: {f_p:.4f}")
+        if bd.get("cepci_stale"):
+            lines.append(f"WARNING: CEPCI index is stale ({bd.get('cepci_stale_days')} days old)")
+        if bd.get("F_M_interpolated"):
+            lines.append("NOTE: Material factor was interpolated (not directly from Turton)")
+        tube_mat = result.outputs.get("tube_material")
+        if tube_mat:
+            lines.append(f"Tube material: {tube_mat}")
+        return "\n".join(lines)
+
+    if step_id == 16:
+        # Final validation — comprehensive dashboard
+        lines = []
+        bd = result.outputs.get("confidence_breakdown") or {}
+        score = result.outputs.get("confidence_score")
+
+        lines.append("CONFIDENCE BREAKDOWN (deterministic):")
+        for key in ("geometry_convergence", "ai_agreement_rate",
+                     "supermemory_similarity", "validation_passes"):
+            val = bd.get(key)
+            label = f"  {key}:"
+            if key == "supermemory_similarity":
+                lines.append(f"{label} {val} (placeholder)")
+            elif val is not None:
+                lines.append(f"{label} {val:.4f}")
+        if score is not None:
+            lines.append(f"  WEIGHTED SCORE: {score:.4f}")
+
+        lines.append("\nDESIGN PERFORMANCE:")
+        if state.Q_W is not None:
+            lines.append(f"  Q = {state.Q_W:.0f} W")
+        if state.LMTD_K is not None:
+            lines.append(f"  LMTD = {state.LMTD_K:.2f} K")
+        if state.F_factor is not None:
+            lines.append(f"  F = {state.F_factor:.3f}")
+        if state.U_overall_W_m2K is not None:
+            lines.append(f"  U_overall = {state.U_overall_W_m2K:.1f} W/m²K")
+        if state.overdesign_pct is not None:
+            lines.append(f"  Overdesign = {state.overdesign_pct:.1f}%")
+        if state.dP_tube_Pa is not None:
+            lines.append(f"  dP_tube = {state.dP_tube_Pa:.0f} Pa")
+        if state.dP_shell_Pa is not None:
+            lines.append(f"  dP_shell = {state.dP_shell_Pa:.0f} Pa")
+        if state.tube_velocity_m_s is not None:
+            lines.append(f"  Tube velocity = {state.tube_velocity_m_s:.3f} m/s")
+
+        lines.append("\nPOST-CONVERGENCE:")
+        lines.append(f"  Vibration: {state.vibration_safe}")
+        if state.tube_thickness_ok is not None or state.shell_thickness_ok is not None:
+            lines.append(
+                f"  Mechanical: tubes={state.tube_thickness_ok}, "
+                f"shell={state.shell_thickness_ok}"
+            )
+        if state.expansion_mm is not None:
+            lines.append(f"  Expansion: {state.expansion_mm:.2f} mm")
+        if state.cost_usd is not None:
+            lines.append(f"  Cost: ${state.cost_usd:,.0f}")
+            if state.area_provided_m2 and state.area_provided_m2 > 0:
+                cost_m2 = state.cost_usd / state.area_provided_m2
+                lines.append(f"  Cost/m²: ${cost_m2:,.0f}")
+
+        if state.convergence_converged is not None:
+            lines.append(
+                f"\nCONVERGENCE: {state.convergence_converged} "
+                f"in {state.convergence_iteration or '?'} iterations"
+            )
+
+        if state.warnings:
+            lines.append(f"\nPIPELINE WARNINGS ({len(state.warnings)} total):")
+            for w in state.warnings[-10:]:  # Last 10 to keep context manageable
+                lines.append(f"  - {w[:200]}")
+
+        if state.review_notes:
+            lines.append(f"\nAI REVIEW NOTES ({len(state.review_notes)} total):")
+            for n in state.review_notes[-10:]:
+                lines.append(f"  - {n[:200]}")
+
+        return "\n".join(lines)
+
     # Step 1 and unknown steps — no extra context needed
     return ""
 
@@ -1353,6 +1696,22 @@ class AIEngineer:
         if not isinstance(ratings_raw, list):
             ratings_raw = []
 
+        # Parse Step 16 extras (silently ignored for other steps)
+        design_summary = data.get("design_summary")
+        assumptions_raw = data.get("assumptions", [])
+        if not isinstance(assumptions_raw, list):
+            assumptions_raw = []
+        strengths_raw = data.get("design_strengths", [])
+        if not isinstance(strengths_raw, list):
+            strengths_raw = []
+        risks_raw = data.get("design_risks", [])
+        if not isinstance(risks_raw, list):
+            risks_raw = []
+        recommendations_raw = data.get("recommendations", [])
+        if not isinstance(recommendations_raw, list):
+            recommendations_raw = []
+        user_summary = data.get("user_summary")
+
         return AIReview(
             decision=decision,
             confidence=confidence,
@@ -1363,4 +1722,11 @@ class AIEngineer:
             options=[str(o) for o in options_raw],
             option_ratings=[int(r) for r in ratings_raw if isinstance(r, (int, float))],
             ai_called=True,
+            # Step 16 extras
+            design_summary=str(design_summary) if design_summary else None,
+            assumptions=[str(a) for a in assumptions_raw],
+            design_strengths=[str(s) for s in strengths_raw],
+            design_risks=[str(r) for r in risks_raw],
+            recommendations=[str(r) for r in recommendations_raw],
+            user_summary=str(user_summary) if user_summary else None,
         )

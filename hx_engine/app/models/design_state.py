@@ -476,8 +476,11 @@ class DesignState(BaseModel):
     # steps so the reviewer can reason across multiple steps.
     review_notes: list[str] = Field(default_factory=list)
 
-    # --- confidence breakdown (populated by Step 16) ---
+    # --- Step 16: Final Validation ---
+    confidence_score: Optional[float] = None
     confidence_breakdown: Optional[dict[str, float]] = None
+    design_summary: Optional[str] = None
+    assumptions: list[str] = Field(default_factory=list)
 
     # --- shell ID finalisation flag (FE-4) ---
     # False for floating-head types (AES/AEU) until Step 15 applies the
