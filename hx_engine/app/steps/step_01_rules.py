@@ -88,10 +88,10 @@ def register_step1_rules() -> None:
     register_rule(1, _rule_both_fluids)
     register_rule(1, _rule_at_least_3_temps)
     register_rule(1, _rule_at_least_1_flow)
-    register_rule(1, _rule_temps_physically_reasonable)
-    register_rule(1, _rule_flow_rates_positive)
-    register_rule(1, _rule_hot_inlet_gt_outlet)
-    register_rule(1, _rule_cold_out_lt_hot_in)
+    register_rule(1, _rule_temps_physically_reasonable, correctable=False)
+    register_rule(1, _rule_flow_rates_positive, correctable=False)
+    register_rule(1, _rule_hot_inlet_gt_outlet, correctable=False)
+    register_rule(1, _rule_cold_out_lt_hot_in, correctable=False)
 
 
 register_step1_rules()

@@ -102,12 +102,67 @@ class BaseStep(ABC):
     # Review loop
     # ------------------------------------------------------------------
 
+    async def run_with_layer2_recovery(
+        self,
+        state: "DesignState",
+        ai_engineer: "AIEngineer",
+        layer2_errors: list[str],
+        *,
+        correctable: bool,
+    ) -> StepResult:
+        """Recover from a Layer 2 failure detected by the pipeline runner.
+
+        Called when the pipeline-level Layer 2 check fails *after*
+        ``run_with_review_loop`` returned.  Two paths:
+
+        * **correctable=True** — build a ``FailureContext`` describing the
+          Layer 2 violation and re-enter the normal AI correction loop.
+        * **correctable=False** — physics violation the AI cannot fix;
+          build an ESCALATE result directly for the user.
+        """
+        if not correctable:
+            result = await self.execute(state)
+            result.ai_review = AIReview(
+                decision=AIDecisionEnum.ESCALATE,
+                confidence=0.0,
+                reasoning=(
+                    f"Physics violation detected by Layer 2: "
+                    f"{'; '.join(layer2_errors)}. "
+                    f"This cannot be fixed by geometry correction. "
+                    f"Please review your input temperatures and flow rates."
+                ),
+                options=[
+                    "Revise inlet/outlet temperatures",
+                    "Check fluid assignments (hot vs cold side)",
+                    "Review flow rates",
+                ],
+                ai_called=False,
+            )
+            return result
+
+        initial_failure = FailureContext(
+            layer2_failed=True,
+            layer2_rule_description="; ".join(layer2_errors),
+            layer1_exception=None,
+            previous_attempts=[],
+        )
+        return await self.run_with_review_loop(
+            state, ai_engineer, initial_failure_context=initial_failure,
+        )
+
     async def run_with_review_loop(
         self,
         state: "DesignState",
         ai_engineer: "AIEngineer",
+        initial_failure_context: FailureContext | None = None,
     ) -> StepResult:
         """Execute the step and optionally loop through AI review.
+
+        Layer sequence per iteration:
+        1. Layer 1 (calculate) — ``execute()``
+        2. Layer 2 (hard validation) — ``validation_rules.check()``
+        3. Layer 3 (AI review) — AI sees Layer 2 failures via ``FailureContext``
+        4. Layer 4 (accumulate) — outputs written to DesignState
 
         Diagnostic loop behaviour:
         - PROCEED / WARN (informational): return immediately
@@ -130,7 +185,8 @@ class BaseStep(ABC):
         try:
             for attempt_num in range(1, MAX_CORRECTIONS + 1):
 
-                # Build failure context from the previous failed attempt (None on first pass)
+                # Build failure context: from previous failed attempt, from
+                # an initial Layer 2 failure passed in, or None on first pass.
                 failure_ctx: FailureContext | None = None
                 if attempts:
                     last = attempts[-1]
@@ -140,6 +196,8 @@ class BaseStep(ABC):
                         layer1_exception=last.layer1_exception,
                         previous_attempts=list(attempts),
                     )
+                elif initial_failure_context is not None:
+                    failure_ctx = initial_failure_context
 
                 review: AIReview = await ai_engineer.review(
                     self, state, result, failure_context=failure_ctx

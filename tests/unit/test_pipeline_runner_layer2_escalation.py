@@ -147,11 +147,21 @@ def _make_proceed_review(confidence: float = 0.9) -> AIReview:
     )
 
 
-def _make_validation_result(passed: bool, errors: list[str] | None = None) -> ValidationResult:
+def _make_validation_result(
+    passed: bool,
+    errors: list[str] | None = None,
+    *,
+    correctable: bool = True,
+) -> ValidationResult:
     """Create a ValidationResult for mocking."""
     vr = ValidationResult()
     vr.passed = passed
     vr.errors = errors or []
+    if not passed:
+        if correctable:
+            vr.has_correctable_failure = True
+        else:
+            vr.has_uncorrectable_failure = True
     return vr
 
 
@@ -219,14 +229,13 @@ class TestLayer2FailureWithAIEscalation:
 
 
 class TestLayer2FailureWithoutAIEscalation:
-    """Layer 2 fails + NO AI escalation → hard-stop preserved (step_error)."""
+    """Layer 2 fails + NO AI escalation → recovery attempted."""
 
     @pytest.mark.asyncio
-    async def test_layer2_fail_without_ai_escalation_still_hard_stops(
+    async def test_layer2_fail_non_correctable_escalates_to_user(
         self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
     ):
-        """When Layer 2 fails and ai_review is None, emit step_error."""
-        # Arrange: result with NO ai_review (AI mode NONE or AI not called)
+        """Non-correctable Layer 2 failure → ESCALATE to user (not hard-stop)."""
         result_no_ai = StepResult(
             step_id=7,
             step_name="Tube-Side H",
@@ -238,6 +247,48 @@ class TestLayer2FailureWithoutAIEscalation:
         failed_vr = _make_validation_result(
             passed=False,
             errors=["Tube velocity 0.122 m/s below hard minimum 0.3 m/s"],
+            correctable=False,
+        )
+
+        # Create a future that resolves immediately with user response
+        user_response_future = asyncio.Future()
+        user_response_future.set_result({"type": "skip", "values": {}})
+        mock_sse_manager.create_user_response_future = MagicMock(
+            return_value=user_response_future
+        )
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=failed_vr,
+        ):
+            await pipeline_runner.run(base_state)
+
+        # Assert: recovery produces ESCALATE, not immediate step_error
+        event_types = _get_emitted_event_types(mock_sse_manager)
+        assert "step_escalated" in event_types
+
+    @pytest.mark.asyncio
+    async def test_layer2_fail_correctable_triggers_ai_recovery(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """Correctable Layer 2 failure → AI recovery loop entered."""
+        # The MockStep.run_with_review_loop returns the pre-set result.
+        # After recovery, Layer 2 still fails → hard-stop.
+        result_no_ai = StepResult(
+            step_id=7,
+            step_name="Tube-Side H",
+            outputs={"tube_velocity_m_s": 0.122},
+            ai_review=None,
+        )
+        mock_step = MockStep(result_no_ai)
+
+        failed_vr = _make_validation_result(
+            passed=False,
+            errors=["Tube velocity 0.122 m/s below hard minimum 0.3 m/s"],
+            correctable=True,
         )
 
         with patch(
@@ -249,22 +300,25 @@ class TestLayer2FailureWithoutAIEscalation:
         ):
             state = await pipeline_runner.run(base_state)
 
-        # Assert: step_error emitted, pipeline hard-stops
+        # Recovery loop runs but MockStep still returns same bad result,
+        # so Layer 2 re-check fails and pipeline errors.
+        assert state.pipeline_status == "error"
         event_types = _get_emitted_event_types(mock_sse_manager)
         assert "step_error" in event_types
-        assert "step_escalated" not in event_types
-        assert state.pipeline_status == "error"
 
 
 class TestLayer2FailureWithNonEscalateAI:
-    """Layer 2 fails + AI decision is PROCEED (not ESCALATE) → hard-stop preserved."""
+    """Layer 2 fails + AI said PROCEED → recovery attempted."""
 
     @pytest.mark.asyncio
-    async def test_layer2_fail_with_proceed_ai_decision_hard_stops(
+    async def test_layer2_fail_with_proceed_correctable_triggers_recovery(
         self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
     ):
-        """When Layer 2 fails but AI said PROCEED, emit step_error (AI was overconfident)."""
-        # Arrange: result where AI said PROCEED but Layer 2 outer check fails
+        """When Layer 2 fails and AI said PROCEED, recovery loop runs.
+
+        MockStep always returns the same bad result, so after recovery
+        the re-check still fails and the pipeline errors.
+        """
         proceed_review = _make_proceed_review(confidence=0.85)
         result_proceed = StepResult(
             step_id=7,
@@ -277,6 +331,7 @@ class TestLayer2FailureWithNonEscalateAI:
         failed_vr = _make_validation_result(
             passed=False,
             errors=["Tube velocity 0.122 m/s below hard minimum 0.3 m/s"],
+            correctable=True,
         )
 
         with patch(
@@ -288,10 +343,9 @@ class TestLayer2FailureWithNonEscalateAI:
         ):
             state = await pipeline_runner.run(base_state)
 
-        # Assert: step_error emitted
+        # Recovery tried but MockStep still returns bad value → hard-stop
         event_types = _get_emitted_event_types(mock_sse_manager)
         assert "step_error" in event_types
-        assert "step_escalated" not in event_types
         assert state.pipeline_status == "error"
 
 
@@ -314,6 +368,9 @@ class TestLayer2PassesNormalFlow:
 
         passed_vr = _make_validation_result(passed=True)
 
+        async def _noop_post(state, session_id, step):
+            return state
+
         with patch(
             "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
             [lambda: mock_step],
@@ -324,6 +381,9 @@ class TestLayer2PassesNormalFlow:
             # Skip the convergence loop so we test only Layer 2 routing
             pipeline_runner, "_run_convergence_loop",
             return_value=base_state,
+        ), patch.object(
+            pipeline_runner, "_run_post_convergence_step",
+            side_effect=_noop_post,
         ):
             state = await pipeline_runner.run(base_state)
 
@@ -331,7 +391,7 @@ class TestLayer2PassesNormalFlow:
         assert "step_approved" in event_types
         assert "step_error" not in event_types
         assert "step_escalated" not in event_types
-        # Pipeline completes when convergence loop is skipped
+        # Pipeline completes when convergence + post-convergence are skipped
         assert state.pipeline_status == "completed"
 
 

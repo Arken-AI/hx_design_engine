@@ -210,34 +210,67 @@ class PipelineRunner:
                     result.validation_passed = vr.passed
                     result.validation_errors = vr.errors
                     if not vr.passed:
-                        logger.error(
-                            "[PIPELINE] Layer 2 validation failed for step %d: %s",
+                        logger.warning(
+                            "[PIPELINE] Layer 2 failed for step %d — "
+                            "attempting AI recovery: %s",
                             step.step_id, vr.errors,
                         )
-                        # Check if AI already produced an ESCALATE with diagnosis and options.
-                        # If so, route to the escalation path instead of hard-stopping —
-                        # the engineer should see the AI's reasoning and options, not just
-                        # the raw Layer 2 rule message.
+
+                        # If AI already produced an ESCALATE, skip recovery
+                        # and fall through to the escalation handler below.
                         ai_has_escalation = (
                             result.ai_review is not None
                             and result.ai_review.decision == AIDecisionEnum.ESCALATE
                         )
-                        if not ai_has_escalation:
-                            state.pipeline_status = "error"
-                            await self._emit_step_error(
-                                session_id, step,
-                                "; ".join(vr.errors),
-                                recommendation="Hard validation failure — cannot continue.",
+                        if ai_has_escalation:
+                            logger.info(
+                                "[PIPELINE] Layer 2 failed for step %d but "
+                                "AI escalation present — routing to "
+                                "escalation path instead of hard-stop",
+                                step.step_id,
                             )
-                            return state
-                        # AI already produced an escalation with diagnosis and options.
-                        # Fall through to the ESCALATE handling block below so the engineer
-                        # is presented with options rather than a terminal error.
-                        logger.info(
-                            "[PIPELINE] Layer 2 failed for step %d but AI escalation present — "
-                            "routing to escalation path instead of hard-stop",
-                            step.step_id,
-                        )
+                        else:
+                            # Give AI a chance to correct the Layer 2 violation.
+                            try:
+                                result = await step.run_with_layer2_recovery(
+                                    state,
+                                    self.ai_engineer,
+                                    layer2_errors=vr.errors,
+                                    correctable=vr.any_correctable,
+                                )
+                            except (CalculationError, StepHardFailure) as exc:
+                                state.pipeline_status = "error"
+                                await self._emit_step_error(
+                                    session_id, step,
+                                    str(exc) if isinstance(exc, CalculationError)
+                                    else "; ".join(exc.validation_errors),
+                                    recommendation="Recovery failed.",
+                                )
+                                return state
+
+                            # Re-check Layer 2 after recovery
+                            vr = check_validation_rules(step.step_id, result)
+                            result.validation_passed = vr.passed
+                            result.validation_errors = vr.errors
+                            if not vr.passed:
+                                # Recovery could not resolve — check for
+                                # escalation produced by the recovery loop.
+                                ai_has_escalation = (
+                                    result.ai_review is not None
+                                    and result.ai_review.decision
+                                    == AIDecisionEnum.ESCALATE
+                                )
+                                if not ai_has_escalation:
+                                    state.pipeline_status = "error"
+                                    await self._emit_step_error(
+                                        session_id, step,
+                                        "; ".join(vr.errors),
+                                        recommendation=(
+                                            "Hard validation failure — AI "
+                                            "recovery could not resolve."
+                                        ),
+                                    )
+                                    return state
 
                     # --- log step result ---
                     self._log_step_result(step, result, duration_ms)
