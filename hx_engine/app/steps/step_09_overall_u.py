@@ -52,14 +52,27 @@ def _resolve_material(
 ) -> tuple[str, float, str, float]:
     """Resolve tube wall material and thermal conductivity.
 
-    Returns (material_name, k_wall_W_mK, source, confidence).
+    Returns (material_key, k_wall_W_mK, source, confidence).
+
+    *material_key* is always a canonical dict key (e.g. ``"carbon_steel"``),
+    never a display label, so downstream steps can use it directly in
+    material property lookups.
 
     If k_wall is already on state (from prior iteration or AI correction),
     returns it without re-resolving. Otherwise falls back to stub defaults.
     """
+    from hx_engine.app.data.material_properties import resolve_material_key
+
     if state.k_wall_W_mK is not None:
+        # Normalise whatever is stored on state to a canonical key
+        try:
+            mat = resolve_material_key(
+                state.tube_material or _STUB_DEFAULT_MATERIAL
+            )
+        except KeyError:
+            mat = _STUB_DEFAULT_MATERIAL
         return (
-            state.tube_material or _STUB_DEFAULT_LABEL,
+            mat,
             state.k_wall_W_mK,
             state.k_wall_source or "prior_iteration",
             state.k_wall_confidence or 0.8,
@@ -68,11 +81,11 @@ def _resolve_material(
     # Check if tube_material was set by AI correction or user
     mat_key = state.tube_material or _STUB_DEFAULT_MATERIAL
     if mat_key in _DEFAULT_MATERIAL_K:
-        k_w, label = _DEFAULT_MATERIAL_K[mat_key]
-        return label, k_w, "stub_default", 0.7
+        k_w, _label = _DEFAULT_MATERIAL_K[mat_key]
+        return mat_key, k_w, "stub_default", 0.7
     else:
         # Unknown material — use carbon steel + low confidence
-        return _STUB_DEFAULT_LABEL, _STUB_DEFAULT_K, "stub_default", 0.5
+        return _STUB_DEFAULT_MATERIAL, _STUB_DEFAULT_K, "stub_default", 0.5
 
 
 class Step09OverallU(BaseStep):

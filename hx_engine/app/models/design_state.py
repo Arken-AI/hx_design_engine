@@ -428,6 +428,10 @@ class DesignState(BaseModel):
     nozzle_id_shell_m: Optional[float] = None
     rho_v2_tube_nozzle: Optional[float] = None
     rho_v2_shell_nozzle: Optional[float] = None
+    n_nozzles_tube: int = 1
+    n_nozzles_shell: int = 1
+    nozzle_auto_corrected_tube: bool = False
+    nozzle_auto_corrected_shell: bool = False
     dP_shell_simplified_delaware_Pa: Optional[float] = None
     dP_shell_kern_Pa: Optional[float] = None
     dP_shell_bell_vs_kern_pct: Optional[float] = None
@@ -449,6 +453,17 @@ class DesignState(BaseModel):
     vibration_safe: Optional[bool] = None
     vibration_details: Optional[dict] = None
 
+    # --- mechanical design check (populated by Step 14) ---
+    tube_thickness_ok: Optional[bool] = None
+    shell_thickness_ok: Optional[bool] = None
+    expansion_mm: Optional[float] = None
+    mechanical_details: Optional[dict] = None
+    shell_material: Optional[str] = None
+
+    # --- cost estimate (populated by Step 15) ---
+    cost_usd: Optional[float] = None
+    cost_breakdown: Optional[dict] = None
+
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
@@ -465,8 +480,11 @@ class DesignState(BaseModel):
     # steps so the reviewer can reason across multiple steps.
     review_notes: list[str] = Field(default_factory=list)
 
-    # --- confidence breakdown (populated by Step 16) ---
+    # --- Step 16: Final Validation ---
+    confidence_score: Optional[float] = None
     confidence_breakdown: Optional[dict[str, float]] = None
+    design_summary: Optional[str] = None
+    assumptions: list[str] = Field(default_factory=list)
 
     # --- shell ID finalisation flag (FE-4) ---
     # False for floating-head types (AES/AEU) until Step 15 applies the

@@ -84,6 +84,10 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     "nozzle_id_shell_m": "nozzle_id_shell_m",
     "rho_v2_tube_nozzle": "rho_v2_tube_nozzle",
     "rho_v2_shell_nozzle": "rho_v2_shell_nozzle",
+    "n_nozzles_tube": "n_nozzles_tube",
+    "n_nozzles_shell": "n_nozzles_shell",
+    "nozzle_auto_corrected_tube": "nozzle_auto_corrected_tube",
+    "nozzle_auto_corrected_shell": "nozzle_auto_corrected_shell",
     "dP_shell_simplified_delaware_Pa": "dP_shell_simplified_delaware_Pa",
     "dP_shell_kern_Pa": "dP_shell_kern_Pa",
     "dP_shell_bell_vs_kern_pct": "dP_shell_bell_vs_kern_pct",
@@ -99,6 +103,13 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     # Step 13 vibration check
     "vibration_safe": "vibration_safe",
     "vibration_details": "vibration_details",
+    # Step 16 final validation
+    "confidence_score": "confidence_score",
+    "confidence_breakdown": "confidence_breakdown",
+    "design_summary": "design_summary",
+    "assumptions": "assumptions",
+    "design_strengths": "design_strengths",
+    "design_risks": "design_risks",
 }
 
 

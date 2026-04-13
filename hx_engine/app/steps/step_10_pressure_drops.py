@@ -25,6 +25,7 @@ from hx_engine.app.correlations.simplified_delaware_dp import (
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.data.nozzle_table import (
     get_default_nozzle_diameter_m,
+    get_next_larger_nozzle_diameter_m,
     nozzle_dP_Pa,
     nozzle_rho_v_squared,
 )
@@ -189,9 +190,47 @@ class Step10PressureDrops(BaseStep):
 
         # 3d. Nozzle losses (tube-side)
         nozzle_id_tube = get_default_nozzle_diameter_m(g.shell_diameter_m)
+        n_nozzles_tube = 1
+        nozzle_auto_corrected_tube = False
+        original_nozzle_id_tube = nozzle_id_tube
+
         # Inlet + outlet nozzle combined: K ≈ 1.0 each → 2 × nozzle_dP
-        dP_tube_nozzle = 2.0 * nozzle_dP_Pa(m_dot_tube, rho_t, nozzle_id_tube)
-        rho_v2_tube = nozzle_rho_v_squared(m_dot_tube, rho_t, nozzle_id_tube)
+        dP_tube_nozzle = 2.0 * nozzle_dP_Pa(m_dot_tube, rho_t, nozzle_id_tube, n_nozzles_tube)
+        rho_v2_tube = nozzle_rho_v_squared(m_dot_tube, rho_t, nozzle_id_tube, n_nozzles_tube)
+
+        # Auto-correct: upsize nozzle if ρv² exceeds TEMA limit
+        if rho_v2_tube > _RHO_V2_LIMIT:
+            # Strategy 1: try next larger Schedule 40 nozzle sizes
+            candidate = nozzle_id_tube
+            while rho_v2_tube > _RHO_V2_LIMIT:
+                bigger = get_next_larger_nozzle_diameter_m(candidate)
+                if bigger is None:
+                    break  # exhausted single-nozzle sizes
+                candidate = bigger
+                rho_v2_tube = nozzle_rho_v_squared(m_dot_tube, rho_t, candidate, 1)
+
+            if rho_v2_tube <= _RHO_V2_LIMIT:
+                nozzle_id_tube = candidate
+                nozzle_auto_corrected_tube = True
+            else:
+                # Strategy 2: use dual nozzles with the largest available size
+                n_nozzles_tube = 2
+                rho_v2_tube = nozzle_rho_v_squared(m_dot_tube, rho_t, candidate, n_nozzles_tube)
+                nozzle_id_tube = candidate
+                nozzle_auto_corrected_tube = True
+
+            if nozzle_auto_corrected_tube:
+                dP_tube_nozzle = 2.0 * nozzle_dP_Pa(m_dot_tube, rho_t, nozzle_id_tube, n_nozzles_tube)
+                correction_desc = (
+                    f"nozzle upsized {original_nozzle_id_tube*1000:.1f}→{nozzle_id_tube*1000:.1f} mm"
+                )
+                if n_nozzles_tube > 1:
+                    correction_desc += f" × {n_nozzles_tube} nozzles"
+                warnings.append(
+                    f"Tube nozzle ρv² exceeded TEMA limit ({_RHO_V2_LIMIT:.0f} kg/m·s²) — "
+                    f"auto-corrected: {correction_desc} "
+                    f"(ρv² now {rho_v2_tube:.0f} kg/m·s²)"
+                )
 
         # 3e. Total tube-side ΔP
         dP_tube_total = dP_tube_friction + dP_tube_minor + dP_tube_nozzle
@@ -255,8 +294,44 @@ class Step10PressureDrops(BaseStep):
 
         # Shell nozzle losses
         nozzle_id_shell = get_default_nozzle_diameter_m(g.shell_diameter_m)
-        dP_shell_nozzle = 2.0 * nozzle_dP_Pa(m_dot_shell, rho_s, nozzle_id_shell)
-        rho_v2_shell = nozzle_rho_v_squared(m_dot_shell, rho_s, nozzle_id_shell)
+        n_nozzles_shell = 1
+        nozzle_auto_corrected_shell = False
+        original_nozzle_id_shell = nozzle_id_shell
+
+        dP_shell_nozzle = 2.0 * nozzle_dP_Pa(m_dot_shell, rho_s, nozzle_id_shell, n_nozzles_shell)
+        rho_v2_shell = nozzle_rho_v_squared(m_dot_shell, rho_s, nozzle_id_shell, n_nozzles_shell)
+
+        # Auto-correct: upsize nozzle if ρv² exceeds TEMA limit
+        if rho_v2_shell > _RHO_V2_LIMIT:
+            candidate = nozzle_id_shell
+            while rho_v2_shell > _RHO_V2_LIMIT:
+                bigger = get_next_larger_nozzle_diameter_m(candidate)
+                if bigger is None:
+                    break
+                candidate = bigger
+                rho_v2_shell = nozzle_rho_v_squared(m_dot_shell, rho_s, candidate, 1)
+
+            if rho_v2_shell <= _RHO_V2_LIMIT:
+                nozzle_id_shell = candidate
+                nozzle_auto_corrected_shell = True
+            else:
+                n_nozzles_shell = 2
+                rho_v2_shell = nozzle_rho_v_squared(m_dot_shell, rho_s, candidate, n_nozzles_shell)
+                nozzle_id_shell = candidate
+                nozzle_auto_corrected_shell = True
+
+            if nozzle_auto_corrected_shell:
+                dP_shell_nozzle = 2.0 * nozzle_dP_Pa(m_dot_shell, rho_s, nozzle_id_shell, n_nozzles_shell)
+                correction_desc = (
+                    f"nozzle upsized {original_nozzle_id_shell*1000:.1f}→{nozzle_id_shell*1000:.1f} mm"
+                )
+                if n_nozzles_shell > 1:
+                    correction_desc += f" × {n_nozzles_shell} nozzles"
+                warnings.append(
+                    f"Shell nozzle ρv² exceeded TEMA limit ({_RHO_V2_LIMIT:.0f} kg/m·s²) — "
+                    f"auto-corrected: {correction_desc} "
+                    f"(ρv² now {rho_v2_shell:.0f} kg/m·s²)"
+                )
 
         dP_shell_total = bell_result["dP_shell_Pa"] + dP_shell_nozzle
 
@@ -370,6 +445,10 @@ class Step10PressureDrops(BaseStep):
         state.dP_shell_simplified_delaware_Pa = dP_shell_sd
         state.dP_shell_kern_Pa = dP_kern
         state.dP_shell_bell_vs_kern_pct = bell_vs_kern_pct
+        state.n_nozzles_tube = n_nozzles_tube
+        state.n_nozzles_shell = n_nozzles_shell
+        state.nozzle_auto_corrected_tube = nozzle_auto_corrected_tube
+        state.nozzle_auto_corrected_shell = nozzle_auto_corrected_shell
 
         # ── 8. Build outputs dict ─────────────────────────────────
         outputs: dict = {
@@ -391,6 +470,10 @@ class Step10PressureDrops(BaseStep):
             "dP_shell_simplified_delaware_Pa": dP_shell_sd,
             "dP_shell_kern_Pa": dP_kern,
             "dP_shell_bell_vs_kern_pct": bell_vs_kern_pct,
+            "n_nozzles_tube": n_nozzles_tube,
+            "n_nozzles_shell": n_nozzles_shell,
+            "nozzle_auto_corrected_tube": nozzle_auto_corrected_tube,
+            "nozzle_auto_corrected_shell": nozzle_auto_corrected_shell,
         }
 
         return StepResult(

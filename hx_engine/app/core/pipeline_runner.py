@@ -46,6 +46,9 @@ from hx_engine.app.steps.step_10_pressure_drops import Step10PressureDrops
 from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
 from hx_engine.app.steps.step_13_vibration import Step13VibrationCheck
+from hx_engine.app.steps.step_14_mechanical import Step14MechanicalCheck
+from hx_engine.app.steps.step_15_cost import Step15CostEstimate
+from hx_engine.app.steps.step_16_final_validation import Step16FinalValidation
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +420,24 @@ class PipelineRunner:
             if state.pipeline_status == "running":
                 state = await self._run_post_convergence_step(
                     state, session_id, Step13VibrationCheck(),
+                )
+
+            # --- Step 14: Mechanical Design Check (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step14MechanicalCheck(),
+                )
+
+            # --- Step 15: Cost Estimate (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step15CostEstimate(),
+                )
+
+            # --- Step 16: Final Validation + Confidence Score (post-convergence) ---
+            if state.pipeline_status == "running":
+                state = await self._run_post_convergence_step(
+                    state, session_id, Step16FinalValidation(),
                 )
 
             # --- pipeline complete ---
@@ -1090,4 +1111,16 @@ class PipelineRunner:
             "warnings": state.warnings,
             "notes": state.notes,
             "geometry": state.geometry.model_dump() if state.geometry else None,
+            # Step 16: Final Validation
+            "confidence_score": state.confidence_score,
+            "confidence_breakdown": state.confidence_breakdown,
+            "design_summary": state.design_summary,
+            # Post-convergence results
+            "vibration_safe": state.vibration_safe,
+            "tube_thickness_ok": state.tube_thickness_ok,
+            "shell_thickness_ok": state.shell_thickness_ok,
+            "cost_usd": state.cost_usd,
+            "overdesign_pct": state.overdesign_pct,
+            "design_strengths": state.design_strengths,
+            "design_risks": state.design_risks,
         }

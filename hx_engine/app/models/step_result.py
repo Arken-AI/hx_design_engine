@@ -82,6 +82,14 @@ class AIReview(BaseModel):
     attempts: list[AttemptRecord] = Field(default_factory=list)  # diagnostic trail
     ai_called: bool = False
 
+    # --- Step 16 extras (only populated for final-validation review) ---
+    design_summary: Optional[str] = None
+    assumptions: list[str] = Field(default_factory=list)
+    design_strengths: list[str] = Field(default_factory=list)
+    design_risks: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    user_summary: Optional[str] = None
+
 
 # ---------------------------------------------------------------------------
 # StepResult
