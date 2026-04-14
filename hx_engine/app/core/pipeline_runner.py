@@ -74,6 +74,34 @@ USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
 # (shorter than ESCALATE — auto-proceeds with current values on timeout)
 WARNING_PAUSE_TIMEOUT = 120
 
+# Phrases in escalation-option text or user free-text that signal the user
+# wants to abandon this design path entirely.  Matched case-insensitively
+# against the full option text that was selected (or the user's typed input).
+_TERMINATION_PHRASES = (
+    "terminate",
+    "flag design as impractical",
+    "flag as impractical",
+    "not viable",
+    "impractical",
+    "abort design",
+    "abandon",
+    "no further steps",
+    "cannot proceed",
+    "stop design",
+    "recommend plate",
+    "recommend double-pipe",
+    "recommend a plate",
+    "recommend a double-pipe",
+    "use a plate",
+    "use a double-pipe",
+)
+
+
+def _is_termination_intent(text: str) -> bool:
+    """Return True if *text* signals the user wants to terminate this design path."""
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
+
 
 def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
     """Re-fetch fluid properties for the shell-side fluid at the mean shell temperature.
@@ -322,6 +350,42 @@ class PipelineRunner:
                             "user_chose": user_response_text or "(no text — accepted recommendation)",
                         })
 
+                        # --- Check for user-initiated termination ---
+                        # If the user's choice signals that this design path
+                        # should be abandoned (e.g. "flag as impractical",
+                        # "terminate", "recommend plate exchanger"), halt
+                        # the pipeline gracefully instead of re-running the step.
+                        if _is_termination_intent(user_response_text or ""):
+                            termination_msg = (
+                                f"Design terminated at Step {step.step_id} "
+                                f"({step.step_name}) by user decision: "
+                                f"{user_response_text!r}."
+                            )
+                            state.pipeline_status = "terminated"
+                            state.termination_reason = termination_msg
+                            logger.info(
+                                "[TERMINATE] %s", termination_msg,
+                            )
+                            await self.sse_manager.emit(
+                                session_id,
+                                StepErrorEvent(
+                                    session_id=session_id,
+                                    step_id=step.step_id,
+                                    step_name=step.step_name,
+                                    message=termination_msg,
+                                    observation=(
+                                        result.ai_review.reasoning
+                                        or "Design path not viable."
+                                    ),
+                                    recommendation=(
+                                        result.ai_review.recommendation
+                                        or "Consider an alternative exchanger type."
+                                    ),
+                                ).model_dump(mode="json"),
+                            )
+                            await self.session_store.save(session_id, state)
+                            return state
+
                         # Refresh heartbeat — it may have expired while waiting
                         await self.session_store.heartbeat(session_id)
 
@@ -358,13 +422,45 @@ class PipelineRunner:
                         warning_pause_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        updated_state, _ = await self._wait_for_user(
+                        updated_state, warn_response_text = await self._wait_for_user(
                             session_id, state, step, result,
                             timeout=WARNING_PAUSE_TIMEOUT,
                             on_timeout="proceed",
                         )
                         state = updated_state
                         state.waiting_for_user = False
+
+                        # --- Check for user-initiated termination ---
+                        if _is_termination_intent(warn_response_text or ""):
+                            termination_msg = (
+                                f"Design terminated at Step {step.step_id} "
+                                f"({step.step_name}) by user decision: "
+                                f"{warn_response_text!r}."
+                            )
+                            state.pipeline_status = "terminated"
+                            state.termination_reason = termination_msg
+                            logger.info(
+                                "[TERMINATE] %s", termination_msg,
+                            )
+                            await self.sse_manager.emit(
+                                session_id,
+                                StepErrorEvent(
+                                    session_id=session_id,
+                                    step_id=step.step_id,
+                                    step_name=step.step_name,
+                                    message=termination_msg,
+                                    observation=(
+                                        result.ai_review.reasoning
+                                        or "Design path not viable."
+                                    ),
+                                    recommendation=(
+                                        result.ai_review.recommendation
+                                        or "Consider an alternative exchanger type."
+                                    ),
+                                ).model_dump(mode="json"),
+                            )
+                            await self.session_store.save(session_id, state)
+                            return state
 
                         # Refresh heartbeat — it may have expired while waiting
                         await self.session_store.heartbeat(session_id)

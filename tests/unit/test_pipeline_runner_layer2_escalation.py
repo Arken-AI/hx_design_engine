@@ -34,6 +34,7 @@ from hx_engine.app.models.step_result import (
     StepResult,
 )
 from hx_engine.app.steps.base import BaseStep
+from hx_engine.app.core.pipeline_runner import _is_termination_intent
 
 
 # ===================================================================
@@ -661,3 +662,393 @@ class TestStep7EscalationOptionHandling:
         # Assert: geometry modified
         assert base_state.geometry.n_tubes == 100
         assert base_state.geometry.n_passes == 2
+
+
+# ===================================================================
+# Phase 4 Tests: Termination Intent Detection
+# ===================================================================
+
+class TestTerminationIntentDetection:
+    """Unit tests for _is_termination_intent — phrase matching logic."""
+
+    def test_flag_design_as_impractical(self):
+        """Option text 'Flag design as impractical...' triggers termination."""
+        text = "Flag design as impractical and recommend plate or double-pipe exchanger to the user"
+        assert _is_termination_intent(text) is True
+
+    def test_terminate_keyword(self):
+        """Text containing 'terminate' triggers termination."""
+        assert _is_termination_intent("Terminate this shell-and-tube design path entirely") is True
+
+    def test_not_viable(self):
+        """Text containing 'not viable' triggers termination."""
+        assert _is_termination_intent("This design is not viable for S&T") is True
+
+    def test_recommend_plate(self):
+        """Text containing 'recommend plate' triggers termination."""
+        assert _is_termination_intent("Recommend plate exchanger for this duty") is True
+
+    def test_recommend_double_pipe(self):
+        """Text containing 'recommend double-pipe' triggers termination."""
+        assert _is_termination_intent("recommend double-pipe exchanger instead") is True
+
+    def test_abort_design(self):
+        """Text containing 'abort design' triggers termination."""
+        assert _is_termination_intent("abort design and start over") is True
+
+    def test_no_further_steps(self):
+        """Text containing 'no further steps' triggers termination."""
+        text = "no further steps possible"
+        assert _is_termination_intent(text) is True
+
+    def test_case_insensitive(self):
+        """Termination detection is case-insensitive."""
+        assert _is_termination_intent("FLAG DESIGN AS IMPRACTICAL") is True
+        assert _is_termination_intent("Terminate This Design") is True
+
+    def test_normal_override_not_termination(self):
+        """Normal override text like 'swap fluid' is NOT termination."""
+        assert _is_termination_intent("swap fluid allocation") is False
+
+    def test_proceed_not_termination(self):
+        """Text like 'proceed with minimum TEMA' is NOT termination."""
+        assert _is_termination_intent("proceed with minimum TEMA shell geometry") is False
+
+    def test_empty_string_not_termination(self):
+        """Empty string is NOT termination."""
+        assert _is_termination_intent("") is False
+
+    def test_accept_not_termination(self):
+        """Acceptance phrases are NOT termination."""
+        assert _is_termination_intent("yes, go ahead") is False
+        assert _is_termination_intent("accept") is False
+
+
+# ===================================================================
+# Phase 5 Tests: Pipeline Termination via Escalation Response
+# ===================================================================
+
+class TestEscalationTerminatesDesign:
+    """User picks a termination option during ESCALATE → pipeline stops."""
+
+    @pytest.mark.asyncio
+    async def test_escalation_response_terminates_pipeline(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """When user responds with 'flag as impractical', pipeline terminates."""
+        # Arrange: step always returns ESCALATE
+        escalate_review = _make_escalate_review(
+            reasoning="Duty too small for S&T — only 292 W",
+            options=[
+                "Flag design as impractical and recommend plate or double-pipe exchanger",
+                "Proceed with minimum TEMA shell geometry",
+            ],
+        )
+        result_escalated = StepResult(
+            step_id=6, step_name="Initial U",
+            outputs={"U_W_m2K": 500},
+            ai_review=escalate_review,
+        )
+        mock_step = MockStep(result_escalated)
+        mock_step.step_id = 6
+        mock_step.step_name = "Initial U"
+
+        passed_vr = _make_validation_result(passed=True)
+
+        # User selects option A: "Flag design as impractical..."
+        def _termination_future(_sid):
+            fut = asyncio.Future()
+            fut.set_result({
+                "type": "override",
+                "values": {
+                    "user_input": "Flag design as impractical and recommend plate or double-pipe exchanger",
+                    "option_index": 0,
+                },
+            })
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(side_effect=_termination_future)
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=passed_vr,
+        ):
+            state = await pipeline_runner.run(base_state)
+
+        # Assert: pipeline terminated, NOT error
+        assert state.pipeline_status == "terminated"
+        assert state.termination_reason is not None
+        assert "Step 6" in state.termination_reason
+
+    @pytest.mark.asyncio
+    async def test_termination_emits_step_error_event(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """Termination emits step_error SSE event with the reason."""
+        escalate_review = _make_escalate_review(
+            reasoning="292 W duty is impractical for S&T",
+            options=["Terminate this design path entirely", "Proceed anyway"],
+        )
+        result_escalated = StepResult(
+            step_id=6, step_name="Initial U",
+            outputs={},
+            ai_review=escalate_review,
+        )
+        mock_step = MockStep(result_escalated)
+        mock_step.step_id = 6
+        mock_step.step_name = "Initial U"
+
+        passed_vr = _make_validation_result(passed=True)
+
+        def _termination_future(_sid):
+            fut = asyncio.Future()
+            fut.set_result({
+                "type": "override",
+                "values": {
+                    "user_input": "Terminate this design path entirely",
+                    "option_index": 0,
+                },
+            })
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(side_effect=_termination_future)
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=passed_vr,
+        ):
+            await pipeline_runner.run(base_state)
+
+        event_types = _get_emitted_event_types(mock_sse_manager)
+        assert "step_error" in event_types
+        # The step_error should contain termination details
+        error_events = [
+            e for e in mock_sse_manager.emitted_events
+            if isinstance(e, dict) and e.get("event_type") == "step_error"
+        ]
+        assert len(error_events) == 1
+        assert "terminated" in error_events[0].get("message", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_non_termination_response_continues_pipeline(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """When user picks a non-termination option, pipeline re-runs the step."""
+        # First call: ESCALATE; second call after user response: PROCEED
+        call_count = 0
+        proceed_review = _make_proceed_review(confidence=0.85)
+        escalate_review = _make_escalate_review(
+            options=["Proceed with minimum geometry", "Swap fluids"],
+        )
+
+        class FlipStep(BaseStep):
+            step_id = 6
+            step_name = "Initial U"
+            ai_mode = AIModeEnum.FULL
+
+            async def execute(self, state):
+                return StepResult(step_id=6, step_name="Initial U", outputs={})
+
+            async def run_with_review_loop(self, state, ai_engineer):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return StepResult(
+                        step_id=6, step_name="Initial U",
+                        outputs={}, ai_review=escalate_review,
+                    )
+                return StepResult(
+                    step_id=6, step_name="Initial U",
+                    outputs={}, ai_review=proceed_review,
+                )
+
+        passed_vr = _make_validation_result(passed=True)
+
+        def _non_termination_future(_sid):
+            fut = asyncio.Future()
+            fut.set_result({
+                "type": "override",
+                "values": {
+                    "user_input": "Proceed with minimum geometry",
+                    "option_index": 0,
+                },
+            })
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(
+            side_effect=_non_termination_future,
+        )
+
+        async def _noop_post(state, session_id, step=None):
+            return state
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [FlipStep],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=passed_vr,
+        ), patch.object(
+            pipeline_runner, "_run_convergence_loop", return_value=base_state,
+        ), patch.object(
+            pipeline_runner, "_run_post_convergence_step", side_effect=_noop_post,
+        ):
+            state = await pipeline_runner.run(base_state)
+
+        # Pipeline should NOT be terminated — it should complete
+        assert state.pipeline_status == "completed"
+        assert state.termination_reason is None
+        assert call_count == 2  # step ran twice: escalate then proceed
+
+
+class TestWarningTerminatesDesign:
+    """User picks a termination option during actionable WARNING → pipeline stops."""
+
+    @pytest.mark.asyncio
+    async def test_warning_response_terminates_pipeline(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """When user responds with 'impractical' to a warning, pipeline terminates."""
+        warn_review = AIReview(
+            decision=AIDecisionEnum.WARN,
+            confidence=0.6,
+            reasoning="292 W duty is grossly overdesigned for smallest TEMA shell",
+            options=[
+                "Flag design as impractical and recommend plate exchanger",
+                "Proceed with minimum TEMA shell geometry and document overdesign",
+            ],
+            ai_called=True,
+        )
+        result_warned = StepResult(
+            step_id=6, step_name="Tube Layout",
+            outputs={"U_W_m2K": 500},
+            ai_review=warn_review,
+        )
+        mock_step = MockStep(result_warned)
+        mock_step.step_id = 6
+        mock_step.step_name = "Tube Layout"
+
+        passed_vr = _make_validation_result(passed=True)
+
+        # User selects the impractical option
+        def _termination_future(_sid):
+            fut = asyncio.Future()
+            fut.set_result({
+                "type": "override",
+                "values": {
+                    "user_input": "Flag design as impractical and recommend plate exchanger",
+                    "option_index": 0,
+                },
+            })
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(side_effect=_termination_future)
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=passed_vr,
+        ):
+            state = await pipeline_runner.run(base_state)
+
+        assert state.pipeline_status == "terminated"
+        assert state.termination_reason is not None
+        assert "Step 6" in state.termination_reason
+
+    @pytest.mark.asyncio
+    async def test_warning_non_termination_continues(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+    ):
+        """When user picks a non-termination warning option, step re-runs."""
+        call_count = 0
+        proceed_review = _make_proceed_review(confidence=0.85)
+        warn_review = AIReview(
+            decision=AIDecisionEnum.WARN,
+            confidence=0.6,
+            reasoning="Overdesigned but acceptable",
+            options=["Proceed with overdesign noted", "Try smaller geometry"],
+            ai_called=True,
+        )
+
+        class FlipWarnStep(BaseStep):
+            step_id = 6
+            step_name = "Tube Layout"
+            ai_mode = AIModeEnum.FULL
+
+            async def execute(self, state):
+                return StepResult(step_id=6, step_name="Tube Layout", outputs={})
+
+            async def run_with_review_loop(self, state, ai_engineer):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return StepResult(
+                        step_id=6, step_name="Tube Layout",
+                        outputs={}, ai_review=warn_review,
+                    )
+                return StepResult(
+                    step_id=6, step_name="Tube Layout",
+                    outputs={}, ai_review=proceed_review,
+                )
+
+        passed_vr = _make_validation_result(passed=True)
+
+        def _non_termination_future(_sid):
+            fut = asyncio.Future()
+            fut.set_result({
+                "type": "override",
+                "values": {
+                    "user_input": "Proceed with overdesign noted",
+                    "option_index": 0,
+                },
+            })
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(
+            side_effect=_non_termination_future,
+        )
+
+        async def _noop_post(state, session_id, step=None):
+            return state
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [FlipWarnStep],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=passed_vr,
+        ), patch.object(
+            pipeline_runner, "_run_convergence_loop", return_value=base_state,
+        ), patch.object(
+            pipeline_runner, "_run_post_convergence_step", side_effect=_noop_post,
+        ):
+            state = await pipeline_runner.run(base_state)
+
+        assert state.pipeline_status == "completed"
+        assert state.termination_reason is None
+        assert call_count == 2
+
+
+class TestDesignStateTerminationField:
+    """Verify the termination_reason field on DesignState."""
+
+    def test_default_termination_reason_is_none(self):
+        """DesignState.termination_reason defaults to None."""
+        state = DesignState(session_id="test-123")
+        assert state.termination_reason is None
+
+    def test_terminated_status_is_valid(self):
+        """'terminated' is an acceptable pipeline_status value."""
+        state = DesignState(session_id="test-123")
+        state.pipeline_status = "terminated"
+        state.termination_reason = "User chose to abandon S&T design"
+        assert state.pipeline_status == "terminated"
+        assert state.termination_reason is not None

@@ -467,13 +467,18 @@ class DesignState(BaseModel):
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
-    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "error" | "cancelled"
+    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "error" | "cancelled" | "terminated"
     step_records: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     waiting_for_user: bool = False
     in_convergence_loop: bool = False
     is_complete: bool = False
+
+    # --- pipeline termination (set when user chooses to stop the design) ---
+    # Populated when the user's escalation response signals that this design
+    # path should be abandoned (e.g. "flag as impractical", "terminate").
+    termination_reason: Optional[str] = None
 
     # --- AI cross-step observations (populated by base.py after each review) ---
     # Each entry is a short note from the AI engineer, forwarded to downstream
