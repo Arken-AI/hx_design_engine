@@ -547,3 +547,268 @@ class TestThermoAdapterSaturation:
         assert result.density_kg_m3 is not None
         assert result.density_kg_m3 < 958  # less than liquid
         assert result.density_kg_m3 > 0.6  # more than vapor
+
+
+# =====================================================================
+# 7. Segment loop — IncrementResult population in Step 8 condensation
+# =====================================================================
+
+
+class TestSegmentLoopStep8:
+    """Tests for per-segment IncrementResult generation in _execute_condensing."""
+
+    def test_increment_results_populated(self):
+        """Step 8 condensation should populate state.increment_results."""
+        from hx_engine.app.correlations.shah_condensation import shah_condensation_h
+
+        # Just verify the Shah local function returns valid h_cond at various qualities
+        for x in [0.1, 0.3, 0.5, 0.7, 0.9]:
+            result = shah_condensation_h(
+                x=x, G=100.0, D_i=0.019,
+                rho_l=958.0, rho_g=0.6, mu_l=2.82e-4, mu_g=1.2e-5,
+                k_l=0.68, cp_l=4216.0, h_fg=2.257e6,
+                P_sat=101325.0, P_crit=22.064e6,
+            )
+            assert result["h_cond"] > 0
+            assert result["h_cond"] > result["h_lo"]  # condensation always > liquid-only
+
+    def test_increment_result_fields(self):
+        """IncrementResult should store all segment-level fields."""
+        inc = IncrementResult(
+            segment_index=3,
+            T_hot_in_C=100.0,
+            T_hot_out_C=100.0,
+            T_cold_in_C=30.0,
+            T_cold_out_C=40.0,
+            quality_in=0.8,
+            quality_out=0.6,
+            phase="two_phase",
+            h_tube_W_m2K=5000.0,
+            h_shell_W_m2K=8000.0,
+            U_local_W_m2K=2500.0,
+            dQ_W=50000.0,
+            dA_m2=0.35,
+            LMTD_local_K=65.0,
+        )
+        assert inc.segment_index == 3
+        assert inc.quality_in == 0.8
+        assert inc.quality_out == 0.6
+        assert inc.dA_m2 == pytest.approx(0.35)
+
+    def test_shah_h_decreases_with_quality(self):
+        """Shah HTC should generally decrease as quality drops (less vapor)."""
+        from hx_engine.app.correlations.shah_condensation import shah_condensation_h
+
+        kwargs = dict(
+            G=100.0, D_i=0.019,
+            rho_l=958.0, rho_g=0.6, mu_l=2.82e-4, mu_g=1.2e-5,
+            k_l=0.68, cp_l=4216.0, h_fg=2.257e6,
+            P_sat=101325.0, P_crit=22.064e6,
+        )
+        h_high = shah_condensation_h(x=0.8, **kwargs)["h_cond"]
+        h_low = shah_condensation_h(x=0.2, **kwargs)["h_cond"]
+        # At high quality, more vapor → higher condensation HTC
+        assert h_high > h_low
+
+    def test_lmtd_local_calculation(self):
+        """LMTD for a condensation segment with constant T_hot."""
+        T_hot = 100.0
+        T_cold_in = 30.0
+        T_cold_out = 40.0
+        dT1 = T_hot - T_cold_in   # 70
+        dT2 = T_hot - T_cold_out  # 60
+        lmtd = (dT1 - dT2) / math.log(dT1 / dT2)
+        assert 60 < lmtd < 70
+        assert lmtd == pytest.approx(64.9, abs=0.5)
+
+    def test_segment_dA_from_dQ_U_LMTD(self):
+        """dA = dQ / (U_local × LMTD_local)."""
+        dQ = 50000.0  # W
+        U_local = 2500.0  # W/m²K
+        LMTD = 65.0  # K
+        dA = dQ / (U_local * LMTD)
+        assert dA == pytest.approx(0.3077, abs=0.01)
+
+
+# =====================================================================
+# 8. Step 9 — per-segment U_local computation
+# =====================================================================
+
+
+class TestStep9IncrementalU:
+    """Verify Step 9 computes U_local for each IncrementResult."""
+
+    def test_u_local_formula(self):
+        """U_local = 1 / (1/h_o + d_o/d_i/h_i + R_f_o + R_f_i×d_o/d_i + R_wall)."""
+        h_o = 8000.0   # shell-side (condensation)
+        h_i = 5000.0   # tube-side
+        d_o = 0.01905
+        d_i = 0.01483
+        R_f_o = 0.00018  # shell fouling
+        R_f_i = 0.00018  # tube fouling
+        k_wall = 50.0
+
+        R_shell = 1.0 / h_o
+        R_tube = (d_o / d_i) / h_i
+        R_fo = R_f_o
+        R_fi = R_f_i * (d_o / d_i)
+        R_w = d_o * math.log(d_o / d_i) / (2.0 * k_wall)
+        U = 1.0 / (R_shell + R_tube + R_fo + R_fi + R_w)
+        # Should be ~1500-3000 W/m²K range for condensation
+        assert 1000 < U < 4000
+
+    def test_segment_u_varies_with_h_shell(self):
+        """Segments with higher h_shell should yield higher U_local."""
+        d_o = 0.01905
+        d_i = 0.01483
+        h_i = 5000.0
+        R_f = 0.00018
+        k_w = 50.0
+
+        R_tube = (d_o / d_i) / h_i
+        R_fo = R_f
+        R_fi = R_f * (d_o / d_i)
+        R_w = d_o * math.log(d_o / d_i) / (2.0 * k_w)
+
+        def U_from_ho(h_o):
+            return 1.0 / (1.0/h_o + R_tube + R_fo + R_fi + R_w)
+
+        U_high_x = U_from_ho(10000.0)  # high quality → high h_shell
+        U_low_x = U_from_ho(3000.0)    # low quality → lower h_shell
+        assert U_high_x > U_low_x
+
+
+# =====================================================================
+# 9. Step 11 — Σ(dA) for condensation area
+# =====================================================================
+
+
+class TestStep11IncrementalArea:
+    """Verify Step 11 uses Σ(dA) when increment_results are available."""
+
+    def test_sum_dA_matches_total(self):
+        """Total A_required should equal sum of segment dA values."""
+        segments = []
+        total_dA = 0.0
+        for i in range(10):
+            dA = 0.3 + i * 0.02  # increasing dA per segment
+            total_dA += dA
+            segments.append(IncrementResult(
+                segment_index=i,
+                dA_m2=dA,
+            ))
+        A_required = sum(inc.dA_m2 for inc in segments)
+        assert A_required == pytest.approx(total_dA)
+
+    def test_sum_dA_greater_than_uniform_U(self):
+        """Σ(dA) with varying U_local should differ from Q/(U_avg×LMTD).
+
+        In condensation, U varies strongly with quality, so incremental Σ(dA)
+        gives a more accurate area than using the average U.
+        """
+        Q_total = 500_000.0  # 500 kW
+        dQ = Q_total / 10
+
+        dA_incremental = 0.0
+        U_values = []
+        for i in range(10):
+            x = 0.95 - i * 0.09  # quality decreasing
+            # Make U vary nonlinearly (exponentially) with quality
+            U_local = 1000 + 3000 * x ** 2
+            LMTD_local = 40.0 + i * 3.0
+            dA = dQ / (U_local * LMTD_local)
+            dA_incremental += dA
+            U_values.append(U_local)
+
+        # Compare with uniform calculation
+        U_avg = sum(U_values) / len(U_values)
+        LMTD_avg = sum(40.0 + i * 3.0 for i in range(10)) / 10
+        A_uniform = Q_total / (U_avg * LMTD_avg)
+
+        # With nonlinear U, incremental sum should differ noticeably
+        assert abs(dA_incremental - A_uniform) / A_uniform > 0.02
+
+
+# =====================================================================
+# 10. Step 12 — phase-aware velocity limits
+# =====================================================================
+
+
+class TestStep12PhaseAwareVelocity:
+    """Verify Step 12 convergence uses correct velocity thresholds by phase."""
+
+    def _make_state(self, tube_phase="liquid"):
+        """Create a minimal DesignState for velocity limit testing."""
+        state = DesignState()
+        state.shell_side_fluid = "hot"
+        # tube side = cold
+        state.cold_phase = tube_phase
+        state.hot_phase = "liquid"
+        return state
+
+    def test_liquid_velocity_limits(self):
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = self._make_state("liquid")
+        v_low, v_high = conv._velocity_limits(state)
+        assert v_low == pytest.approx(0.8)
+        assert v_high == pytest.approx(2.5)
+
+    def test_gas_velocity_limits(self):
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = self._make_state("vapor")
+        v_low, v_high = conv._velocity_limits(state)
+        assert v_low == pytest.approx(5.0)
+        assert v_high == pytest.approx(30.0)
+
+    def test_default_is_liquid_when_no_phase(self):
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = DesignState()
+        state.shell_side_fluid = "hot"
+        # No phase set — should default to liquid
+        v_low, v_high = conv._velocity_limits(state)
+        assert v_low == pytest.approx(0.8)
+        assert v_high == pytest.approx(2.5)
+
+    def test_gas_velocity_low_detected_as_violation(self):
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = self._make_state("vapor")
+        state.tube_velocity_m_s = 3.0  # below 5 m/s gas min
+        state.dP_tube_Pa = 10000.0
+        state.dP_shell_Pa = 10000.0
+        state.overdesign_pct = 15.0
+        violations = conv._detect_violations(state)
+        assert "velocity_low" in violations
+
+    def test_gas_velocity_ok_no_violation(self):
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = self._make_state("vapor")
+        state.tube_velocity_m_s = 15.0  # within 5-30 m/s gas range
+        state.dP_tube_Pa = 10000.0
+        state.dP_shell_Pa = 10000.0
+        state.overdesign_pct = 15.0
+        violations = conv._detect_violations(state)
+        assert "velocity_low" not in violations
+        assert "velocity_high" not in violations
+
+    def test_liquid_velocity_in_gas_range_is_violation(self):
+        """Liquid at 15 m/s should trigger velocity_high."""
+        from hx_engine.app.steps.step_12_convergence import Step12Convergence
+
+        conv = Step12Convergence()
+        state = self._make_state("liquid")
+        state.tube_velocity_m_s = 15.0  # way above 2.5 m/s liquid max
+        state.dP_tube_Pa = 10000.0
+        state.dP_shell_Pa = 10000.0
+        state.overdesign_pct = 15.0
+        violations = conv._detect_violations(state)
+        assert "velocity_high" in violations

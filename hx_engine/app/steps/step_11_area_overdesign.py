@@ -114,10 +114,17 @@ class Step11AreaOverdesign(BaseStep):
                 f"required area would be infinite.",
             )
 
-        # 3. Compute A_required = Q / (U_dirty × F × LMTD)
-        A_required = state.Q_W / (
-            state.U_dirty_W_m2K * state.F_factor * state.LMTD_K
-        )
+        # 3. Compute A_required
+        #    For condensation with incremental results, use Σ(dA).
+        #    Otherwise: A_required = Q / (U_dirty × F × LMTD).
+        if state.increment_results and all(
+            inc.dA_m2 is not None for inc in state.increment_results
+        ):
+            A_required = sum(inc.dA_m2 for inc in state.increment_results)
+        else:
+            A_required = state.Q_W / (
+                state.U_dirty_W_m2K * state.F_factor * state.LMTD_K
+            )
 
         # 4. Compute A_provided = π × d_o × L × N_t
         A_provided = math.pi * g.tube_od_m * g.tube_length_m * g.n_tubes

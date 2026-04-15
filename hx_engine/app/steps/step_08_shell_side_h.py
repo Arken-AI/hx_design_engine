@@ -27,6 +27,7 @@ from hx_engine.app.correlations.bell_delaware import (
 from hx_engine.app.correlations.shah_condensation import (
     get_critical_pressure,
     shah_condensation_average_h,
+    shah_condensation_h,
 )
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.data.tema_tables import get_tema_clearances
@@ -600,6 +601,75 @@ class Step08ShellSideH(BaseStep):
 
         h_shell = shah_result["h_avg"]
         warnings.extend(shah_result["warnings"])
+
+        # ── Per-segment incremental results ───────────────────────
+        # Divide condenser into n_increments segments by quality.
+        # Each segment gets local h_shell, temperatures, LMTD, dQ.
+        from hx_engine.app.models.design_state import IncrementResult
+
+        n_inc = state.n_increments or 10
+        dx = (x_in - x_out) / n_inc
+        Q_total = state.Q_W or (m_dot * sat["h_fg"] * (x_in - x_out))
+        dQ_per_seg = Q_total / n_inc
+        h_tube = state.h_tube_W_m2K  # from Step 7 (single-phase tube side)
+
+        # Cold side (tube) temperature range — counterflow arrangement
+        T_cold_range = T_tube_out - T_tube_in
+        increment_results: list[IncrementResult] = []
+
+        for i in range(n_inc):
+            x_seg_in = x_in - i * dx
+            x_seg_out = x_in - (i + 1) * dx
+            x_mid = (x_seg_in + x_seg_out) / 2.0
+
+            # Local h_shell from Shah at midpoint quality
+            local_shah = shah_condensation_h(
+                x=x_mid, G=G_shell, D_i=tube_od_m,
+                rho_l=sat["rho_f"], rho_g=sat["rho_g"],
+                mu_l=sat["mu_f"], mu_g=sat["mu_g"],
+                k_l=sat["k_f"], cp_l=sat["cp_f"],
+                h_fg=sat["h_fg"], P_sat=P_eff, P_crit=P_crit,
+            )
+            h_shell_local = local_shah["h_cond"]
+
+            # Hot side: constant at T_sat during condensation zone
+            T_hot_seg = T_sat
+
+            # Cold side: counterflow — segment 0 is at the hot-fluid inlet
+            # (cold-fluid outlet), segment n-1 is at the hot-fluid outlet
+            # (cold-fluid inlet). Cold temperature is linear with cumulative Q.
+            frac_start = i / n_inc
+            frac_end = (i + 1) / n_inc
+            T_cold_seg_out = T_tube_out - frac_start * T_cold_range
+            T_cold_seg_in = T_tube_out - frac_end * T_cold_range
+
+            # Local LMTD for this segment
+            dT1 = T_hot_seg - T_cold_seg_in   # larger ΔT (cold is colder)
+            dT2 = T_hot_seg - T_cold_seg_out  # smaller ΔT (cold is hotter)
+
+            if dT1 > 0 and dT2 > 0 and abs(dT1 - dT2) > 0.01:
+                lmtd_local = (dT1 - dT2) / math.log(dT1 / dT2)
+            elif dT1 > 0 and dT2 > 0:
+                lmtd_local = (dT1 + dT2) / 2.0
+            else:
+                lmtd_local = max(abs(dT1), abs(dT2), 0.1)
+
+            increment_results.append(IncrementResult(
+                segment_index=i,
+                T_hot_in_C=T_hot_seg,
+                T_hot_out_C=T_hot_seg,
+                T_cold_in_C=T_cold_seg_in,
+                T_cold_out_C=T_cold_seg_out,
+                quality_in=x_seg_in,
+                quality_out=x_seg_out,
+                phase="two_phase" if x_mid > 0.01 else "liquid",
+                h_tube_W_m2K=h_tube,
+                h_shell_W_m2K=h_shell_local,
+                dQ_W=dQ_per_seg,
+                LMTD_local_K=lmtd_local,
+            ))
+
+        state.increment_results = increment_results
 
         # Write to state
         state.h_shell_W_m2K = h_shell

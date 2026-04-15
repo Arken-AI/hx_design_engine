@@ -254,6 +254,24 @@ class Step09OverallU(BaseStep):
                 (U_dirty - state.U_W_m2K) / state.U_W_m2K * 100.0
             )
 
+        # 11b. Per-segment U_local for incremental condensation
+        if state.increment_results:
+            for inc in state.increment_results:
+                h_shell_seg = inc.h_shell_W_m2K or h_o
+                h_tube_seg = inc.h_tube_W_m2K or h_i
+                R_shell_film_seg = 1.0 / h_shell_seg
+                R_tube_film_seg = (d_o / d_i) / h_tube_seg
+                total_seg = (
+                    R_shell_film_seg + R_tube_film_seg
+                    + R_shell_foul + R_tube_foul + R_wall
+                )
+                inc.U_local_W_m2K = 1.0 / total_seg
+                # Compute dA for each segment: dA = dQ / (U_local × LMTD)
+                if inc.dQ_W and inc.LMTD_local_K and inc.LMTD_local_K > 0:
+                    inc.dA_m2 = inc.dQ_W / (
+                        inc.U_local_W_m2K * inc.LMTD_local_K
+                    )
+
         # 12. Write results to state
         state.U_clean_W_m2K = U_clean
         state.U_dirty_W_m2K = U_dirty

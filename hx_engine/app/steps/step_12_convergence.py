@@ -79,8 +79,22 @@ class Step12Convergence:
     OVERDESIGN_HIGH: float = 25.0        # % maximum overdesign
     DP_TUBE_LIMIT: float = 70_000.0      # Pa (0.7 bar)
     DP_SHELL_LIMIT: float = 140_000.0    # Pa (1.4 bar)
-    VELOCITY_LOW: float = 0.8            # m/s
-    VELOCITY_HIGH: float = 2.5           # m/s
+    VELOCITY_LOW_LIQUID: float = 0.8     # m/s — liquid tube-side
+    VELOCITY_HIGH_LIQUID: float = 2.5    # m/s — liquid tube-side
+    VELOCITY_LOW_GAS: float = 5.0        # m/s — gas tube-side
+    VELOCITY_HIGH_GAS: float = 30.0      # m/s — gas tube-side
+
+    def _velocity_limits(self, state: "DesignState") -> tuple[float, float]:
+        """Return (v_low, v_high) based on tube-side phase."""
+        shell_side = getattr(state, "shell_side_fluid", None) or "hot"
+        tube_side = "cold" if shell_side == "hot" else "hot"
+        tube_phase = (
+            getattr(state, "hot_phase", None) if tube_side == "hot"
+            else getattr(state, "cold_phase", None)
+        ) or "liquid"
+        if tube_phase == "vapor":
+            return self.VELOCITY_LOW_GAS, self.VELOCITY_HIGH_GAS
+        return self.VELOCITY_LOW_LIQUID, self.VELOCITY_HIGH_LIQUID
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -253,7 +267,8 @@ class Step12Convergence:
             return False
         if state.tube_velocity_m_s is None:
             return False
-        if not (self.VELOCITY_LOW <= state.tube_velocity_m_s <= self.VELOCITY_HIGH):
+        v_low, v_high = self._velocity_limits(state)
+        if not (v_low <= state.tube_velocity_m_s <= v_high):
             return False
         return True
 
@@ -285,11 +300,12 @@ class Step12Convergence:
             elif state.overdesign_pct > self.OVERDESIGN_HIGH:
                 violations.append("overdesign")
 
-        # Priority 3: Velocity
+        # Priority 3: Velocity (phase-aware thresholds)
         if state.tube_velocity_m_s is not None:
-            if state.tube_velocity_m_s < self.VELOCITY_LOW:
+            v_low, v_high = self._velocity_limits(state)
+            if state.tube_velocity_m_s < v_low:
                 violations.append("velocity_low")
-            elif state.tube_velocity_m_s > self.VELOCITY_HIGH:
+            elif state.tube_velocity_m_s > v_high:
                 violations.append("velocity_high")
 
         return violations
