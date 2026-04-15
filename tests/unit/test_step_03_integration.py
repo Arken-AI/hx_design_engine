@@ -76,7 +76,7 @@ class TestIntegration:
     async def test_water_water_different_temps(self):
         """Water on both sides at different temps → two different FluidProperties."""
 
-        def _mock(fluid_name, T_mean_C, pressure_Pa=None):
+        async def _mock(fluid_name, T_mean_C, pressure_Pa=None):
             if T_mean_C > 80:
                 return _WATER_100
             return _WATER_45

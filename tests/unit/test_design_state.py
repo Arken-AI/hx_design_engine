@@ -99,7 +99,7 @@ class TestFluidProperties:
 
     def test_density_below_range(self):
         with pytest.raises(ValidationError, match="density_kg_m3"):
-            FluidProperties(density_kg_m3=10)
+            FluidProperties(density_kg_m3=0.001)
 
     def test_viscosity_above_range(self):
         with pytest.raises(ValidationError, match="viscosity_Pa_s"):

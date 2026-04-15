@@ -84,7 +84,7 @@ class TestBuildSystemPrompt:
 
     def test_step1_has_scope_check(self):
         prompt = _build_system_prompt(1, "Process Requirements")
-        assert "SINGLE-PHASE SCOPE CHECK" in prompt
+        assert "PHASE SCOPE CHECK" in prompt
 
     def test_step4_has_tema_selection(self):
         prompt = _build_system_prompt(4, "TEMA Geometry")

@@ -1,9 +1,11 @@
-"""Step 08 — Shell-Side Heat Transfer Coefficient (Bell-Delaware).
+"""Step 08 — Shell-Side Heat Transfer Coefficient (Bell-Delaware / Shah).
 
-Computes shell-side HTC using the full Bell-Delaware method (Taborek, 1983)
-with five correction factors (J_c, J_l, J_b, J_s, J_r). Includes a
-wall-temperature iteration for viscosity correction and a Kern cross-check
-for divergence validation.
+Computes shell-side HTC using:
+- Bell-Delaware method (Taborek, 1983) for single-phase (liquid or gas)
+- Shah (1979) condensation correlation for condensing service
+
+Includes wall-temperature iteration for viscosity correction and a
+Kern cross-check for divergence validation (single-phase only).
 
 ai_mode = FULL — AI is always called (most complex calculation in pipeline).
 """
@@ -14,10 +16,17 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
-from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
+from hx_engine.app.adapters.thermo_adapter import (
+    get_fluid_properties,
+    get_saturation_props,
+)
 from hx_engine.app.correlations.bell_delaware import (
     kern_shell_side_htc,
     shell_side_htc,
+)
+from hx_engine.app.correlations.shah_condensation import (
+    get_critical_pressure,
+    shah_condensation_average_h,
 )
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.data.tema_tables import get_tema_clearances
@@ -173,6 +182,22 @@ class Step08ShellSideH(BaseStep):
         if tube_pitch_m is None:
             tube_pitch_m = pitch_ratio * tube_od_m
 
+        # ── Phase-aware branch ─────────────────────────────────────────
+        shell_phase = (
+            getattr(state, "hot_phase", None) if shell_side == "hot"
+            else getattr(state, "cold_phase", None)
+        ) or "liquid"
+
+        if shell_phase == "condensing":
+            return await self._execute_condensing(
+                state, shell_side, fluid_name, fluid_props,
+                m_dot, T_shell_in, T_shell_out, T_tube_in, T_tube_out,
+                pressure_Pa, g, tube_od_m, tube_id_m, tube_pitch_m,
+                n_tubes, tube_length_m, warnings,
+            )
+
+        # ── Single-phase path (liquid or gas) ─────────────────────────
+
         # Bell-Delaware optional fields with fallbacks
         inlet_baffle_spacing = g.inlet_baffle_spacing_m or baffle_spacing_m
         outlet_baffle_spacing = g.outlet_baffle_spacing_m or baffle_spacing_m
@@ -208,7 +233,7 @@ class Step08ShellSideH(BaseStep):
         mu_wall = mu  # initial estimate
 
         try:
-            wall_props = get_fluid_properties(fluid_name, T_wall_est, pressure_Pa)
+            wall_props = await get_fluid_properties(fluid_name, T_wall_est, pressure_Pa)
             mu_wall = wall_props.viscosity_Pa_s
         except Exception:
             warnings.append(
@@ -261,7 +286,7 @@ class Step08ShellSideH(BaseStep):
 
             # Get new mu_wall
             try:
-                wall_props_new = get_fluid_properties(
+                wall_props_new = await get_fluid_properties(
                     fluid_name, T_wall_new, pressure_Pa,
                 )
                 mu_wall_new = wall_props_new.viscosity_Pa_s
@@ -448,6 +473,164 @@ class Step08ShellSideH(BaseStep):
             outputs["escalation_hints"] = escalation_hints
 
         # 12. Return StepResult
+        return StepResult(
+            step_id=self.step_id,
+            step_name=self.step_name,
+            outputs=outputs,
+            warnings=warnings,
+        )
+
+    # ------------------------------------------------------------------
+    # Condensation path (Shah correlation)
+    # ------------------------------------------------------------------
+
+    async def _execute_condensing(
+        self,
+        state: "DesignState",
+        shell_side: str,
+        fluid_name: str,
+        fluid_props,
+        m_dot: float,
+        T_shell_in: float,
+        T_shell_out: float,
+        T_tube_in: float,
+        T_tube_out: float,
+        pressure_Pa: float | None,
+        g,
+        tube_od_m: float,
+        tube_id_m: float,
+        tube_pitch_m: float,
+        n_tubes: int,
+        tube_length_m: float,
+        warnings: list[str],
+    ) -> StepResult:
+        """Compute shell-side HTC for condensing service using Shah (1979).
+
+        For shell-side condensation in a horizontal shell-and-tube HX, the
+        condensation occurs on the outside of the tubes. The Shah correlation
+        is applied using the tube OD as the characteristic diameter.
+        """
+        P_eff = pressure_Pa or 101_325.0
+
+        # Get saturation properties
+        try:
+            sat = get_saturation_props(fluid_name, P_eff)
+        except CalculationError as exc:
+            raise CalculationError(
+                8,
+                f"Cannot obtain saturation properties for '{fluid_name}' "
+                f"at P={P_eff} Pa for condensation calculation: {exc.message}",
+                cause=exc,
+            ) from exc
+
+        # Get critical pressure
+        P_crit = get_critical_pressure(fluid_name)
+        if P_crit is None:
+            # Fallback: try CoolProp
+            try:
+                import CoolProp.CoolProp as CP
+                from hx_engine.app.adapters.thermo_adapter import _COOLPROP_MAP
+                cp_name = _COOLPROP_MAP.get(fluid_name.strip().lower(), fluid_name)
+                P_crit = CP.PropsSI("pcrit", cp_name)
+            except Exception:
+                # Use a generic estimate
+                P_crit = P_eff / 0.05  # assume P_r ≈ 0.05
+                warnings.append(
+                    f"Critical pressure unknown for '{fluid_name}'; "
+                    f"estimated P_crit={P_crit/1e6:.1f} MPa"
+                )
+
+        # Determine inlet/outlet quality
+        # For condensation: inlet is vapor (x≈1.0), outlet is liquid (x≈0.0)
+        T_sat = sat["T_sat_C"]
+        x_in = 1.0
+        x_out = 0.0
+
+        # If inlet temp > T_sat, there's a desuperheating zone
+        if T_shell_in > T_sat + 1.0:
+            x_in = 1.0  # enters as superheated vapor, starts condensing at T_sat
+            warnings.append(
+                f"Shell-side fluid enters superheated at {T_shell_in:.1f}°C "
+                f"(T_sat={T_sat:.1f}°C). Desuperheating zone exists."
+            )
+
+        # If outlet temp < T_sat, there's a subcooling zone
+        if T_shell_out < T_sat - 1.0:
+            x_out = 0.0
+            warnings.append(
+                f"Shell-side fluid exits subcooled at {T_shell_out:.1f}°C "
+                f"(T_sat={T_sat:.1f}°C). Subcooling zone exists."
+            )
+
+        # Mass flux based on shell-side flow area
+        # For shell-side condensation, use equivalent diameter
+        # A_shell ≈ shell crossflow area approximation
+        D_e = tube_od_m  # characteristic dimension for tube bundle
+        A_shell_flow = math.pi / 4.0 * D_e ** 2 * n_tubes
+        # Actually, mass flux for shell-side condensation on tube bundle
+        # G = m_dot / (π × D_o × L × N_t) is not mass flux — that's area
+        # G_shell = m_dot / A_crossflow
+        # For shell-side, approximate crossflow area
+        shell_id_m = g.shell_diameter_m
+        baffle_spacing_m = g.baffle_spacing_m
+        pitch_ratio = g.pitch_ratio
+
+        # Crossflow area per Kern: A_s = D_s × l_B × (p - d_o) / p
+        p_t = tube_pitch_m
+        A_crossflow = shell_id_m * baffle_spacing_m * (p_t - tube_od_m) / p_t
+        G_shell = m_dot / max(A_crossflow, 1e-6)
+
+        # Shah condensation (using tube OD as characteristic diameter for
+        # condensation on outside of tubes)
+        shah_result = shah_condensation_average_h(
+            G=G_shell,
+            D_i=tube_od_m,  # OD is the condensation surface
+            rho_l=sat["rho_f"],
+            rho_g=sat["rho_g"],
+            mu_l=sat["mu_f"],
+            mu_g=sat["mu_g"],
+            k_l=sat["k_f"],
+            cp_l=sat["cp_f"],
+            h_fg=sat["h_fg"],
+            P_sat=P_eff,
+            P_crit=P_crit,
+            x_in=x_in,
+            x_out=x_out,
+        )
+
+        h_shell = shah_result["h_avg"]
+        warnings.extend(shah_result["warnings"])
+
+        # Write to state
+        state.h_shell_W_m2K = h_shell
+        state.Re_shell = shah_result.get("Re_lo", G_shell * tube_od_m / sat["mu_f"])
+        state.h_shell_ideal_W_m2K = h_shell  # No J-factor correction for condensation
+        state.shell_side_j_factors = None
+        state.h_shell_kern_W_m2K = None
+
+        # Persist geometry
+        if g.tube_pitch_m is None:
+            g.tube_pitch_m = tube_pitch_m
+        if g.n_baffles is None:
+            inlet_bs = g.inlet_baffle_spacing_m or baffle_spacing_m
+            outlet_bs = g.outlet_baffle_spacing_m or baffle_spacing_m
+            g.n_baffles = max(1, int(
+                (tube_length_m - inlet_bs - outlet_bs) / baffle_spacing_m
+            ) + 1)
+
+        outputs: dict = {
+            "h_shell_W_m2K": h_shell,
+            "h_shell_ideal_W_m2K": h_shell,
+            "method": "shah_condensation",
+            "x_in": x_in,
+            "x_out": x_out,
+            "T_sat_C": T_sat,
+            "h_fg_J_kg": sat["h_fg"],
+            "G_shell_kg_m2s": G_shell,
+            "P_crit_Pa": P_crit,
+            "Re_shell": state.Re_shell,
+        }
+
         return StepResult(
             step_id=self.step_id,
             step_name=self.step_name,

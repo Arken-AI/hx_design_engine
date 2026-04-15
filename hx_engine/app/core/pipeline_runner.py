@@ -103,7 +103,7 @@ def _is_termination_intent(text: str) -> bool:
     return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
 
 
-def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
+async def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
     """Re-fetch fluid properties for the shell-side fluid at the mean shell temperature.
 
     This ensures that after a fluid-swap or viscosity-verification escalation,
@@ -131,7 +131,7 @@ def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
     T_mean = (T_in + T_out) / 2.0
     effective_pressure = pressure if pressure is not None else 101325.0  # fallback: atmospheric
     try:
-        new_props = get_fluid_properties(fluid_name, T_mean, effective_pressure)
+        new_props = await get_fluid_properties(fluid_name, T_mean, effective_pressure)
         if shell_side == "hot":
             state.hot_fluid_props = new_props
         else:
@@ -1012,7 +1012,7 @@ class PipelineRunner:
                     # User typed a specific value or clicked an option button.
                     # Check for multi-shell keywords in the full response text
                     # (covers both option-click text and typed free text).
-                    self._apply_user_text_override(
+                    await self._apply_user_text_override(
                         state, user_input,
                         step_id=step.step_id,
                         option_index=option_index,
@@ -1090,7 +1090,7 @@ class PipelineRunner:
             state.tema_preference = suggested
 
     @staticmethod
-    def _apply_user_text_override(
+    async def _apply_user_text_override(
         state: DesignState,
         text: str,
         *,
@@ -1151,7 +1151,7 @@ class PipelineRunner:
             if option_index == 0:
                 # Option A: verify/re-fetch viscosity for the current shell-side fluid
                 logger.info("[Step8-OptionA] Refreshing shell-side fluid properties")
-                _refresh_fluid_props_for_shell_side(state)
+                await _refresh_fluid_props_for_shell_side(state)
                 return
             if option_index == 1:
                 # Option B: swap fluid-side assignments (oil→tube, water→shell)
@@ -1161,7 +1161,7 @@ class PipelineRunner:
                     "[Step8-OptionB] shell_side_fluid swapped %r → %r",
                     old_val, state.shell_side_fluid,
                 )
-                _refresh_fluid_props_for_shell_side(state)
+                await _refresh_fluid_props_for_shell_side(state)
                 return
 
         # --- Regex fallback for typed free text and non-indexed steps ---
@@ -1191,13 +1191,13 @@ class PipelineRunner:
             )
             # After swapping, re-fetch fluid properties at shell-side mean temp
             # so Step 8 re-run uses the correct fluid's viscosity.
-            _refresh_fluid_props_for_shell_side(state)
+            await _refresh_fluid_props_for_shell_side(state)
             return
 
         # --- Viscosity verification (Step 8 escalation: re-fetch fluid props) ---
         if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
             logger.info("User override: refreshing shell-side fluid properties")
-            _refresh_fluid_props_for_shell_side(state)
+            await _refresh_fluid_props_for_shell_side(state)
             return
 
         # Multi-shell arrangement — check this first so "series"/"parallel"

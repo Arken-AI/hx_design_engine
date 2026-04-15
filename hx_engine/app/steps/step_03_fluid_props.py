@@ -4,6 +4,10 @@ Takes fluid names and temperatures from Steps 1–2, calls the thermo adapter
 for both fluids at their bulk mean temperature, validates the results, and
 populates hot_fluid_props / cold_fluid_props on the DesignState.
 
+Detects phase regime (liquid, vapor, condensing, evaporating) by comparing
+inlet/outlet temperatures against the saturation temperature at operating
+pressure. Sets hot_phase / cold_phase and n_increments on DesignState.
+
 ai_mode = CONDITIONAL — AI is only called when property anomalies are detected.
 """
 
@@ -12,7 +16,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
+from hx_engine.app.adapters.thermo_adapter import (
+    get_fluid_properties,
+    get_saturation_props,
+)
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.models.design_state import FluidProperties
 from hx_engine.app.models.step_result import AIModeEnum, StepResult
@@ -60,7 +67,7 @@ class Step03FluidProperties(BaseStep):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _resolve_fluid(
+    async def _resolve_fluid(
         fluid_name: str,
         T_mean_C: float,
         pressure_Pa: float | None,
@@ -86,7 +93,7 @@ class Step03FluidProperties(BaseStep):
             fluid_name = "crude oil"
 
         try:
-            return get_fluid_properties(fluid_name, T_mean_C, pressure_Pa)
+            return await get_fluid_properties(fluid_name, T_mean_C, pressure_Pa)
         except CalculationError as exc:
             raise CalculationError(
                 3,
@@ -149,12 +156,12 @@ class Step03FluidProperties(BaseStep):
                 )
 
         # --- Resolve hot fluid properties ---
-        hot_props = self._resolve_fluid(
+        hot_props = await self._resolve_fluid(
             state.hot_fluid_name, T_mean_hot, state.P_hot_Pa,
         )
 
         # --- Resolve cold fluid properties ---
-        cold_props = self._resolve_fluid(
+        cold_props = await self._resolve_fluid(
             state.cold_fluid_name, T_mean_cold, state.P_cold_Pa,
         )
 
@@ -233,13 +240,23 @@ class Step03FluidProperties(BaseStep):
                 )
 
         # --- C5: Cp variation across temperature range ---
-        self._check_cp_variation(
+        await self._check_cp_variation(
             state.hot_fluid_name, state.T_hot_in_C, state.T_hot_out_C,
             state.P_hot_Pa, "Hot", warnings,
         )
-        self._check_cp_variation(
+        await self._check_cp_variation(
             state.cold_fluid_name, state.T_cold_in_C, state.T_cold_out_C,
             state.P_cold_Pa, "Cold", warnings,
+        )
+
+        # --- C6: Phase regime detection ---
+        hot_phase, cold_phase, n_increments = self._detect_phase_regimes(
+            hot_props, cold_props,
+            state.T_hot_in_C, state.T_hot_out_C,
+            state.T_cold_in_C, state.T_cold_out_C,
+            state.P_hot_Pa, state.P_cold_Pa,
+            state.hot_fluid_name, state.cold_fluid_name,
+            warnings,
         )
 
         outputs = {
@@ -247,6 +264,9 @@ class Step03FluidProperties(BaseStep):
             "cold_fluid_props": cold_props,
             "T_mean_hot_C": T_mean_hot,
             "T_mean_cold_C": T_mean_cold,
+            "hot_phase": hot_phase,
+            "cold_phase": cold_phase,
+            "n_increments": n_increments,
         }
 
         return StepResult(
@@ -306,7 +326,7 @@ class Step03FluidProperties(BaseStep):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _check_cp_variation(
+    async def _check_cp_variation(
         fluid_name: str,
         T_in_C: float,
         T_out_C: float,
@@ -316,8 +336,8 @@ class Step03FluidProperties(BaseStep):
     ) -> None:
         """Warn if Cp varies > 15% between inlet and outlet temperatures."""
         try:
-            props_in = get_fluid_properties(fluid_name, T_in_C, pressure_Pa)
-            props_out = get_fluid_properties(fluid_name, T_out_C, pressure_Pa)
+            props_in = await get_fluid_properties(fluid_name, T_in_C, pressure_Pa)
+            props_out = await get_fluid_properties(fluid_name, T_out_C, pressure_Pa)
             if (
                 props_in.cp_J_kgK is not None
                 and props_out.cp_J_kgK is not None
@@ -337,3 +357,122 @@ class Step03FluidProperties(BaseStep):
                     )
         except Exception:
             pass  # Non-fatal — skip warning if property lookup fails
+
+    # ------------------------------------------------------------------
+    # Piece 7: Phase regime detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_phase_regimes(
+        hot_props: FluidProperties,
+        cold_props: FluidProperties,
+        T_hot_in: float,
+        T_hot_out: float,
+        T_cold_in: float,
+        T_cold_out: float,
+        P_hot_Pa: float | None,
+        P_cold_Pa: float | None,
+        hot_fluid_name: str,
+        cold_fluid_name: str,
+        warnings: list[str],
+    ) -> tuple[str, str, int]:
+        """Detect phase regime for each stream.
+
+        Compares inlet/outlet temperatures against T_sat from the property
+        backend. Returns (hot_phase, cold_phase, n_increments).
+
+        Phase regimes:
+          "liquid"      — both T_in and T_out below T_sat
+          "vapor"       — both T_in and T_out above T_sat
+          "condensing"  — T_in > T_sat and T_out < T_sat (hot side loses heat)
+          "evaporating" — T_in < T_sat and T_out > T_sat (cold side gains heat)
+
+        n_increments:
+          1 for single-phase (both sides liquid or vapor)
+          10 for two-phase (condensing or evaporating)
+        """
+        hot_phase = _detect_single_stream_phase(
+            hot_props, T_hot_in, T_hot_out, P_hot_Pa, hot_fluid_name,
+            is_hot_side=True,
+        )
+        cold_phase = _detect_single_stream_phase(
+            cold_props, T_cold_in, T_cold_out, P_cold_Pa, cold_fluid_name,
+            is_hot_side=False,
+        )
+
+        # Determine n_increments
+        has_phase_change = hot_phase in ("condensing", "evaporating") or \
+            cold_phase in ("condensing", "evaporating")
+        n_increments = 10 if has_phase_change else 1
+
+        # Warnings for phase change
+        if hot_phase == "condensing":
+            warnings.append(
+                f"Hot fluid '{hot_fluid_name}' is condensing "
+                f"(T_in={T_hot_in:.1f}°C > T_sat={hot_props.T_sat_C:.1f}°C > "
+                f"T_out={T_hot_out:.1f}°C). "
+                f"Incremental calculation with {n_increments} segments will be used."
+            )
+        if hot_phase == "vapor":
+            warnings.append(
+                f"Hot fluid '{hot_fluid_name}' is in gas phase "
+                f"(density={hot_props.density_kg_m3:.1f} kg/m³). "
+                f"Gas-phase correlations will be applied."
+            )
+        if cold_phase == "evaporating":
+            warnings.append(
+                f"Cold fluid '{cold_fluid_name}' is evaporating "
+                f"(T_in={T_cold_in:.1f}°C < T_sat={cold_props.T_sat_C:.1f}°C < "
+                f"T_out={T_cold_out:.1f}°C). "
+                f"Incremental calculation with {n_increments} segments will be used."
+            )
+        if cold_phase == "vapor":
+            warnings.append(
+                f"Cold fluid '{cold_fluid_name}' is in gas phase "
+                f"(density={cold_props.density_kg_m3:.1f} kg/m³). "
+                f"Gas-phase correlations will be applied."
+            )
+
+        return hot_phase, cold_phase, n_increments
+
+
+def _detect_single_stream_phase(
+    props: FluidProperties,
+    T_in: float,
+    T_out: float,
+    P_Pa: float | None,
+    fluid_name: str,
+    is_hot_side: bool,
+) -> str:
+    """Detect phase regime for a single stream.
+
+    Uses T_sat from the property backend if available. Falls back to
+    density-based heuristic if T_sat is not available.
+    """
+    T_sat = props.T_sat_C
+
+    if T_sat is not None:
+        # Check for condensation (hot side: T_in above sat, T_out below)
+        if is_hot_side and T_in > T_sat and T_out < T_sat:
+            return "condensing"
+        # Check for evaporation (cold side: T_in below sat, T_out above)
+        if not is_hot_side and T_in < T_sat and T_out > T_sat:
+            return "evaporating"
+        # Both above T_sat → vapor
+        if T_in > T_sat + 1.0 and T_out > T_sat + 1.0:
+            return "vapor"
+        # Both below T_sat → liquid
+        if T_in < T_sat - 1.0 and T_out < T_sat - 1.0:
+            return "liquid"
+
+    # Fallback: use phase from property backend
+    if props.phase == "vapor":
+        return "vapor"
+    if props.phase == "two_phase":
+        return "condensing" if is_hot_side else "evaporating"
+
+    # Default: density-based heuristic
+    if props.density_kg_m3 is not None and props.density_kg_m3 < 50.0:
+        return "vapor"
+
+    return "liquid"

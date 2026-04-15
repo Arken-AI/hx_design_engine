@@ -88,9 +88,9 @@ class TestPoisson:
 class TestAllMaterials:
     """Validate all nine materials have consistent data."""
 
-    def test_all_nine_materials(self):
+    def test_all_materials(self):
         materials = get_available_materials()
-        assert len(materials) == 9
+        assert len(materials) == 10
         for mat in materials:
             E = get_elastic_modulus(mat)
             rho = get_density(mat)
@@ -105,5 +105,6 @@ class TestAllMaterials:
             "carbon_steel", "stainless_304", "stainless_316",
             "copper", "admiralty_brass", "titanium",
             "inconel_600", "monel_400", "duplex_2205",
+            "sa516_gr70",
         }
         assert set(materials) == expected

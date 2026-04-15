@@ -50,9 +50,9 @@ CONFIDENCE_THRESHOLD = 0.7
 _BASE_PROMPT = """\
 You are a senior heat exchanger design engineer reviewing pipeline step outputs.
 
-ENGINE SCOPE: This engine designs single-phase liquid shell-and-tube heat \
-exchangers ONLY (Phase 1). No phase change (boiling, condensation, evaporation), \
-no gas-phase service, no air coolers, no plate exchangers.
+ENGINE SCOPE: This engine designs shell-and-tube heat exchangers for \
+single-phase liquid, single-phase gas, and condensation (shell-side) service. \
+No evaporation/boiling (yet), no air coolers, no plate exchangers.
 
 For each review you must evaluate whether the step's outputs are physically \
 reasonable, follow TEMA standards, and match the design intent.
@@ -115,7 +115,7 @@ into fluid names, temperatures, flow rates, and pressures.
 YOUR REVIEW FOCUS:
 1. Are the fluid names real, recognisable engineering fluids?
 2. Are the temperatures physically reasonable for the stated fluids?
-   - Water/seawater: typically 5–95 °C (must stay liquid, single-phase)
+   - Water/seawater: typically 5–95 °C as coolant (may be higher as steam)
    - Petroleum fluids: typically 30–350 °C (depends on fraction)
    - Glycol solutions: typically −30 to 150 °C
 3. Is the hot/cold side assignment correct?
@@ -140,13 +140,13 @@ VALID INDUSTRIAL FLUID COMBINATIONS (do NOT escalate these):
 - Diesel fuel + cooling water — engine fuel coolers
 - Any petroleum fraction + water/seawater — common industrial service
 
-SINGLE-PHASE SCOPE CHECK:
-- If the request mentions "condense", "boil", "evaporate", "vaporise", \
-"steam generation", or "phase change", set decision="escalate" with \
-recommendation="This engine handles single-phase liquids only. \
-Phase-change service requires a different design module."
-- If both fluids are gases (nitrogen, air, hydrogen, oxygen), escalate \
-with the same scope message.
+PHASE SCOPE CHECK:
+- The engine supports single-phase liquid, single-phase gas, and \
+condensation (shell-side) service.
+- If the request mentions "boil", "evaporate", or "steam generation" \
+(i.e. liquid→vapor phase change), set decision="escalate" with \
+recommendation="Evaporation/boiling service is not yet supported."
+- Gas-gas exchangers (nitrogen, air, hydrogen, oxygen) are supported.
 
 AMBIGUOUS FLUID WARNING:
 - If a fluid is named just "oil", "gas", "fluid", or "liquid" without \
@@ -203,12 +203,14 @@ fluids at their mean operating temperatures.
 
 YOUR REVIEW FOCUS:
 1. PROPERTY RANGES — Are values within expected bounds?
-   - Density (ρ): 50–2000 kg/m³ for liquids
+   - Density (ρ): 0.01–2000 kg/m³
      • Water ~998 kg/m³ at 20°C, ~958 at 100°C
      • Light oils ~750–850 kg/m³
      • Heavy oils ~850–1000 kg/m³
      • Seawater ~1025 kg/m³
-   - Viscosity (μ): 1e-6 to 1.0 Pa·s for liquids
+     • Gases at 1 atm: ~0.1–5 kg/m³; at high pressure: up to ~100 kg/m³
+     • Steam at 1 atm: ~0.6 kg/m³
+   - Viscosity (μ): 1e-7 to 1.0 Pa·s (gases ~1e-5 Pa·s, liquids 1e-4–1.0)
      • Water ~1e-3 Pa·s at 20°C, ~2.8e-4 at 100°C
      • Light oils ~1e-3 to 5e-3 Pa·s
      • Heavy oils ~0.01 to 1.0 Pa·s (highly temperature-dependent)
@@ -222,7 +224,8 @@ YOUR REVIEW FOCUS:
 
 2. INTERNAL CONSISTENCY:
    - Pr = μ × Cp / k — if this is off by > 5%, the property set is wrong
-   - If ρ says "liquid" but μ says "gas", there is a backend mismatch
+   - If ρ says "liquid" (> 500 kg/m³) but μ says "gas" (~1e-5), there is a backend mismatch
+   - If ρ says "gas" (< 50 kg/m³) AND μ says "gas" (~1e-5), this is a valid gas — proceed
 
 3. PROPERTY SOURCE VALIDATION:
    - Each fluid result includes a `property_source` field. Check it.
@@ -242,7 +245,8 @@ for petroleum mixtures — every downstream step will be corrupted.
 4. CORNER CASES TO WATCH:
    - Crude oil: properties are approximate (generic API gravity). \
 Use "warn" to flag uncertainty, do NOT escalate.
-   - Water near 100°C at 1 atm: close to boiling — flag if T > 95°C
+   - Water near 100°C at 1 atm: close to boiling — flag if T > 95°C and no \
+pressure is specified (may be intentional for steam/condensation service)
    - Very high viscosity (μ > 0.1 Pa·s): Sieder-Tate correction needed \
 downstream — add observation
    - Cp variation > 15% between inlet and outlet temperatures: \
@@ -251,14 +255,12 @@ mean-temperature Cp may be inaccurate — add observation
 COMMON ISSUES WHEN YOU ARE CALLED:
 - Pr inconsistency (backend returned stale/mixed data)
 - Viscosity ratio (hot/cold) > 100 (suggests one fluid is extremely viscous)
-- Density near the 50 or 2000 kg/m³ boundary (may indicate gas-phase leak)
+- Density near the 2000 kg/m³ boundary (unusual — check fluid)
 
 DO NOT:
 - Override property values with your own numbers — only flag issues
 - Escalate for crude oil properties being approximate — "warn" is correct
 - Change fluid names at this step — that was Step 1's job
-- Accept gas-phase property values (ρ < 50 kg/m³) — that means the \
-fluid is not liquid at operating conditions, which violates engine scope
 - Accept `property_source = "thermo"` for petroleum fluids — always escalate this\
 """
 
@@ -438,12 +440,15 @@ This step uses a starting-guess U from published fluid-pair tables to compute:
 
 YOUR REVIEW FOCUS:
 1. U ASSUMPTION — Is the assumed U reasonable for this fluid pair?
-   (Engine scope: single-phase liquids only — no gas-phase, no steam/condensing)
+   Typical U ranges by service:
    - Water/water: 800–1800 W/m²K (typical ~1200)
    - Light organic/water: 200–800 W/m²K
    - Heavy organic/water: 100–500 W/m²K (glycols, thermal oil)
    - Viscous oil/water: 20–100 W/m²K (lube oil, gear oil, hydraulic oil — laminar flow)
    - Oil/oil: 50–200 W/m²K
+   - Gas/liquid: 10–250 W/m²K (gas side controls)
+   - Gas/gas: 5–50 W/m²K
+   - Condensing vapor/liquid: 300–2000 W/m²K
    - If U < 50 W/m²K for a liquid/liquid pair, this is WRONG — investigate \
 fluid classification or property source
    - If the fluid pair used the generic fallback, verify classification
@@ -466,6 +471,7 @@ fluid classification or property source
 COMMON ISSUES WHEN YOU ARE CALLED:
 - Unknown fluid pair → generic fallback U used (may be too high or low)
 - Gas-phase fluid misclassified as liquid → U far too high → area too small
+- Gas-phase fluid correctly identified → expect U = 10–250 W/m²K (gas/liquid) or 5–50 (gas/gas)
 - Very viscous fluid (lube oil, gear oil) not classified as viscous_oil → U too high
 - Viscous oil correctly classified → verify U = 60 W/m²K is reasonable for this service
 - Extremely large or small area suggesting U is off by an order of magnitude
@@ -581,13 +587,18 @@ escalate with recommendation to reduce clearances or add sealing strips
    - Use `J_product` from outputs (all five factors combined) — do NOT compute \
 a partial product from individual J values
 
-2. h_shell RANGES — apply based on the shell-side fluid identified in Design Context:
-   (Engine scope: single-phase liquids only — no gas-phase service)
+2. h_shell RANGES — apply based on the shell-side fluid and phase:
+   Single-phase liquid:
    - Water / cooling water: 2,000–8,000 W/m²K
    - Light organics (toluene, ethanol, glycol): 300–1,500 W/m²K
    - Heavy oil / crude / lube oil: 50–500 W/m²K
-   If h_shell is outside the expected range for the identified shell-side fluid, \
-investigate — do NOT rationalise it as "gas-like".
+   Single-phase gas:
+   - Gases at moderate pressure: 20–200 W/m²K
+   - Gases at high pressure (>10 bar): 100–500 W/m²K
+   Condensing:
+   - Condensing vapor (Shah correlation): 1,000–15,000 W/m²K
+   If h_shell is outside the expected range for the identified shell-side \
+fluid AND phase, investigate.
 
 3. KERN CROSS-CHECK:
    **IMPORTANT**: The Kern method (1950) systematically underpredicts h_o compared \
@@ -635,12 +646,17 @@ FORMULA REVIEWED:
   1/U_o = 1/h_o + R_f,o + (d_o × ln(d_o/d_i))/(2×k_w) + R_f,i×(d_o/d_i) + (d_o/d_i)/h_i
 
 YOUR REVIEW FOCUS:
-1. Is U_dirty in the typical range for this fluid pair?
-   (Engine scope: single-phase liquids only — no gas-phase service)
+1. Is U_dirty in the typical range for this fluid pair and service?
+   Liquid/liquid:
    - Water/water: 800–1500 W/m²K
    - Oil/water (heavy organic): 100–500 W/m²K
    - Oil/oil: 60–150 W/m²K
    - Light organic/water: 200–800 W/m²K
+   Gas service:
+   - Gas/liquid: 10–250 W/m²K
+   - Gas/gas: 5–50 W/m²K
+   Condensing:
+   - Condensing vapor/liquid: 300–2000 W/m²K
 
 2. Is the controlling resistance physically expected?
    - Viscous fluid side should dominate
@@ -799,12 +815,12 @@ YOUR REVIEW FOCUS:
 
 COMMON ASSUMPTIONS TO CHECK FOR:
 - Fouling factors from TEMA tables (not site-specific data)
-- Single-phase liquid operation assumed throughout
+- Phase regime (liquid, gas, or condensing) identified in Step 3
 - Fluid properties at bulk mean temperature (not wall temperature)
 - Turton cost correlations (2001 base year, validity range)
 - CEPCI projection for 2026
 - Baffle-to-shell and tube-to-baffle clearances from TEMA standards
-- No phase change at any point in the exchanger
+- No evaporation/boiling at any point in the exchanger
 
 WHAT MAKES A GOOD SUMMARY:
 - Mention: TEMA type, fluids, duty, key geometry (shell size, tube count, length)
@@ -901,7 +917,7 @@ _STEP_PROMPTS: dict[int, str] = {
 # - Diesel fuel + cooling water — engine fuel coolers
 # - Any petroleum fraction + water/seawater — common industrial service
 #
-# SCOPE: This engine handles single-phase liquid heat exchangers only.
+# SCOPE: This engine handles single-phase liquid, gas, and condensation service.
 # Do NOT escalate simply because a fluid combination seems unusual —
 # only escalate when you genuinely cannot extract valid process data.
 #

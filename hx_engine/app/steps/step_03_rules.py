@@ -30,14 +30,14 @@ def _rule_all_properties_positive(
 def _rule_density_bounds(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """R2 — 50 ≤ ρ ≤ 2000 kg/m³ for both sides."""
+    """R2 — 0.01 ≤ ρ ≤ 2000 kg/m³ for both sides (covers gas & liquid)."""
     for key in ("hot_fluid_props", "cold_fluid_props"):
         props = result.outputs.get(key)
         if props is None:
             continue
         rho = props.density_kg_m3
-        if rho is not None and (rho < 50 or rho > 2000):
-            return False, f"{key}.density_kg_m3={rho} outside [50, 2000]"
+        if rho is not None and (rho < 0.01 or rho > 2000):
+            return False, f"{key}.density_kg_m3={rho} outside [0.01, 2000]"
     return True, None
 
 

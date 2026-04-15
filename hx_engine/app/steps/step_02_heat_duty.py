@@ -227,7 +227,7 @@ class Step02HeatDuty(BaseStep):
 
         # --- Get Cp from thermo adapter ---
         try:
-            _hot = get_fluid_properties(
+            _hot = await get_fluid_properties(
                 state.hot_fluid_name, T_hot_estimate, state.P_hot_Pa
             )
             cp_hot = _hot.cp_J_kgK
@@ -239,7 +239,7 @@ class Step02HeatDuty(BaseStep):
             ) from exc
 
         try:
-            _cold = get_fluid_properties(
+            _cold = await get_fluid_properties(
                 state.cold_fluid_name, T_cold_estimate, state.P_cold_Pa
             )
             cp_cold = _cold.cp_J_kgK
@@ -295,12 +295,12 @@ class Step02HeatDuty(BaseStep):
             T_hot_mean_new = (T_hot_in + T_hot_out) / 2.0
             T_cold_mean_new = (T_cold_in + T_cold_out) / 2.0
             try:
-                cp_hot = get_fluid_properties(
+                cp_hot = (await get_fluid_properties(
                     state.hot_fluid_name, T_hot_mean_new, state.P_hot_Pa
-                ).cp_J_kgK
-                cp_cold = get_fluid_properties(
+                )).cp_J_kgK
+                cp_cold = (await get_fluid_properties(
                     state.cold_fluid_name, T_cold_mean_new, state.P_cold_Pa
-                ).cp_J_kgK
+                )).cp_J_kgK
             except Exception:
                 pass  # Keep original Cp estimates — non-fatal
 

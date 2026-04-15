@@ -26,6 +26,7 @@ class FluidProperties(BaseModel):
     """Thermophysical properties for a single fluid stream.
 
     Every field has physical bounds enforced via Pydantic validators.
+    Supports liquid, vapor, and two-phase states.
     """
 
     density_kg_m3: Optional[float] = None
@@ -34,54 +35,108 @@ class FluidProperties(BaseModel):
     k_W_mK: Optional[float] = None
     Pr: Optional[float] = None
 
+    # --- Phase state (populated by thermo adapter) ---
+    phase: Optional[str] = None                # "liquid" | "vapor" | "two_phase"
+    quality: Optional[float] = None            # vapor mass fraction 0.0–1.0 (None for single-phase)
+    enthalpy_J_kg: Optional[float] = None      # specific enthalpy (J/kg)
+    latent_heat_J_kg: Optional[float] = None   # h_fg at saturation (J/kg)
+    T_sat_C: Optional[float] = None            # saturation temperature at operating pressure (°C)
+    P_sat_Pa: Optional[float] = None           # saturation pressure at operating temperature (Pa)
+
     # --- Property provenance (populated by thermo adapter) ---
     property_source: Optional[str] = None      # e.g. "iapws", "coolprop", "thermo", "petroleum-named", "petroleum-generic", "specialty"
     property_confidence: Optional[float] = None  # 0.0–1.0; None = not assessed
 
+    @field_validator("phase")
+    @classmethod
+    def _check_phase(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"liquid", "vapor", "two_phase"}:
+            raise ValueError(
+                f"phase='{v}' not in {{liquid, vapor, two_phase}}"
+            )
+        return v
+
+    @field_validator("quality")
+    @classmethod
+    def _check_quality(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.0 or v > 1.0):
+            raise ValueError(
+                f"quality={v} outside range [0.0, 1.0]"
+            )
+        return v
+
     @field_validator("density_kg_m3")
     @classmethod
     def _check_density(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 50 or v > 2000):
+        if v is not None and (v < 0.01 or v > 2000):
             raise ValueError(
-                f"density_kg_m3={v} outside physical range [50, 2000]"
+                f"density_kg_m3={v} outside physical range [0.01, 2000]"
             )
         return v
 
     @field_validator("viscosity_Pa_s")
     @classmethod
     def _check_viscosity(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 1e-6 or v > 1.0):
+        if v is not None and (v < 1e-7 or v > 1.0):
             raise ValueError(
-                f"viscosity_Pa_s={v} outside physical range [1e-6, 1.0]"
+                f"viscosity_Pa_s={v} outside physical range [1e-7, 1.0]"
             )
         return v
 
     @field_validator("cp_J_kgK")
     @classmethod
     def _check_cp(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 500 or v > 10000):
+        if v is not None and (v < 100 or v > 100_000):
             raise ValueError(
-                f"cp_J_kgK={v} outside physical range [500, 10000]"
+                f"cp_J_kgK={v} outside physical range [100, 100000]"
             )
         return v
 
     @field_validator("k_W_mK")
     @classmethod
     def _check_k(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 0.01 or v > 100):
+        if v is not None and (v < 0.005 or v > 100):
             raise ValueError(
-                f"k_W_mK={v} outside physical range [0.01, 100]"
+                f"k_W_mK={v} outside physical range [0.005, 100]"
             )
         return v
 
     @field_validator("Pr")
     @classmethod
     def _check_Pr(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 0.5 or v > 1000):
+        if v is not None and (v < 0.001 or v > 10000):
             raise ValueError(
-                f"Pr={v} outside physical range [0.5, 1000]"
+                f"Pr={v} outside physical range [0.001, 10000]"
             )
         return v
+
+
+# ---------------------------------------------------------------------------
+# IncrementResult — per-segment results for incremental calculation
+# ---------------------------------------------------------------------------
+
+class IncrementResult(BaseModel):
+    """Results for a single segment of the incremental HX calculation.
+
+    Used when the shell-side fluid undergoes phase change (condensation
+    or evaporation). Each segment tracks local temperatures, quality,
+    heat transfer coefficients, and the area required for that segment.
+    """
+
+    segment_index: int = 0
+    T_hot_in_C: Optional[float] = None
+    T_hot_out_C: Optional[float] = None
+    T_cold_in_C: Optional[float] = None
+    T_cold_out_C: Optional[float] = None
+    quality_in: Optional[float] = None        # vapor fraction at segment inlet
+    quality_out: Optional[float] = None       # vapor fraction at segment outlet
+    phase: Optional[str] = None               # "liquid" | "vapor" | "two_phase"
+    h_tube_W_m2K: Optional[float] = None
+    h_shell_W_m2K: Optional[float] = None
+    U_local_W_m2K: Optional[float] = None
+    dQ_W: Optional[float] = None              # heat duty for this segment
+    dA_m2: Optional[float] = None             # area required for this segment
+    LMTD_local_K: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +409,15 @@ class DesignState(BaseModel):
     # --- fluid properties (populated by Step 3) ---
     hot_fluid_props: Optional[FluidProperties] = None
     cold_fluid_props: Optional[FluidProperties] = None
+
+    # --- phase regime (populated by Step 3) ---
+    # Declared phase regime for each stream
+    hot_phase: Optional[str] = None    # "liquid" | "vapor" | "condensing" | "evaporating"
+    cold_phase: Optional[str] = None   # "liquid" | "vapor" | "condensing" | "evaporating"
+    # Number of increments for incremental (zone-based) calculation
+    n_increments: Optional[int] = None
+    # Per-segment results for incremental calculation
+    increment_results: list[IncrementResult] = Field(default_factory=list)
 
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
