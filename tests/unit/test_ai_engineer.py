@@ -8,6 +8,9 @@ from hx_engine.app.core.ai_engineer import (
     AIEngineer,
     _BASE_PROMPT,
     _STEP_PROMPTS,
+    _STEP_FILE_NAMES,
+    _load_skill,
+    SKILLS_DIR,
     _build_system_prompt,
     _build_step_context,
 )
@@ -113,9 +116,52 @@ class TestBuildSystemPrompt:
         # Should still contain the base prompt
         assert "senior heat exchanger design engineer" in prompt
 
+    def test_all_16_steps_have_skill_files(self):
+        for sid in range(1, 17):
+            assert sid in _STEP_FILE_NAMES, f"Step {sid} missing from _STEP_FILE_NAMES"
+
     def test_all_5_steps_registered(self):
         for sid in (1, 2, 3, 4, 5):
             assert sid in _STEP_PROMPTS, f"Step {sid} missing from _STEP_PROMPTS"
+
+
+# -----------------------------------------------------------------------
+# Skill file loader
+# -----------------------------------------------------------------------
+
+class TestSkillLoader:
+    def test_missing_file_returns_empty_string(self, tmp_path, caplog):
+        """Missing .md file must log WARNING and return empty string."""
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+        # Clear cache for this test
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                with caplog.at_level(logging.WARNING):
+                    result = _load_skill("nonexistent_step.md")
+            assert result == ""
+            assert "could not load skill file" in caplog.text.lower()
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
+
+    def test_skill_file_loaded_and_cached(self, tmp_path):
+        """Skill file content is loaded and cached."""
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            (tmp_path / "test_skill.md").write_text("Test prompt content")
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                result = _load_skill("test_skill.md")
+            assert result == "Test prompt content"
+            assert "test_skill.md" in ai_engineer._SKILL_CACHE
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
 
 
 # -----------------------------------------------------------------------

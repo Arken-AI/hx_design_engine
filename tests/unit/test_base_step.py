@@ -282,12 +282,22 @@ class TestWarnResolution:
 class TestRecordLogsConfidence:
     async def test_record_logs_ai_decision_and_confidence(self, caplog):
         """_record() must emit a structured log line when ai_called=True."""
+
+        class RealishAI:
+            async def review(self, step, state, result, **kwargs):
+                return AIReview(
+                    decision=AIDecisionEnum.PROCEED,
+                    confidence=0.92,
+                    reasoning="Looks good",
+                    corrections=[],
+                    ai_called=True,
+                )
+
         step = FullAIStep()
         state = DesignState()
-        ai = AIEngineer(stub_mode=True)
 
         with caplog.at_level(logging.INFO, logger="hx_engine.app.steps.base"):
-            await step.run_with_review_loop(state, ai)
+            await step.run_with_review_loop(state, RealishAI())
 
-        assert "confidence=" in caplog.text
-        assert "decision=" in caplog.text
+        assert "confidence=0.92" in caplog.text
+        assert "decision=PROCEED" in caplog.text
