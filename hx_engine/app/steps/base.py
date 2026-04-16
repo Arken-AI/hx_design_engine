@@ -412,6 +412,15 @@ class BaseStep(ABC):
         )
         state.step_records.append(rec)
 
+        if rec.ai_called:
+            logger.info(
+                "step=%s decision=%s confidence=%.2f duration=%.2fs",
+                rec.step_name,
+                rec.ai_decision.value if rec.ai_decision else "none",
+                rec.ai_confidence or 0.0,
+                rec.duration_s,
+            )
+
     # ------------------------------------------------------------------
     # Abstract execute
     # ------------------------------------------------------------------

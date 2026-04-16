@@ -1491,7 +1491,13 @@ class AIEngineer:
                 model=_MODEL,
                 max_tokens=_MAX_TOKENS,
                 temperature=_TEMPERATURE,
-                system=system_prompt,
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
                 messages=[{"role": "user", "content": user_prompt}],
             )
 
@@ -1696,12 +1702,17 @@ class AIEngineer:
                     pass
 
             if data is None:
-                match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-                if match:
+                # Use raw_decode to handle nested structures (arrays, sub-objects)
+                # that the simple regex r'\{[^{}]*\}' would miss.
+                brace = text.find("{")
+                if brace != -1:
                     try:
-                        data = json.loads(match.group(0))
+                        data, _ = json.JSONDecoder().raw_decode(text, brace)
                     except json.JSONDecodeError:
-                        pass
+                        logger.warning(
+                            "_parse_review: could not decode JSON from response: %r",
+                            text[:200],
+                        )
 
         if data is None:
             logger.warning("Unparseable AI review: %s", text[:200])

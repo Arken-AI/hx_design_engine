@@ -236,3 +236,54 @@ class TestParseReview:
         review = self._parse("This is not JSON at all")
         assert review.decision == AIDecisionEnum.WARN
         assert review.ai_called is True
+
+    def test_nested_json_with_options_array(self):
+        """raw_decode must handle nested structures that the old regex missed."""
+        raw = 'Here is my review: {"decision":"escalate","confidence":0.5,"reasoning":"x","corrections":[],"options":["a","b"]}'
+        review = self._parse(raw)
+        assert review.decision == AIDecisionEnum.ESCALATE
+        assert review.confidence == 0.5
+        assert review.options == ["a", "b"]
+
+    def test_malformed_json_logs_warning(self, caplog):
+        """Malformed JSON must log a warning, not silently return empty."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            review = self._parse("Some preamble {broken json")
+        assert review.decision == AIDecisionEnum.WARN
+        assert "could not decode" in caplog.text.lower()
+
+
+# -----------------------------------------------------------------------
+# _call_claude — cache_control in system param
+# -----------------------------------------------------------------------
+
+class TestCallClaudeCacheControl:
+    @pytest.mark.asyncio
+    async def test_system_prompt_sent_as_list_with_cache_control(self):
+        """system param must be a list with cache_control, not a plain string."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_response = MagicMock()
+        mock_block = MagicMock()
+        mock_block.text = '{"decision":"proceed","confidence":0.95,"reasoning":"ok","corrections":[]}'
+        mock_response.content = [mock_block]
+
+        mock_client = AsyncMock()
+        mock_client.messages.create.return_value = mock_response
+
+        with patch("hx_engine.app.core.ai_engineer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "test-key"
+            engineer = AIEngineer(stub_mode=False)
+            engineer._client = mock_client
+
+        state = DesignState()
+        step = _DummyStep()
+        result = StepResult(step_id=1, step_name="Dummy")
+
+        review = await engineer._call_claude(step, state, result)
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert isinstance(call_kwargs["system"], list)
+        assert call_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert review.decision == AIDecisionEnum.PROCEED

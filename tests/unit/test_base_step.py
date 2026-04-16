@@ -1,5 +1,6 @@
 """Tests for Piece 3: StepProtocol + BaseStep."""
 
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -272,3 +273,21 @@ class TestWarnResolution:
         assert result.ai_review.decision == AIDecisionEnum.WARN
         assert "heads up: tight clearance" in state.warnings
         assert len(state.step_records) == 1
+
+
+# -----------------------------------------------------------------------
+# Confidence log line
+# -----------------------------------------------------------------------
+
+class TestRecordLogsConfidence:
+    async def test_record_logs_ai_decision_and_confidence(self, caplog):
+        """_record() must emit a structured log line when ai_called=True."""
+        step = FullAIStep()
+        state = DesignState()
+        ai = AIEngineer(stub_mode=True)
+
+        with caplog.at_level(logging.INFO, logger="hx_engine.app.steps.base"):
+            await step.run_with_review_loop(state, ai)
+
+        assert "confidence=" in caplog.text
+        assert "decision=" in caplog.text
