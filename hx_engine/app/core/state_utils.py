@@ -6,11 +6,93 @@ the output-mapping logic without coupling to the pipeline orchestrator.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
     from hx_engine.app.models.step_result import StepResult
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Step → DesignState fields populated by that step.
+# Used by clear_state_from_step() to null out stale downstream data.
+# ---------------------------------------------------------------------------
+_STEP_STATE_FIELDS: dict[int, list[str]] = {
+    2: ["Q_W"],
+    3: [
+        "hot_fluid_props", "cold_fluid_props",
+        "hot_phase", "cold_phase",
+        "n_increments", "increment_results",
+    ],
+    4: ["geometry"],
+    5: ["LMTD_K", "F_factor"],
+    6: ["U_W_m2K", "A_m2", "A_required_low_m2", "A_required_high_m2"],
+    7: [
+        "h_tube_W_m2K", "tube_velocity_m_s",
+        "Re_tube", "Pr_tube", "Nu_tube", "flow_regime_tube",
+    ],
+    8: [
+        "h_shell_W_m2K", "Re_shell",
+        "shell_side_j_factors", "h_shell_ideal_W_m2K", "h_shell_kern_W_m2K",
+    ],
+    9: [
+        "U_clean_W_m2K", "U_dirty_W_m2K", "U_overall_W_m2K",
+        "cleanliness_factor", "resistance_breakdown", "controlling_resistance",
+        "U_kern_W_m2K", "U_kern_deviation_pct", "U_vs_estimated_deviation_pct",
+    ],
+    10: [
+        "dP_tube_Pa", "dP_shell_Pa",
+        "dP_tube_friction_Pa", "dP_tube_minor_Pa", "dP_tube_nozzle_Pa",
+        "dP_shell_crossflow_Pa", "dP_shell_window_Pa",
+        "dP_shell_end_Pa", "dP_shell_nozzle_Pa",
+    ],
+    11: [
+        "area_required_m2", "area_provided_m2",
+        "overdesign_pct", "A_estimated_vs_required_pct",
+    ],
+}
+
+# List-typed fields that should be reset to [] instead of None.
+_LIST_FIELDS: set[str] = {"increment_results"}
+
+
+def clear_state_from_step(state: "DesignState", from_step: int) -> None:
+    """Clear stale DesignState data from *from_step* onward.
+
+    Removes step_records, completed_steps, and escalation_history for
+    steps >= from_step, then nulls out the DesignState fields that those
+    steps populate so re-execution produces fresh values.
+    """
+    state.step_records = [
+        r for r in state.step_records if r.step_id < from_step
+    ]
+    state.completed_steps = [
+        s for s in state.completed_steps if s < from_step
+    ]
+    # Clear per-step escalation history for steps being re-run
+    for step_id in list(state.escalation_history):
+        if int(step_id) >= from_step:
+            del state.escalation_history[step_id]
+
+    # Null out fields populated by cleared steps
+    for step_id, fields in _STEP_STATE_FIELDS.items():
+        if step_id >= from_step:
+            for field_name in fields:
+                if field_name in _LIST_FIELDS:
+                    setattr(state, field_name, [])
+                else:
+                    setattr(state, field_name, None)
+
+    logger.info(
+        "[clear_state] Cleared state from Step %d onward "
+        "(step_records=%d remaining, completed_steps=%s)",
+        from_step,
+        len(state.step_records),
+        state.completed_steps,
+    )
 
 
 # Scalar field mapping: result.outputs key → DesignState attribute name.

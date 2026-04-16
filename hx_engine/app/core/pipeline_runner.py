@@ -17,7 +17,7 @@ from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
-from hx_engine.app.core.state_utils import apply_outputs
+from hx_engine.app.core.state_utils import apply_outputs, clear_state_from_step
 from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.models.design_state import DesignState
@@ -328,7 +328,7 @@ class PipelineRunner:
                         escalation_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        updated_state, user_response_text = await self._wait_for_user(
+                        updated_state, user_response_text, restart_from = await self._wait_for_user(
                             session_id, state, step, result
                         )
                         if updated_state is None:
@@ -389,28 +389,74 @@ class PipelineRunner:
                         # Refresh heartbeat — it may have expired while waiting
                         await self.session_store.heartbeat(session_id)
 
-                        # Drop the step record from the escalated run so the
-                        # re-run's record is the only one persisted for this step.
-                        state.step_records = [
-                            r for r in state.step_records
-                            if r.step_id != step.step_id
-                        ]
-                        # Re-emit step_started so the frontend resets the card
-                        await self.sse_manager.emit(
-                            session_id,
-                            StepStartedEvent(
-                                session_id=session_id,
-                                step_id=step.step_id,
-                                step_name=step.step_name,
-                            ).model_dump(),
-                        )
-                        logger.info(
-                            "[ESCALATE] Re-running step %d (%s) after user response "
-                            "(attempt %d/%d)",
-                            step.step_id, step.step_name,
-                            escalation_count, max_escalations,
-                        )
-                        continue  # Re-run the step with updated state
+                        if restart_from is not None and restart_from < step.step_id:
+                            # --- Restart from an earlier step ---
+                            # Clear stale state from restart point onward
+                            clear_state_from_step(state, restart_from)
+                            # Reset escalation counter — new execution path
+                            escalation_count = 0
+                            logger.info(
+                                "[ESCALATE-RESTART] Restarting from Step %d "
+                                "through Step %d after user chose restart",
+                                restart_from, step.step_id,
+                            )
+                            # Re-execute steps from restart_from through current step
+                            restart_steps = [
+                                s for s in PIPELINE_STEPS
+                                if restart_from <= s.step_id <= step.step_id
+                            ]
+                            for restart_step_cls in restart_steps:
+                                rs = restart_step_cls()
+                                await self.sse_manager.emit(
+                                    session_id,
+                                    StepStartedEvent(
+                                        session_id=session_id,
+                                        step_id=rs.step_id,
+                                        step_name=rs.step_name,
+                                    ).model_dump(),
+                                )
+                                try:
+                                    r = await rs.run_with_review_loop(
+                                        state, self.ai_engineer
+                                    )
+                                except (CalculationError, StepHardFailure) as exc:
+                                    state.pipeline_status = "error"
+                                    await self._emit_step_error(
+                                        session_id, rs,
+                                        str(exc) if isinstance(exc, CalculationError)
+                                        else "; ".join(exc.validation_errors),
+                                    )
+                                    return state
+                                self._apply_outputs(state, r)
+                                state.current_step = rs.step_id
+                                if rs.step_id not in state.completed_steps:
+                                    state.completed_steps.append(rs.step_id)
+                                await self._emit_decision_event(session_id, rs, r, 0)
+                                await self.session_store.save(session_id, state)
+                            # Current step was re-executed as part of the restart
+                            # chain — break out of the escalation while-loop.
+                            break
+                        else:
+                            # --- No restart needed: re-run current step only ---
+                            state.step_records = [
+                                r for r in state.step_records
+                                if r.step_id != step.step_id
+                            ]
+                            await self.sse_manager.emit(
+                                session_id,
+                                StepStartedEvent(
+                                    session_id=session_id,
+                                    step_id=step.step_id,
+                                    step_name=step.step_name,
+                                ).model_dump(),
+                            )
+                            logger.info(
+                                "[ESCALATE] Re-running step %d (%s) after user response "
+                                "(attempt %d/%d)",
+                                step.step_id, step.step_name,
+                                escalation_count, max_escalations,
+                            )
+                            continue  # Re-run the step with updated state
 
                     # --- handle actionable WARNING: pause, wait for user, then re-run ---
                     if (
@@ -422,7 +468,7 @@ class PipelineRunner:
                         warning_pause_count += 1
                         state.waiting_for_user = True
                         await self.session_store.save(session_id, state)
-                        updated_state, warn_response_text = await self._wait_for_user(
+                        updated_state, warn_response_text, _ = await self._wait_for_user(
                             session_id, state, step, result,
                             timeout=WARNING_PAUSE_TIMEOUT,
                             on_timeout="proceed",
@@ -677,7 +723,7 @@ class PipelineRunner:
                     await self._emit_decision_event(session_id, step12, result, 0)
                     state.waiting_for_user = True
                     await self.session_store.save(session_id, state)
-                    updated_state, user_response = await self._wait_for_user(
+                    updated_state, user_response, _ = await self._wait_for_user(
                         session_id, state, step12, result,
                     )
                     if updated_state is None:
@@ -694,36 +740,40 @@ class PipelineRunner:
                         )
                         break
 
-                # Re-run from restart step
+                # Clear stale state and re-run from restart step
                 logger.info(
                     "Convergence restart #%d from Step %d",
                     state.convergence_restart_count, restart_from,
                 )
+                clear_state_from_step(state, restart_from)
                 restart_steps = [
-                    s for s in PIPELINE_STEPS if s().step_id >= restart_from
+                    s for s in PIPELINE_STEPS if s.step_id >= restart_from
                 ]
                 for step_cls in restart_steps:
-                    step = step_cls()
+                    rs = step_cls()
                     await self.sse_manager.emit(
                         session_id,
                         StepStartedEvent(
                             session_id=session_id,
-                            step_id=step.step_id,
-                            step_name=step.step_name,
+                            step_id=rs.step_id,
+                            step_name=rs.step_name,
                         ).model_dump(),
                     )
                     try:
-                        r = await step.run_with_review_loop(state, self.ai_engineer)
+                        r = await rs.run_with_review_loop(state, self.ai_engineer)
                     except (CalculationError, StepHardFailure) as exc:
                         state.pipeline_status = "error"
                         await self._emit_step_error(
-                            session_id, step,
+                            session_id, rs,
                             str(exc) if isinstance(exc, CalculationError)
                             else "; ".join(exc.validation_errors),
                         )
                         return state
                     self._apply_outputs(state, r)
-                    state.current_step = step.step_id
+                    state.current_step = rs.step_id
+                    if rs.step_id not in state.completed_steps:
+                        state.completed_steps.append(rs.step_id)
+                    await self._emit_decision_event(session_id, rs, r, 0)
                     await self.session_store.save(session_id, state)
 
                 # Re-run convergence loop (continues the while loop)
@@ -961,12 +1011,14 @@ class PipelineRunner:
         *,
         timeout: int = USER_RESPONSE_TIMEOUT,
         on_timeout: str = "abort",
-    ) -> tuple[Optional[DesignState], str]:
+    ) -> tuple[Optional[DesignState], str, Optional[int]]:
         """Block the pipeline until the user responds via POST /respond.
 
-        Returns (updated_state, user_input_text).
+        Returns (updated_state, user_input_text, restart_from_step).
         updated_state is None on timeout when on_timeout='abort' (caller must abort).
-        When on_timeout='proceed', returns (current_state, "") on timeout.
+        When on_timeout='proceed', returns (current_state, "", None) on timeout.
+        restart_from_step is set when the user's choice requires restarting from
+        an earlier pipeline step (e.g. fluid-side swap → restart from Step 3).
 
         Response types:
           accept  — user accepts the AI's recommendation; apply suggested
@@ -977,6 +1029,7 @@ class PipelineRunner:
         """
         future = self.sse_manager.create_user_response_future(session_id)
         user_input = ""
+        restart_from: Optional[int] = None
         try:
             response = await asyncio.wait_for(
                 future, timeout=timeout
@@ -1010,9 +1063,7 @@ class PipelineRunner:
 
                 elif response_type == "override":
                     # User typed a specific value or clicked an option button.
-                    # Check for multi-shell keywords in the full response text
-                    # (covers both option-click text and typed free text).
-                    await self._apply_user_text_override(
+                    restart_from = await self._apply_user_text_override(
                         state, user_input,
                         step_id=step.step_id,
                         option_index=option_index,
@@ -1033,7 +1084,7 @@ class PipelineRunner:
                     "[WARNING-TIMEOUT] Proceeding with current values for step %d",
                     step.step_id,
                 )
-                return state, ""
+                return state, "", None
             # Default: abort pipeline (ESCALATE behavior)
             await self.sse_manager.emit(
                 session_id,
@@ -1044,8 +1095,8 @@ class PipelineRunner:
                     message="User response timeout — aborting pipeline.",
                 ).model_dump(),
             )
-            return None, ""  # Signal caller to abort
-        return state, user_input_raw
+            return None, "", None  # Signal caller to abort
+        return state, user_input_raw, restart_from
 
     # ------------------------------------------------------------------
     # User response interpretation helpers
@@ -1096,13 +1147,97 @@ class PipelineRunner:
         *,
         step_id: int = 0,
         option_index: int = -1,
-    ) -> None:
+    ) -> Optional[int]:
         """Parse free-text override for known field names.
+
+        Returns the step number to restart from, or None if no restart is needed
+        (re-run current step only).
 
         option_index is the 0-based index of the button the user clicked (-1 = typed free text).
         When option_index >= 0 and step_id matches, use deterministic index dispatch instead of
         regex so the action is reliable regardless of how the AI phrases the option.
         """
+        # --- Step 2: index-based dispatch for heat duty escalation ---
+        # Step 2 escalates for energy balance issues, phase-change detection,
+        # or data inconsistencies.  Typical options:
+        #   Option A (index 0): Revise temperatures or flow rates
+        #   Option B (index 1): Proceed with current values (accept imbalance / single-phase assumption)
+        #   Option C (index 2): Terminate — design is outside single-phase scope
+        if step_id == 2 and option_index >= 0:
+            if option_index == 0:
+                # Option A: user wants to revise input data.
+                # The AI's corrections (if any) were already applied in the
+                # "accept" path.  If the user clicked this button the intent
+                # is "re-run with whatever corrections you suggested".
+                # Apply any corrections from the AI review that may be
+                # present in escalation_history or review notes.
+                logger.info("[Step2-OptionA] User chose to revise — re-run Step 2 with current state")
+                return None  # re-run current step
+            if option_index == 1:
+                # Option B: proceed with current values despite the anomaly.
+                # Add an advisory note so downstream steps are aware.
+                state.notes.append(
+                    "Step 2: User accepted energy-balance anomaly / "
+                    "single-phase approximation — proceeding with current Q."
+                )
+                logger.info("[Step2-OptionB] User chose to proceed with current values")
+                # Mark the step as no longer needing escalation by returning
+                # a sentinel that tells the caller to skip the re-run and
+                # accept the current result as-is.
+                return None  # re-run will now PROCEED because state.notes signals acceptance
+            if option_index >= 2:
+                # Option C (or higher): terminate / out-of-scope
+                logger.info("[Step2-OptionC] User chose termination / out-of-scope")
+                state.notes.append(
+                    "Step 2: User confirmed design is outside single-phase scope."
+                )
+                return None
+
+        # --- Step 2: regex fallback for typed free text ---
+        if step_id == 2:
+            # Temperature override: e.g. "use T_cold_out = 45" or "set T_hot_out to 60"
+            temp_match = re.search(
+                r"(?:T_?(hot|cold)_?(in|out))\s*[=:]\s*([0-9]+\.?[0-9]*)",
+                text, re.IGNORECASE,
+            )
+            if temp_match:
+                side = temp_match.group(1).lower()
+                direction = temp_match.group(2).lower()
+                value = float(temp_match.group(3))
+                field = f"T_{side}_{direction}_C"
+                if hasattr(state, field):
+                    old_val = getattr(state, field)
+                    setattr(state, field, value)
+                    logger.info(
+                        "[Step2-Override] %s: %r → %r", field, old_val, value,
+                    )
+                return None
+
+            # Flow rate override: e.g. "m_dot_hot = 2.5" or "mass flow cold = 10"
+            flow_match = re.search(
+                r"(?:m_?dot_?(hot|cold)|mass\s*flow\s*(hot|cold))\s*[=:]\s*([0-9]+\.?[0-9]*)",
+                text, re.IGNORECASE,
+            )
+            if flow_match:
+                side = (flow_match.group(1) or flow_match.group(2)).lower()
+                value = float(flow_match.group(3))
+                field = f"m_dot_{side}_kg_s"
+                if hasattr(state, field):
+                    old_val = getattr(state, field)
+                    setattr(state, field, value)
+                    logger.info(
+                        "[Step2-Override] %s: %r → %r", field, old_val, value,
+                    )
+                return None
+
+            # "proceed" / "continue" / "accept" — user wants to move on despite anomaly
+            if re.search(r"\bproceed\b|\bcontinue\b|\baccept\b|\bgo ahead\b", text, re.IGNORECASE):
+                state.notes.append(
+                    "Step 2: User chose to proceed despite energy-balance anomaly."
+                )
+                logger.info("[Step2-Override] User chose to proceed with current values")
+                return None
+
         # --- Step 7: index-based dispatch for velocity escalation ---
         # Step 7 escalates when tube-side velocity is too low (< 0.5 m/s).
         # The AI typically offers two options:
@@ -1110,32 +1245,25 @@ class PipelineRunner:
         #   Option B (index 1): Reduce n_tubes and/or increase n_passes to increase velocity
         if step_id == 7 and option_index >= 0:
             if option_index == 0:
-                # Option A: Swap fluid allocation — put the higher-viscosity fluid on shell-side
-                # This effectively means: cold fluid (crude oil) → shell, hot fluid (water) → tube
+                # Option A: Swap fluid allocation — put the higher-viscosity fluid on shell-side.
+                # Requires restart from Step 3 so fluid properties, geometry, LMTD, and
+                # initial U are recomputed for the new allocation.
                 old_val = state.shell_side_fluid
                 new_val = "cold" if old_val == "hot" else "hot"
                 state.shell_side_fluid = new_val
                 logger.info(
-                    "[Step7-OptionA] shell_side_fluid swapped %r → %r to put viscous fluid on shell-side",
+                    "[Step7-OptionA] shell_side_fluid swapped %r → %r — restart from Step 3",
                     old_val, new_val,
                 )
-                # Need to clear geometry so Step 6 can re-select appropriate geometry
-                # for the new allocation (different TEMA type may be needed).
-                # However, we can't restart from Step 6 — we just swap and re-run Step 7.
-                # The velocity formula will use the swapped fluid's properties.
-                return
+                return 3  # restart from Step 3 (Fluid Properties)
             if option_index == 1:
-                # Option B: Reduce n_tubes and increase n_passes to increase velocity
-                # Velocity = (m_dot / rho) / (n_tubes_per_pass * A_tube_cross_section)
-                # n_tubes_per_pass = n_tubes / n_passes
-                # So: reducing n_tubes_per_pass increases velocity
+                # Option B: Reduce n_tubes and increase n_passes to increase velocity.
+                # No restart needed — re-run current step only.
                 if state.geometry is not None:
                     old_n_tubes = state.geometry.n_tubes
                     old_n_passes = state.geometry.n_passes
-                    # Strategy: halve n_tubes (or reduce by 30%) and double n_passes
-                    # This increases velocity by factor of ~2-4x
                     new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
-                    new_n_passes = min(8, (old_n_passes or 1) * 2)  # Cap at 8 (TEMA limit)
+                    new_n_passes = min(8, (old_n_passes or 1) * 2)
                     state.geometry.n_tubes = new_n_tubes
                     state.geometry.n_passes = new_n_passes
                     logger.info(
@@ -1144,7 +1272,7 @@ class PipelineRunner:
                     )
                 else:
                     logger.warning("[Step7-OptionB] No geometry to adjust — cannot increase velocity")
-                return
+                return None  # re-run current step only
 
         # --- Step 8: index-based dispatch (deterministic, regex-independent) ---
         if step_id == 8 and option_index >= 0:
@@ -1152,17 +1280,16 @@ class PipelineRunner:
                 # Option A: verify/re-fetch viscosity for the current shell-side fluid
                 logger.info("[Step8-OptionA] Refreshing shell-side fluid properties")
                 await _refresh_fluid_props_for_shell_side(state)
-                return
+                return None  # re-run current step only
             if option_index == 1:
-                # Option B: swap fluid-side assignments (oil→tube, water→shell)
+                # Option B: swap fluid-side assignments — requires restart from Step 3
                 old_val = state.shell_side_fluid
                 state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
                 logger.info(
-                    "[Step8-OptionB] shell_side_fluid swapped %r → %r",
+                    "[Step8-OptionB] shell_side_fluid swapped %r → %r — restart from Step 3",
                     old_val, state.shell_side_fluid,
                 )
-                await _refresh_fluid_props_for_shell_side(state)
-                return
+                return 3  # restart from Step 3 (Fluid Properties)
 
         # --- Regex fallback for typed free text and non-indexed steps ---
 
@@ -1179,37 +1306,34 @@ class PipelineRunner:
                     "User override (velocity): n_tubes %r → %r, n_passes %r → %r",
                     old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
                 )
-            return
+            return None
 
-        # --- Fluid-side swap (Step 7/8 escalation: swap shell/tube assignment) ---
+        # --- Fluid-side swap (typed free text) — requires restart from Step 3 ---
         if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
             old_val = state.shell_side_fluid
             state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
             logger.info(
-                "User override: shell_side_fluid swapped from %r to %r",
+                "User override: shell_side_fluid swapped from %r to %r — restart from Step 3",
                 old_val, state.shell_side_fluid,
             )
-            # After swapping, re-fetch fluid properties at shell-side mean temp
-            # so Step 8 re-run uses the correct fluid's viscosity.
-            await _refresh_fluid_props_for_shell_side(state)
-            return
+            return 3  # restart from Step 3 (Fluid Properties)
 
         # --- Viscosity verification (Step 8 escalation: re-fetch fluid props) ---
         if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
             logger.info("User override: refreshing shell-side fluid properties")
             await _refresh_fluid_props_for_shell_side(state)
-            return
+            return None
 
         # Multi-shell arrangement — check this first so "series"/"parallel"
         # in the text is acted on before looking for TEMA type codes.
         if re.search(r"\bseries\b", text, re.IGNORECASE):
             state.multi_shell_arrangement = "series"
             logger.info("User override: multi_shell_arrangement = 'series'")
-            return
+            return None
         if re.search(r"\bparallel\b", text, re.IGNORECASE):
             state.multi_shell_arrangement = "parallel"
             logger.info("User override: multi_shell_arrangement = 'parallel'")
-            return
+            return None
 
         # TEMA type mentioned explicitly
         match = re.search(
@@ -1220,6 +1344,7 @@ class PipelineRunner:
             logger.info(
                 "User override: tema_preference = %r", state.tema_preference
             )
+        return None
 
     @staticmethod
     def _build_summary(state: DesignState) -> dict[str, Any]:

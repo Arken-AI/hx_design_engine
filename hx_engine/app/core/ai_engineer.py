@@ -188,11 +188,25 @@ COMMON ISSUES WHEN YOU ARE CALLED:
 - Cp lookup used wrong fluid or wrong temperature range
 - Unit conversion error in flow rate (lb/hr vs kg/s)
 
+PHASE-CHANGE / CONDENSATION DETECTION:
+- If the hot fluid's temperature range crosses its boiling point, or the \
+fluid is known to condense in this range, this pipeline handles single-phase \
+liquids only.  If the user has already been asked about this in a prior \
+escalation and chose to proceed (check the escalation history and state notes), \
+you MUST use "proceed" — do NOT re-escalate for the same concern.
+
+RESPECTING USER DECISIONS:
+- If the escalation history shows the user already responded to a concern, \
+and the state notes contain "User accepted" or "User chose to proceed", \
+you MUST "proceed" with a "warn" at most.  Do NOT escalate again for the \
+same issue the user already acknowledged.
+
 DO NOT:
 - Override the energy balance equation — it is Q = ṁ × Cp × ΔT, period
 - Change flow rates unless there is clear evidence of a unit error
 - Change Cp values directly — flag them and let Step 3 resolve
-- Escalate for imbalances under 5% — use "warn" instead\
+- Escalate for imbalances under 5% — use "warn" instead
+- Re-escalate for an issue the user has already acknowledged in prior attempts\
 """
 
 _STEP_3_PROMPT = """\
@@ -1609,6 +1623,22 @@ class AIEngineer:
         if step_context:
             prompt_parts.extend(["", "### Computed Context", step_context])
 
+        # Inject relevant state notes (user decisions, accepted anomalies)
+        step_prefix = f"Step {step.step_id}:"
+        relevant_notes = [n for n in (state.notes or []) if step_prefix in n]
+        if relevant_notes:
+            prompt_parts.extend([
+                "",
+                "### User Decisions for This Step",
+                "The user has made explicit decisions that you MUST respect:",
+            ])
+            for note in relevant_notes:
+                prompt_parts.append(f"- {note}")
+            prompt_parts.append(
+                "If the user accepted an anomaly or chose to proceed, "
+                "use 'proceed' (with optional 'warn'). Do NOT re-escalate."
+            )
+
         # Inject escalation history so the AI doesn't repeat itself on re-escalation
         esc_history = getattr(state, "escalation_history", {})
         step_history = esc_history.get(str(step.step_id), [])
@@ -1628,7 +1658,11 @@ class AIEngineer:
             prompt_parts.append(
                 "Given the above history, if you must escalate again: "
                 "explain WHY the previous choice was insufficient, and offer "
-                "NEW options that address the remaining constraint."
+                "NEW options that address the remaining constraint. "
+                "However, if the user chose to proceed or accept the current "
+                "values, you MUST respect that decision and use 'proceed' "
+                "(with an optional 'warn' observation). Do NOT re-escalate "
+                "for an issue the user has already acknowledged."
             )
 
         # Append failure context on retry calls
