@@ -31,6 +31,7 @@ from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.models.design_state import FluidProperties
 from hx_engine.app.adapters.petroleum_correlations import (
     get_petroleum_properties,
+    pour_point_petroleum_K,
     resolve_petroleum_name,
 )
 
@@ -839,3 +840,62 @@ def get_two_phase_props(
         property_source="coolprop" if _CP else "iapws",
         property_confidence=0.90,
     )
+
+
+# ── freezing / pour point resolution ──────────────────────────────────────────
+
+# Water freezes at the IAPWS-IF97 triple point.
+_WATER_FREEZE_K = 273.16
+
+
+def get_freezing_or_pour_point(
+    fluid_name: str,
+    pressure_Pa: Optional[float] = None,  # noqa: ARG001 — reserved for future use
+) -> tuple[Optional[float], str]:
+    """Return ``(T_freeze_K, source)`` for a fluid, or ``(None, "unresolved")``.
+
+    Resolution order mirrors :func:`get_fluid_properties`:
+
+    1. Water / steam aliases       → triple point (273.16 K), source ``"iapws"``
+    2. CoolProp pure compounds     → ``Tmin`` (often the triple point),
+       source ``"coolprop"``
+    3. Petroleum cuts              → API-band pour-point estimate via
+       :func:`pour_point_petroleum_K`, source ``"petroleum-pour-point"``
+    4. Specialty fluids            → ``None`` (out-of-scope), source
+       ``"unresolved"``
+    5. ``thermo`` Chemical         → ``Tm`` (melting point), source ``"thermo"``
+
+    Returns ``(None, "unresolved")`` when no backend can supply a value.
+    Callers (Step 03) emit an INFO/AI-trigger in that case rather than
+    silently passing.
+    """
+    normalised = (fluid_name or "").strip().lower()
+    normalised = _FLUID_ALIAS_MAP.get(normalised, normalised)
+    normalised = _strip_phase_suffix(normalised)
+
+    if _is_water_or_steam(normalised):
+        return _WATER_FREEZE_K, "iapws"
+
+    cp_name = _COOLPROP_MAP.get(normalised)
+    if cp_name is not None and _CP is not None:
+        try:
+            t_min = float(_CP.PropsSI("Tmin", cp_name))
+            return t_min, "coolprop"
+        except Exception:  # noqa: BLE001 — CoolProp may raise many error types
+            pass
+
+    resolved = resolve_petroleum_name(normalised)
+    if resolved is not None:
+        char, _ = resolved
+        return pour_point_petroleum_K(char.api_gravity), "petroleum-pour-point"
+
+    if _Chemical is not None:
+        try:
+            chem = _Chemical(normalised)
+            t_m = getattr(chem, "Tm", None)
+            if t_m is not None:
+                return float(t_m), "thermo"
+        except Exception:  # noqa: BLE001 — thermo may fail for many reasons
+            pass
+
+    return None, "unresolved"

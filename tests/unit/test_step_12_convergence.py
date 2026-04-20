@@ -816,11 +816,11 @@ class TestShellUpsizeBaffleSpacingTEMAFloor:
 
         assert state.geometry.shell_diameter_m > old_shell, "upsize did not fire — fixture may need a larger n_tubes"
         floor = 0.2 * state.geometry.shell_diameter_m
-        assert state.geometry.baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
+        assert state.geometry.baffle_spacing_m >= floor - 1e-9
         if state.geometry.inlet_baffle_spacing_m is not None:
-            assert state.geometry.inlet_baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
+            assert state.geometry.inlet_baffle_spacing_m >= floor - 1e-9
         if state.geometry.outlet_baffle_spacing_m is not None:
-            assert state.geometry.outlet_baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
+            assert state.geometry.outlet_baffle_spacing_m >= floor - 1e-9
 
     def test_shell_upsize_below_floor_is_clamped(self):
         """When proportional rescale lands below the new floor, clamp holds."""
@@ -835,9 +835,9 @@ class TestShellUpsizeBaffleSpacingTEMAFloor:
 
         assert state.geometry.shell_diameter_m > old_shell, "upsize did not fire — fixture may need a larger n_tubes"
         floor = 0.2 * state.geometry.shell_diameter_m
-        assert state.geometry.baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
-        assert state.geometry.inlet_baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
-        assert state.geometry.outlet_baffle_spacing_m >= pytest.approx(floor, abs=1e-9)
+        assert state.geometry.baffle_spacing_m >= floor - 1e-9
+        assert state.geometry.inlet_baffle_spacing_m >= floor - 1e-9
+        assert state.geometry.outlet_baffle_spacing_m >= floor - 1e-9
 
 
 class TestStep4R5HoldsAfterStep12Adjustments:

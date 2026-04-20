@@ -398,6 +398,17 @@ class DesignState(BaseModel):
     m_dot_hot_kg_s: Optional[float] = None
     m_dot_cold_kg_s: Optional[float] = None
 
+    # --- flow input audit (P2-20) ---
+    # When the request supplied a volumetric/mass flow object (hot_flow /
+    # cold_flow), the resolver records the original value, unit, and the
+    # density used for the conversion here. None when the caller passed
+    # m_dot_*_kg_s directly. Step 3 re-confirms these densities at the
+    # bulk-mean temperature and emits a WARN if drift exceeds
+    # DENSITY_DRIFT_WARN_PCT.
+    hot_flow_input: Optional[dict] = None
+    cold_flow_input: Optional[dict] = None
+    flow_density_drift: Optional[dict] = None  # {"hot": pct, "cold": pct}
+
     # --- fluid names ---
     hot_fluid_name: Optional[str] = None
     cold_fluid_name: Optional[str] = None
@@ -418,6 +429,8 @@ class DesignState(BaseModel):
     n_increments: Optional[int] = None
     # Per-segment results for incremental calculation
     increment_results: list[IncrementResult] = Field(default_factory=list)
+    # P2-18 — per-side μ variation: {"hot": {"mu_ratio": ..., ...}, "cold": {...}}
+    viscosity_variation: Optional[dict] = None
 
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
@@ -450,7 +463,7 @@ class DesignState(BaseModel):
     Re_tube: Optional[float] = None
     Pr_tube: Optional[float] = None
     Nu_tube: Optional[float] = None
-    flow_regime_tube: Optional[str] = None   # "laminar" | "transition" | "turbulent"
+    flow_regime_tube: Optional[str] = None   # "laminar" | "transition_low_turbulent" | "turbulent"
 
     # --- shell-side heat transfer (populated by Step 8) ---
     h_shell_W_m2K: Optional[float] = None
@@ -469,6 +482,8 @@ class DesignState(BaseModel):
     U_kern_W_m2K: Optional[float] = None
     U_kern_deviation_pct: Optional[float] = None
     U_vs_estimated_deviation_pct: Optional[float] = None
+    # P2-18 — cross-method agreement reliability: 1.0 (normal) or 0.85 (viscous service)
+    cross_method_agreement_weight: Optional[float] = None
 
     # --- tube material properties (resolved by Step 9) ---
     tube_material: Optional[str] = None
@@ -499,12 +514,20 @@ class DesignState(BaseModel):
     dP_shell_simplified_delaware_Pa: Optional[float] = None
     dP_shell_kern_Pa: Optional[float] = None
     dP_shell_bell_vs_kern_pct: Optional[float] = None
+    # P2-25 — shell-side wall viscosity (basis ∈ {"computed","approx_bulk"})
+    mu_s_wall_Pa_s: Optional[float] = None
+    mu_s_wall_basis: Optional[str] = None
+    mu_s_wall_fail_reason: Optional[str] = None
 
     # --- area + overdesign (populated by Step 11) ---
     area_required_m2: Optional[float] = None       # Q / (U_dirty × F × LMTD)
     area_provided_m2: Optional[float] = None       # π × d_o × L × N_t
     overdesign_pct: Optional[float] = None          # (A_provided - A_required) / A_required × 100
     A_estimated_vs_required_pct: Optional[float] = None  # (A_m2 - area_required_m2) / area_required_m2 × 100
+    service_classification: Optional[str] = None   # P2-23: clean_utility / phase_change / standard_process / fouling_service
+    overdesign_band_low: Optional[float] = None    # P2-23: lower AI-trigger bound for this service (%)
+    overdesign_band_high: Optional[float] = None   # P2-23: upper AI-trigger bound for this service (%)
+    fouling_paradox_severity: Optional[str] = None  # P2-24: None / "warn" / "escalate"
 
     # --- convergence loop tracking (populated by Step 12) ---
     convergence_iteration: Optional[int] = None       # Which iteration converged (None if not run yet)
@@ -560,6 +583,10 @@ class DesignState(BaseModel):
     # +50-75 mm clearance. True for fixed-tubesheet types (BEM, etc.) and
     # after Step 15 confirms the shell ID.
     shell_id_finalised: bool = False
+
+    # P2-12 — Highly toxic service triggers double-tubesheet evaluation
+    # in Step 14 (set by Step 4 allocator).
+    requires_double_tubesheet_review: bool = False
 
     # --- design strengths / risks (FE-5, populated by Step 16) ---
     design_strengths: list[str] = Field(default_factory=list)

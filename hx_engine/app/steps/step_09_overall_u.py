@@ -59,6 +59,12 @@ _MAX_KERN_DEVIATION_ESCALATE_PCT = 50.0
 _MAX_WALL_RESISTANCE_WARN_PCT = 10.0
 _WALL_RESISTANCE_DENOMINATOR = 2.0  # log-mean wall resistance: d_o * ln(d_o/d_i) / (2k)
 
+# P2-18 — when μ varies ≥ 5× across ΔT on either side, both Bell-Delaware and
+# Kern are weakest as mutual calibration signals. Penalise the cross-method
+# agreement weight so Step 16 (and reviewers) see reduced confidence.
+_MU_VARIATION_AI_THRESHOLD = 5.0          # mirrors step_03_fluid_props._MU_VARIATION_AI
+_CROSS_METHOD_VISCOUS_PENALTY = 0.85      # ×0.85 reliability factor
+
 # ---------------------------------------------------------------------------
 # Internal data structures
 # ---------------------------------------------------------------------------
@@ -367,7 +373,23 @@ def _build_outputs(
         outputs["U_kern_deviation_pct"] = kern.deviation_pct
     if hints:
         outputs["escalation_hints"] = hints
+    outputs["cross_method_agreement_weight"] = getattr(state, "cross_method_agreement_weight", 1.0)
     return outputs
+
+
+def _cross_method_agreement_weight(state: "DesignState") -> float:
+    """Return cross-method agreement reliability weight (P2-18).
+
+    Normal services → 1.0. When any side's μ varies ≥ 5× across ΔT,
+    BD and Kern are both weakest as calibration signals → 0.85.
+    """
+    mu_var = getattr(state, "viscosity_variation", None) or {}
+    for side_info in mu_var.values():
+        if not side_info:
+            continue
+        if (side_info.get("mu_ratio") or 0.0) >= _MU_VARIATION_AI_THRESHOLD:
+            return _CROSS_METHOD_VISCOUS_PENALTY
+    return 1.0
 
 
 class Step09OverallU(BaseStep):
@@ -426,6 +448,17 @@ class Step09OverallU(BaseStep):
         _write_results_to_state(state, u_dirty, u_clean, cf, resistances, kern, u_vs_estimated)
         warnings = _collect_warnings(u_dirty, cf, kern, u_vs_estimated, resistances, mat)
         hints = _escalation_hints(u_dirty, cf, kern)
+
+        # P2-18 — cross-method reliability penalty for viscous services
+        cm_weight = _cross_method_agreement_weight(state)
+        state.cross_method_agreement_weight = cm_weight
+        if cm_weight < 1.0:
+            warnings.append(
+                f"Viscous service (μ ratio ≥ {_MU_VARIATION_AI_THRESHOLD:.0f}× on at "
+                f"least one side) — Bell-Delaware/Kern cross-method agreement is less "
+                f"reliable; cross_method_agreement_weight={cm_weight:.2f}."
+            )
+
         outputs = _build_outputs(u_dirty, u_clean, cf, resistances, kern, u_vs_estimated, mat, state, hints)
 
         return StepResult(

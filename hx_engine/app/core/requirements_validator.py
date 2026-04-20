@@ -61,7 +61,8 @@ _KNOWN_FLUIDS = {
     "brine", "molten salt",
 }
 
-_VALID_TEMA = {"AES", "BEM", "AEU", "AEP", "AEL", "AEW"}
+# AEL excluded — no Step 4 selection path / no downstream support; see P2-13.
+_VALID_TEMA = {"AES", "BEM", "AEU", "AEP", "AEW"}
 
 # Temperature bounds (°C)
 _TEMP_MIN = -50.0

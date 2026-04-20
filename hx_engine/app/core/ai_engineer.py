@@ -305,7 +305,7 @@ CHECK:
 - Is crude/heavy oil correctly on the shell side?
 
 ### B. TEMA Type Selection
-Valid types: BEM, AES, AEP, AEU, AEL, AEW
+Valid types: BEM, AES, AEP, AEU, AEW
 
 | Condition | Expected TEMA |
 |-----------|---------------|

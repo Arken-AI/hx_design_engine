@@ -7,6 +7,19 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
+class FlowInput(BaseModel):
+    """Volumetric or mass flow specification for one side (P2-20).
+
+    Either side accepts ``{"value": 50, "unit": "kg_s"}``,
+    ``{"value": 200, "unit": "m3_h"}``, etc. See
+    :data:`hx_engine.app.core.volumetric_flow.SUPPORTED_VOLUMETRIC_UNITS`
+    for the closed set of supported units.
+    """
+
+    value: float = Field(..., gt=0, description="Magnitude (must be positive).")
+    unit: str = Field(..., description="One of the supported flow units.")
+
+
 class DesignRequest(BaseModel):
     """Payload for POST /api/v1/hx/requirements and POST /api/v1/hx/design."""
 
@@ -27,6 +40,13 @@ class DesignRequest(BaseModel):
     T_hot_in_C: Optional[float] = None
     T_cold_in_C: Optional[float] = None
     m_dot_hot_kg_s: Optional[float] = None
+
+    # --- Optional volumetric/mass flow input (P2-20) ---
+    # When provided, takes precedence over the m_dot_*_kg_s scalars and is
+    # resolved to kg/s by core.volumetric_flow.resolve_mass_flow using the
+    # property backend at inlet conditions.
+    hot_flow: Optional[FlowInput] = None
+    cold_flow: Optional[FlowInput] = None
 
     # --- Optional — Step 2 derives missing values via energy balance ---
     T_hot_out_C: Optional[float] = None

@@ -4,8 +4,8 @@ Computes the required heat transfer area (from calculated U) and compares
 it to the provided area (from physical geometry) to yield the overdesign
 percentage — the primary convergence signal for Step 12.
 
-ai_mode = CONDITIONAL — AI called only when overdesign < 8% or > 30%.
-Skipped in convergence loop.
+ai_mode = CONDITIONAL — AI called when overdesign is outside the
+service-appropriate band (P2-23). Skipped in convergence loop.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import math
 from typing import TYPE_CHECKING
 
 from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.data.u_assumptions import classify_fluid_type
 from hx_engine.app.models.step_result import AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
 
@@ -26,10 +27,114 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Overdesign thresholds (%)
-_OVERDESIGN_AI_LOW = 8.0       # AI trigger below this
-_OVERDESIGN_AI_HIGH = 30.0     # AI trigger above this
-_OVERDESIGN_WARN_HIGH = 40.0   # Warning threshold
+_OVERDESIGN_WARN_HIGH = 40.0   # Warning threshold (retained for excessive overdesign)
+
+# ---------------------------------------------------------------------------
+# P2-23 — Service-aware overdesign bands
+# Maps service classification → (AI_low%, AI_high%)
+# ---------------------------------------------------------------------------
+_OVERDESIGN_BANDS: dict[str, tuple[float, float]] = {
+    "clean_utility":    (5.0,  15.0),
+    "phase_change":     (5.0,  20.0),
+    "standard_process": (8.0,  25.0),
+    "fouling_service":  (10.0, 35.0),
+}
+
+_PHASE_CHANGE_TYPES: frozenset[str] = frozenset({
+    "condensing_vapor_water", "condensing_vapor_organic",
+    "condensing_vapor_refrigerant",
+    "boiling_water", "boiling_organic", "boiling_refrigerant",
+})
+
+_FOULING_SERVICE_TYPES: frozenset[str] = frozenset({
+    "crude", "heavy_organic", "viscous_oil",
+})
+
+_CLEAN_UTILITY_TYPES: frozenset[str] = frozenset({
+    "water", "steam",
+})
+
+# ---------------------------------------------------------------------------
+# P2-24 — Low-velocity fouling paradox thresholds
+# ---------------------------------------------------------------------------
+_OD_FOULING_TRIGGER = 30.0           # overdesign % to trigger WARN
+_OD_FOULING_ESCALATE = 50.0          # overdesign % to trigger ESCALATE
+_FOULING_VELOCITY_FLOOR_TUBE = 1.0   # m/s — below this with OD≥30% → WARN
+_FOULING_VELOCITY_ESCALATE_TUBE = 0.5  # m/s — below this with OD≥50% → ESCALATE
+_FOULING_VELOCITY_FLOOR_SHELL = 0.6  # m/s — shell-side equivalent (informational)
+_FOULING_R_F_THRESHOLD = 3.5e-4      # m²·K/W — minimum Rf to consider a fouling service
+
+
+def _classify_service(state: "DesignState") -> str:
+    """Classify the heat exchanger service for overdesign band selection (P2-23)."""
+    hot_phase = getattr(state, "hot_phase", None)
+    cold_phase = getattr(state, "cold_phase", None)
+    hot_type = classify_fluid_type(
+        state.hot_fluid_name or "",
+        getattr(state, "hot_fluid_props", None),
+        phase=hot_phase,
+    )
+    cold_type = classify_fluid_type(
+        state.cold_fluid_name or "",
+        getattr(state, "cold_fluid_props", None),
+        phase=cold_phase,
+    )
+    if hot_type in _PHASE_CHANGE_TYPES or cold_type in _PHASE_CHANGE_TYPES:
+        return "phase_change"
+    if hot_type in _FOULING_SERVICE_TYPES or cold_type in _FOULING_SERVICE_TYPES:
+        return "fouling_service"
+    if hot_type in _CLEAN_UTILITY_TYPES and cold_type in _CLEAN_UTILITY_TYPES:
+        return "clean_utility"
+    return "standard_process"
+
+
+def _low_velocity_fouling_paradox(
+    state: "DesignState",
+    service_classification: str,
+) -> tuple[str | None, str]:
+    """Return (severity, message) for the low-velocity fouling paradox (P2-24).
+
+    Severity is None, "warn", or "escalate".  The paradox occurs when excess
+    area lowers tube velocity in a fouling service, accelerating deposit growth
+    and negating the benefit of the extra margin.
+
+    ``service_classification`` is passed explicitly to avoid re-classifying
+    fluids and to skip the check for clean / phase-change services where the
+    paradox does not apply.
+    """
+    if service_classification == "clean_utility":
+        return None, ""
+    if state.overdesign_pct is None:
+        return None, ""
+
+    rf_hot = getattr(state, "R_f_hot_m2KW", None) or 0.0
+    rf_cold = getattr(state, "R_f_cold_m2KW", None) or 0.0
+    rf_max = max(rf_hot, rf_cold)
+    if rf_max < _FOULING_R_F_THRESHOLD:
+        return None, ""
+
+    tube_vel = getattr(state, "tube_velocity_m_s", None)
+    if tube_vel is None:
+        return None, ""
+
+    od = state.overdesign_pct
+
+    if tube_vel < _FOULING_VELOCITY_ESCALATE_TUBE and od >= _OD_FOULING_ESCALATE:
+        return "escalate", (
+            f"Low-velocity fouling paradox: tube velocity {tube_vel:.2f} m/s "
+            f"< {_FOULING_VELOCITY_ESCALATE_TUBE} m/s, overdesign {od:.1f}% "
+            f"≥ {_OD_FOULING_ESCALATE:.0f}%, Rf = {rf_max:.2e} m²·K/W — "
+            f"excess area reduces velocity and accelerates fouling. "
+            f"Reduce tube count or split into multiple shells."
+        )
+    if tube_vel < _FOULING_VELOCITY_FLOOR_TUBE and od >= _OD_FOULING_TRIGGER:
+        return "warn", (
+            f"Low-velocity fouling paradox: tube velocity {tube_vel:.2f} m/s "
+            f"< {_FOULING_VELOCITY_FLOOR_TUBE} m/s with overdesign {od:.1f}% "
+            f"≥ {_OD_FOULING_TRIGGER:.0f}% and Rf = {rf_max:.2e} m²·K/W — "
+            f"consider reducing tube count to maintain design velocity."
+        )
+    return None, ""
 
 
 class Step11AreaOverdesign(BaseStep):
@@ -49,14 +154,14 @@ class Step11AreaOverdesign(BaseStep):
         return self._conditional_ai_trigger(state)
 
     def _conditional_ai_trigger(self, state: "DesignState") -> bool:
-        """Call AI when overdesign is outside the 8–30% comfort zone."""
+        """Call AI when overdesign is outside the service-appropriate band (P2-23)."""
         if state.overdesign_pct is None:
             return False
-        if state.overdesign_pct < _OVERDESIGN_AI_LOW:
-            return True
-        if state.overdesign_pct > _OVERDESIGN_AI_HIGH:
-            return True
-        return False
+        # Read from state if execute() already classified the service this run;
+        # otherwise fall back to classifying now (e.g. standalone trigger checks).
+        service = getattr(state, "service_classification", None) or _classify_service(state)
+        ai_low, ai_high = _OVERDESIGN_BANDS[service]
+        return state.overdesign_pct < ai_low or state.overdesign_pct > ai_high
 
     # ------------------------------------------------------------------
     # Pre-condition checks
@@ -102,6 +207,10 @@ class Step11AreaOverdesign(BaseStep):
 
         warnings: list[str] = []
         g = state.geometry
+
+        # P2-23 — resolve service band early so _conditional_ai_trigger is consistent
+        service_classification = _classify_service(state)
+        od_band_low, od_band_high = _OVERDESIGN_BANDS[service_classification]
 
         # 2. Guard against near-zero driving force
         effective_driving = state.F_factor * state.LMTD_K
@@ -163,20 +272,34 @@ class Step11AreaOverdesign(BaseStep):
                 f"Step 6 area deviation = {A_est_vs_req_pct:+.1f}%"
             )
 
-        # 8. Write to state
+        # 8. P2-24 — low-velocity fouling paradox check
+        # WARN is emitted inline; ESCALATE is gated by Layer 2 rule in step_11_rules.py.
+        paradox_severity, paradox_msg = _low_velocity_fouling_paradox(
+            state, service_classification
+        )
+        if paradox_severity == "warn":
+            warnings.append(paradox_msg)
+
+        # 9. Write to state
         state.area_required_m2 = A_required
         state.area_provided_m2 = A_provided
         state.overdesign_pct = overdesign_pct
         state.A_estimated_vs_required_pct = A_est_vs_req_pct
+        state.service_classification = service_classification
 
-        # 9. Build outputs dict
+        # 10. Build outputs dict
         outputs: dict = {
             "area_required_m2": A_required,
             "area_provided_m2": A_provided,
             "overdesign_pct": overdesign_pct,
+            "service_classification": service_classification,
+            "overdesign_band_low": od_band_low,
+            "overdesign_band_high": od_band_high,
         }
         if A_est_vs_req_pct is not None:
             outputs["A_estimated_vs_required_pct"] = A_est_vs_req_pct
+        if paradox_severity is not None:
+            outputs["fouling_paradox_severity"] = paradox_severity
 
         return StepResult(
             step_id=self.step_id,

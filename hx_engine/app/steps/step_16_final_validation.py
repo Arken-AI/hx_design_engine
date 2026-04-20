@@ -48,6 +48,14 @@ SUPERMEMORY_SIMILARITY_PLACEHOLDER = 0.5
 # Confidence threshold for future Supermemory save (stub/TODO)
 SUPERMEMORY_SAVE_THRESHOLD = 0.75
 
+# P2-22: Gnielinski is least accurate in the 2300 < Re < 10 000 band (±15%).
+_THERMAL_PENALTY_TRANSITION_ZONE = 0.90
+
+# P2-25: When shell-side μ_wall falls back to bulk, Sieder-Tate correction = 1.0.
+# Only applied when the shell fluid is viscous (mirrors step_10 threshold).
+_THERMAL_PENALTY_WALL_MU_APPROX = 0.90
+_MU_VISCOUS_THRESHOLD_PA_S = 0.01  # 10 cP
+
 
 # ---------------------------------------------------------------------------
 # Helper functions (module-level, testable independently)
@@ -204,6 +212,40 @@ class Step16FinalValidation(BaseStep):
         )
         confidence_score = round(confidence_score, 4)
 
+        # 4b. Thermal-accuracy penalties (P2-22, P2-25)
+        # Applied as multipliers after the weighted sum so each penalty is
+        # visible in the breakdown independently of the four base components.
+        thermal_penalties: list[str] = []
+
+        # P2-22: transition / low-turbulent zone — Gnielinski ±15%
+        if getattr(state, "flow_regime_tube", None) == "transition_low_turbulent":
+            confidence_score = round(
+                confidence_score * _THERMAL_PENALTY_TRANSITION_ZONE, 4,
+            )
+            thermal_penalties.append(
+                f"transition_zone_Re ×{_THERMAL_PENALTY_TRANSITION_ZONE}: "
+                f"Gnielinski accuracy ±15% (2300 < Re < 10000)"
+            )
+
+        # P2-25: shell-side μ_wall approximated as bulk on a viscous fluid
+        if getattr(state, "mu_s_wall_basis", None) == "approx_bulk":
+            shell_mu = 0.0
+            if state.shell_side_fluid == "hot" and state.hot_fluid_props:
+                shell_mu = state.hot_fluid_props.viscosity_Pa_s or 0.0
+            elif state.shell_side_fluid == "cold" and state.cold_fluid_props:
+                shell_mu = state.cold_fluid_props.viscosity_Pa_s or 0.0
+            if shell_mu > _MU_VISCOUS_THRESHOLD_PA_S:
+                confidence_score = round(
+                    confidence_score * _THERMAL_PENALTY_WALL_MU_APPROX, 4,
+                )
+                thermal_penalties.append(
+                    f"shell_wall_mu_approx ×{_THERMAL_PENALTY_WALL_MU_APPROX}: "
+                    f"Sieder-Tate correction = 1.0 (μ_bulk={shell_mu*1000:.1f} cP)"
+                )
+
+        if thermal_penalties:
+            confidence_breakdown["thermal_penalties"] = thermal_penalties
+
         # 5. Score interpretation warnings
         if confidence_score < 0.50:
             warnings.append(
@@ -238,17 +280,21 @@ class Step16FinalValidation(BaseStep):
         )
 
         # 9. Build StepResult
+        outputs: dict = {
+            "confidence_score": confidence_score,
+            "confidence_breakdown": confidence_breakdown,
+            "design_summary": fallback_summary,
+            "assumptions": [],
+            "design_strengths": [],
+            "design_risks": [],
+        }
+        if thermal_penalties:
+            outputs["thermal_penalties"] = thermal_penalties
+
         return StepResult(
             step_id=self.step_id,
             step_name=self.step_name,
-            outputs={
-                "confidence_score": confidence_score,
-                "confidence_breakdown": confidence_breakdown,
-                "design_summary": fallback_summary,
-                "assumptions": [],
-                "design_strengths": [],
-                "design_risks": [],
-            },
+            outputs=outputs,
             warnings=warnings,
         )
 

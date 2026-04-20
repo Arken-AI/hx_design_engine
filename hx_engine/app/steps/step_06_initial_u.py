@@ -91,12 +91,14 @@ class Step06InitialU(BaseStep):
         fluid_name: str,
         fluid_props,
         applied_corrections: dict | None,
+        phase: str | None = None,
     ) -> tuple[str, str | None]:
         """Resolve a fluid category for one side, honouring AI overrides.
 
         Returns ``(category, override_source)`` where ``override_source`` is
         the correction key that supplied the value (or ``None`` if the
         category was derived from name/property classification).
+        ``phase`` from Step 3 activates phase-change categories (P2-21).
         """
         keys = cls._HOT_OVERRIDE_KEYS if side == "hot" else cls._COLD_OVERRIDE_KEYS
         if applied_corrections:
@@ -104,7 +106,7 @@ class Step06InitialU(BaseStep):
                 override = applied_corrections.get(key)
                 if override:
                     return override, key
-        return classify_fluid_type(fluid_name, fluid_props), None
+        return classify_fluid_type(fluid_name, fluid_props, phase=phase), None
 
     # ------------------------------------------------------------------
     # Core execute
@@ -142,12 +144,14 @@ class Step06InitialU(BaseStep):
             fluid_name=state.hot_fluid_name,
             fluid_props=state.hot_fluid_props,
             applied_corrections=state.applied_corrections,
+            phase=getattr(state, "hot_phase", None),
         )
         cold_type, cold_override_source = self._resolve_category(
             side="cold",
             fluid_name=state.cold_fluid_name,
             fluid_props=state.cold_fluid_props,
             applied_corrections=state.applied_corrections,
+            phase=getattr(state, "cold_phase", None),
         )
 
         # When either side was overridden, bypass the name-based U lookup in
@@ -164,6 +168,8 @@ class Step06InitialU(BaseStep):
                 state.cold_fluid_name,
                 hot_properties=state.hot_fluid_props,
                 cold_properties=state.cold_fluid_props,
+                hot_phase=getattr(state, "hot_phase", None),
+                cold_phase=getattr(state, "cold_phase", None),
             )
         U_low = u_data["U_low"]
         U_mid = u_data["U_mid"]

@@ -26,6 +26,7 @@ _STEP_STATE_FIELDS: dict[int, list[str]] = {
         "hot_fluid_props", "cold_fluid_props",
         "hot_phase", "cold_phase",
         "n_increments", "increment_results",
+        "viscosity_variation",
     ],
     4: ["geometry"],
     5: ["LMTD_K", "F_factor"],
@@ -42,6 +43,7 @@ _STEP_STATE_FIELDS: dict[int, list[str]] = {
         "U_clean_W_m2K", "U_dirty_W_m2K", "U_overall_W_m2K",
         "cleanliness_factor", "resistance_breakdown", "controlling_resistance",
         "U_kern_W_m2K", "U_kern_deviation_pct", "U_vs_estimated_deviation_pct",
+        "cross_method_agreement_weight",
     ],
     10: [
         "dP_tube_Pa", "dP_shell_Pa",
@@ -52,6 +54,8 @@ _STEP_STATE_FIELDS: dict[int, list[str]] = {
     11: [
         "area_required_m2", "area_provided_m2",
         "overdesign_pct", "A_estimated_vs_required_pct",
+        "service_classification", "overdesign_band_low", "overdesign_band_high",
+        "fouling_paradox_severity",
     ],
 }
 
@@ -120,6 +124,8 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     "R_f_cold_m2KW": "R_f_cold_m2KW",
     "multi_shell_arrangement": "multi_shell_arrangement",
     "shell_id_finalised": "shell_id_finalised",
+    # Step 3 computed fields
+    "viscosity_variation": "viscosity_variation",
     "A_required_low_m2": "A_required_low_m2",
     "A_required_high_m2": "A_required_high_m2",
     "h_tube_W_m2K": "h_tube_W_m2K",
@@ -150,6 +156,7 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     "U_kern_W_m2K": "U_kern_W_m2K",
     "U_kern_deviation_pct": "U_kern_deviation_pct",
     "U_vs_estimated_deviation_pct": "U_vs_estimated_deviation_pct",
+    "cross_method_agreement_weight": "cross_method_agreement_weight",
     # Step 10 pressure drops
     "dP_tube_Pa": "dP_tube_Pa",
     "dP_shell_Pa": "dP_shell_Pa",
@@ -178,6 +185,10 @@ _OUTPUT_FIELD_MAP: dict[str, str] = {
     "area_provided_m2": "area_provided_m2",
     "overdesign_pct": "overdesign_pct",
     "A_estimated_vs_required_pct": "A_estimated_vs_required_pct",
+    "service_classification": "service_classification",
+    "overdesign_band_low": "overdesign_band_low",
+    "overdesign_band_high": "overdesign_band_high",
+    "fouling_paradox_severity": "fouling_paradox_severity",
     # Step 12 convergence tracking
     "convergence_iteration": "convergence_iteration",
     "convergence_converged": "convergence_converged",

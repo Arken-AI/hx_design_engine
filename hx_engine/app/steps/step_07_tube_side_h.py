@@ -29,6 +29,21 @@ if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
 
 
+# ── Transition-zone boundaries (P2-22) ──────────────────────────────
+# Gnielinski is validated for Re ≥ 10000; below that the flow is
+# unstable / partially developed. We use the same band for both the
+# engineer-facing warning and the AI conditional trigger.
+_TRANSITION_RE_LOW = 2300
+_TRANSITION_RE_HIGH = 10000
+
+
+def _flag_transition_zone(Re: float | None) -> bool:
+    """True when Re sits in the unstable transition / low-turbulent band."""
+    if Re is None:
+        return False
+    return _TRANSITION_RE_LOW < Re < _TRANSITION_RE_HIGH
+
+
 class Step07TubeSideH(BaseStep):
     """Step 7: Tube-side heat transfer coefficient calculation."""
 
@@ -186,9 +201,11 @@ class Step07TubeSideH(BaseStep):
         ) or "liquid"
         is_gas = tube_phase == "vapor"
 
-        if 2300 < Re < 4000:
+        if _flag_transition_zone(Re):
             warnings.append(
-                f"Transition zone (Re={Re:.0f}): flow genuinely unstable"
+                f"tube-side Re={Re:.0f} in transition / low-turbulent zone "
+                f"({_TRANSITION_RE_LOW}<Re<{_TRANSITION_RE_HIGH}); "
+                f"Gnielinski accuracy ±15%."
             )
 
         # Gas-phase velocity thresholds differ from liquid
@@ -219,12 +236,18 @@ class Step07TubeSideH(BaseStep):
         self._h_i = htc_result["h_i"]
 
         # 11. Write state directly
+        # Re-band the regime so the band the user sees matches the band the
+        # AI trigger and warning use (Gnielinski-validity, P2-22).
+        flow_regime = htc_result["flow_regime"]
+        if _flag_transition_zone(Re):
+            flow_regime = "transition_low_turbulent"
+
         state.h_tube_W_m2K = htc_result["h_i"]
         state.tube_velocity_m_s = velocity
         state.Re_tube = Re
         state.Pr_tube = Pr
         state.Nu_tube = htc_result["Nu"]
-        state.flow_regime_tube = htc_result["flow_regime"]
+        state.flow_regime_tube = flow_regime
         state.T_mean_hot_C = T_mean_hot
         state.T_mean_cold_C = T_mean_cold
 
@@ -235,7 +258,7 @@ class Step07TubeSideH(BaseStep):
             "Re_tube": Re,
             "Pr_tube": Pr,
             "Nu_tube": htc_result["Nu"],
-            "flow_regime_tube": htc_result["flow_regime"],
+            "flow_regime_tube": flow_regime,
             "method": htc_result["method"],
             "f_petukhov": htc_result["f_petukhov"],
             "viscosity_correction": htc_result["viscosity_correction"],
@@ -283,13 +306,14 @@ class Step07TubeSideH(BaseStep):
                         f"erosion risk. Consider reducing n_passes."
                     ),
                 })
-        if 2300 < Re < 10000:
+        if _flag_transition_zone(Re):
             escalation_hints.append({
                 "trigger": "transition_zone",
                 "recommendation": (
-                    f"Re = {Re:.0f} is in the transition zone. "
+                    f"Re = {Re:.0f} is in the transition / low-turbulent "
+                    f"zone ({_TRANSITION_RE_LOW}<Re<{_TRANSITION_RE_HIGH}). "
                     f"Flow is unstable; consider geometry changes to push "
-                    f"Re above 10000."
+                    f"Re above {_TRANSITION_RE_HIGH}."
                 ),
             })
         if escalation_hints:
@@ -342,7 +366,7 @@ class Step07TubeSideH(BaseStep):
             if h_i is not None and (h_i < 50 or h_i > 15000):
                 return True
 
-        if Re is not None and 2300 < Re < 10000:
+        if _flag_transition_zone(Re):
             return True
 
         return False

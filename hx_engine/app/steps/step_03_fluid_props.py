@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from hx_engine.app.adapters.thermo_adapter import (
     get_fluid_properties,
+    get_freezing_or_pour_point,
     get_saturation_props,
 )
 from hx_engine.app.core.exceptions import CalculationError
@@ -36,6 +37,14 @@ _WATER_ALIASES = frozenset({
     "water", "cooling water", "chilled water", "hot water",
     "boiler water", "sea water", "seawater", "condensate",
 })
+
+# ── P2-18: viscosity-variation severity bands (μ_max / μ_min over ΔT) ──
+_MU_VARIATION_WARN = 2.0      # warn engineer in StepResult
+_MU_VARIATION_AI = 5.0        # also trigger conditional AI review
+_MU_VARIATION_ESCALATE = 10.0 # rule failure → ESCALATE (correctable=False)
+
+# ── P2-19: freezing-point soft-margin band (T_min - T_freeze) ──────────
+_FREEZE_MARGIN_WARN_K = 5.0
 
 
 class Step03FluidProperties(BaseStep):
@@ -256,6 +265,24 @@ class Step03FluidProperties(BaseStep):
             state.P_cold_Pa, "Cold", warnings,
         )
 
+        # --- P2-18: viscosity variation across ΔT (per side) ---
+        viscosity_variation = await self._check_viscosity_variation_both_sides(
+            state, warnings,
+        )
+
+        # --- P2-19: freezing-point margin (per side) ---
+        freezing_check = self._check_freezing_points(state, warnings)
+        self._freezing_check = freezing_check
+
+        # --- P2-20: density-drift check vs the inlet density used for
+        # volumetric→mass flow conversion. Bulk-mean ρ from this step is
+        # the "honest" value for sizing — a > 2 % drift means the flow
+        # was specified at a temperature where ρ differs noticeably from
+        # the operating range and the user should confirm.
+        flow_density_drift = self._check_flow_density_drift(
+            state, hot_props, cold_props, warnings,
+        )
+
         # --- C6: Phase regime detection ---
         hot_phase, cold_phase, n_increments = self._detect_phase_regimes(
             hot_props, cold_props,
@@ -276,6 +303,9 @@ class Step03FluidProperties(BaseStep):
             "n_increments": n_increments,
             "hot_pressure_source": hot_pressure_source,
             "cold_pressure_source": cold_pressure_source,
+            "viscosity_variation": viscosity_variation,
+            "freezing_check": freezing_check,
+            "flow_density_drift": flow_density_drift,
         }
 
         return StepResult(
@@ -297,6 +327,8 @@ class Step03FluidProperties(BaseStep):
         1. Prandtl number outside typical engineering range [0.7, 500]
         2. Extreme viscosity ratio (> 100:1) between sides
         3. Density near Pydantic bound edges (< 100 or > 1800 kg/m³)
+        4. Per-side viscosity variation across ΔT ≥ _MU_VARIATION_AI (P2-18)
+        5. Freezing-point margin < _FREEZE_MARGIN_WARN_K or unresolved (P2-19)
         """
         hot = getattr(self, "_hot_props", None)
         cold = getattr(self, "_cold_props", None)
@@ -327,6 +359,26 @@ class Step03FluidProperties(BaseStep):
             if props.density_kg_m3 is not None:
                 if props.density_kg_m3 < 100 or props.density_kg_m3 > 1800:
                     return True
+
+        # P2-18: viscosity variation across ΔT on either side
+        mu_var = getattr(self, "_viscosity_variation", None) or {}
+        for side_info in mu_var.values():
+            if side_info is None:
+                continue
+            mu_ratio = side_info.get("mu_ratio")
+            if mu_ratio is not None and mu_ratio >= _MU_VARIATION_AI:
+                return True
+
+        # P2-19: marginal or unresolved freezing point on either side
+        freeze = getattr(self, "_freezing_check", None) or {}
+        for side_info in freeze.values():
+            if side_info is None:
+                continue
+            if side_info.get("freeze_property_source") == "unresolved":
+                return True
+            margin = side_info.get("margin_K")
+            if margin is not None and margin < _FREEZE_MARGIN_WARN_K:
+                return True
 
         return False
 
@@ -366,6 +418,209 @@ class Step03FluidProperties(BaseStep):
                     )
         except Exception:
             pass  # Non-fatal — skip warning if property lookup fails
+
+    # ------------------------------------------------------------------
+    # P2-18: Viscosity variation across ΔT
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _check_viscosity_variation_one_side(
+        fluid_name: str,
+        T_in_C: float,
+        T_out_C: float,
+        pressure_Pa: float | None,
+    ) -> dict | None:
+        """Sample viscosity at inlet, mean and outlet temperatures.
+
+        Returns a dict with ``mu_in``, ``mu_mean``, ``mu_out`` and
+        ``mu_ratio = max / min``, or ``None`` if any backend lookup fails
+        (defensive — caller logs INFO and continues).
+        """
+        T_mean_C = 0.5 * (T_in_C + T_out_C)
+        try:
+            p_in = await get_fluid_properties(fluid_name, T_in_C, pressure_Pa)
+            p_mean = await get_fluid_properties(fluid_name, T_mean_C, pressure_Pa)
+            p_out = await get_fluid_properties(fluid_name, T_out_C, pressure_Pa)
+        except Exception:  # noqa: BLE001 — backend gap, no silent pass
+            return None
+
+        mus = (p_in.viscosity_Pa_s, p_mean.viscosity_Pa_s, p_out.viscosity_Pa_s)
+        if any(m is None or m <= 0 for m in mus):
+            return None
+
+        mu_in, mu_mean, mu_out = mus
+        return {
+            "mu_in_Pa_s": mu_in,
+            "mu_mean_Pa_s": mu_mean,
+            "mu_out_Pa_s": mu_out,
+            "mu_ratio": max(mus) / min(mus),
+        }
+
+    async def _check_viscosity_variation_both_sides(
+        self,
+        state: "DesignState",
+        warnings: list[str],
+    ) -> dict[str, dict | None]:
+        """Compute per-side μ variation and emit WARN strings by band.
+
+        Stores the result on ``self._viscosity_variation`` so the
+        conditional AI trigger can read it without re-sampling.
+        """
+        result: dict[str, dict | None] = {}
+        sides = (
+            ("hot", state.hot_fluid_name, state.T_hot_in_C,
+             state.T_hot_out_C, state.P_hot_Pa),
+            ("cold", state.cold_fluid_name, state.T_cold_in_C,
+             state.T_cold_out_C, state.P_cold_Pa),
+        )
+        for side, name, T_in, T_out, P in sides:
+            info = await self._check_viscosity_variation_one_side(
+                name, T_in, T_out, P,
+            )
+            result[side] = info
+            if info is None:
+                logger.info(
+                    "Viscosity variation skipped for %s side ('%s') — "
+                    "backend gap; no silent pass.",
+                    side, name,
+                )
+                continue
+
+            ratio = info["mu_ratio"]
+            label = side.capitalize()
+            if ratio >= _MU_VARIATION_ESCALATE:
+                warnings.append(
+                    f"{label} fluid viscosity varies {ratio:.1f}× across ΔT "
+                    f"(μ {info['mu_in_Pa_s']:.4f} → {info['mu_out_Pa_s']:.4f} Pa·s) — "
+                    f"≥ {_MU_VARIATION_ESCALATE:.0f}× will be escalated by Layer 2."
+                )
+            elif ratio >= _MU_VARIATION_AI:
+                warnings.append(
+                    f"{label} fluid viscosity varies {ratio:.1f}× across ΔT — "
+                    f"≥ {_MU_VARIATION_AI:.0f}× triggers AI review; "
+                    f"consider segmented calculation."
+                )
+            elif ratio >= _MU_VARIATION_WARN:
+                warnings.append(
+                    f"{label} fluid viscosity varies {ratio:.1f}× across ΔT — "
+                    f"verify Sieder-Tate wall correction in Step 7."
+                )
+
+        self._viscosity_variation = result
+        return result
+
+    # ------------------------------------------------------------------
+    # P2-19: Freezing-point margin
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_freezing_points(
+        state: "DesignState",
+        warnings: list[str],
+    ) -> dict[str, dict]:
+        """Compute per-side ``T_freeze`` and operating margin.
+
+        Returns ``{side: {"T_min_K", "T_freeze_K", "margin_K",
+        "freeze_property_source"}}``.  Layer 2 rule
+        ``_rule_above_freezing_point`` reads this; soft warnings (margin
+        < ``_FREEZE_MARGIN_WARN_K``) are appended here.
+        """
+        sides = (
+            ("hot", state.hot_fluid_name, state.T_hot_in_C,
+             state.T_hot_out_C, state.P_hot_Pa),
+            ("cold", state.cold_fluid_name, state.T_cold_in_C,
+             state.T_cold_out_C, state.P_cold_Pa),
+        )
+        result: dict[str, dict] = {}
+        for side, name, T_in, T_out, P in sides:
+            T_min_C = min(T_in, T_out)
+            T_min_K = T_min_C + 273.15
+            T_freeze_K, source = get_freezing_or_pour_point(name, P)
+            margin_K = (
+                T_min_K - T_freeze_K if T_freeze_K is not None else None
+            )
+            result[side] = {
+                "T_min_K": T_min_K,
+                "T_freeze_K": T_freeze_K,
+                "margin_K": margin_K,
+                "freeze_property_source": source,
+            }
+
+            label = side.capitalize()
+            if T_freeze_K is None:
+                logger.info(
+                    "Freezing point unresolved for %s side ('%s') — "
+                    "no silent pass; AI will be consulted.",
+                    side, name,
+                )
+                warnings.append(
+                    f"{label} fluid '{name}': freezing/pour point could not be "
+                    f"resolved from any backend. AI review will be requested."
+                )
+            elif margin_K is not None and margin_K <= 0:
+                # Layer 2 rule will fail; emit a clear engineer-readable note.
+                warnings.append(
+                    f"{label} fluid '{name}': T_min={T_min_C:.1f}°C is at or below "
+                    f"the freezing/pour point ({T_freeze_K - 273.15:.1f}°C, "
+                    f"source={source}). Layer 2 will escalate."
+                )
+            elif margin_K is not None and margin_K < _FREEZE_MARGIN_WARN_K:
+                warnings.append(
+                    f"{label} fluid '{name}': operating margin above "
+                    f"freezing/pour point is only {margin_K:.1f} K "
+                    f"(< {_FREEZE_MARGIN_WARN_K:.0f} K). Verify freeze-protection "
+                    f"design (source={source})."
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # P2-20: Density-drift check vs validator-side conversion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_flow_density_drift(
+        state: "DesignState",
+        hot_props,
+        cold_props,
+        warnings: list[str],
+    ) -> dict[str, float]:
+        """Compare bulk-mean ρ to the inlet ρ used for m_dot conversion.
+
+        Drift exceeding :data:`DENSITY_DRIFT_WARN_PCT` (2 %) → soft WARN.
+        The mass flow is **not** silently corrected here — the validator's
+        choice (inlet density) remains the contract; this surfaces cases
+        where the user should reconsider the flow specification or supply
+        m_dot directly.
+        """
+        from hx_engine.app.core.volumetric_flow import DENSITY_DRIFT_WARN_PCT
+
+        drift: dict[str, float] = {}
+        for side, audit, props in (
+            ("hot", state.hot_flow_input, hot_props),
+            ("cold", state.cold_flow_input, cold_props),
+        ):
+            if not audit:
+                continue
+            rho_inlet = audit.get("density_kg_m3")
+            rho_mean = getattr(props, "density_kg_m3", None)
+            if not rho_inlet or not rho_mean:
+                continue
+            pct = abs(rho_mean - rho_inlet) / rho_inlet * 100.0
+            drift[side] = pct
+            if pct > DENSITY_DRIFT_WARN_PCT:
+                warnings.append(
+                    f"{side.capitalize()} fluid: bulk-mean density "
+                    f"{rho_mean:.1f} kg/m³ differs from the inlet density "
+                    f"{rho_inlet:.1f} kg/m³ used to convert "
+                    f"{audit['value']} {audit['unit']} → kg/s "
+                    f"({pct:.1f}% drift > {DENSITY_DRIFT_WARN_PCT:.0f}%). "
+                    f"Mass flow was held constant at the inlet value; "
+                    f"confirm this matches the metered basis or supply "
+                    f"m_dot_{side}_kg_s directly."
+                )
+
+        return drift
 
     # ------------------------------------------------------------------
     # Piece 7: Phase regime detection

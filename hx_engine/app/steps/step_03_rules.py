@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from hx_engine.app.core.validation_rules import register_rule
 from hx_engine.app.models.step_result import StepResult
+from hx_engine.app.steps.step_03_fluid_props import _MU_VARIATION_ESCALATE
 
 
 def _rule_all_properties_positive(
@@ -136,6 +137,72 @@ def _rule_gas_pressure_required(
     return True, None
 
 
+# ── P2-18: viscosity variation ESCALATE band ────────────────────────────────
+
+def _rule_viscosity_variation_extreme(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """R8 — μ_max / μ_min ≥ 10 on either side → ESCALATE.
+
+    Above this band the constant-property correlations (Bell-Delaware,
+    Gnielinski) are unreliable; the design needs segmented analysis or
+    a fluid swap. Routed straight to ESCALATE since neither AI nor a
+    geometry tweak can recover physical fidelity here.
+    """
+    mu_var = result.outputs.get("viscosity_variation") or {}
+    failures: list[str] = []
+    for side, info in mu_var.items():
+        if not info:
+            continue
+        ratio = info.get("mu_ratio")
+        if ratio is not None and ratio >= _MU_VARIATION_ESCALATE:
+            failures.append(f"{side}: μ_ratio={ratio:.1f}× ≥ {_MU_VARIATION_ESCALATE:.0f}×")
+    if failures:
+        return False, (
+            "Extreme viscosity variation across ΔT — "
+            + " | ".join(failures)
+            + ". Consider splitting into multiple units, segmented "
+            "analysis, or a different working fluid."
+        )
+    return True, None
+
+
+# ── P2-19: freezing-point ESCALATE rule ─────────────────────────────────────
+
+
+def _rule_above_freezing_point(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """R9 — Minimum operating temperature must stay above the freezing /
+    pour point of each stream. Unresolved freeze points are *not* a
+    failure here (they trigger the conditional AI path instead) — only
+    a numerically-resolved violation routes to ESCALATE.
+    """
+    freeze = result.outputs.get("freezing_check") or {}
+    failures: list[str] = []
+    for side, info in freeze.items():
+        if not info:
+            continue
+        T_freeze = info.get("T_freeze_K")
+        T_min = info.get("T_min_K")
+        if T_freeze is None or T_min is None:
+            continue
+        if T_min <= T_freeze:
+            failures.append(
+                f"{side}: T_min={T_min - 273.15:.1f}°C ≤ "
+                f"T_freeze={T_freeze - 273.15:.1f}°C "
+                f"(source={info.get('freeze_property_source')})"
+            )
+    if failures:
+        return False, (
+            "Operating temperature crosses freezing / pour point — "
+            + " | ".join(failures)
+            + ". Raise outlet setpoint, switch fluid, or add freeze-"
+            "protection additive."
+        )
+    return True, None
+
+
 def register_step3_rules() -> None:
     """Register all Layer 2 rules for step_id=3."""
     register_rule(3, _rule_all_properties_positive)
@@ -147,6 +214,9 @@ def register_step3_rules() -> None:
     # Missing gas-phase pressure is a user-input gap, not an AI-fixable
     # geometry problem — route straight to ESCALATE.
     register_rule(3, _rule_gas_pressure_required, correctable=False)
+    # P2-18 / P2-19 — physical-fidelity guards, both correctable=False.
+    register_rule(3, _rule_viscosity_variation_extreme, correctable=False)
+    register_rule(3, _rule_above_freezing_point, correctable=False)
 
 
 register_step3_rules()

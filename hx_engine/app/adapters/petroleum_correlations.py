@@ -115,6 +115,42 @@ def conductivity_petroleum(api: float, temperature_C: float) -> float:
     return k
 
 
+# API-gravity bands used by ``pour_point_petroleum_K`` — values are
+# coarse engineering heuristics, not measured wax-content data.
+_POUR_POINT_VERY_HEAVY_API = 15.0
+_POUR_POINT_HEAVY_API = 25.0
+_POUR_POINT_MEDIUM_API = 35.0
+
+_POUR_POINT_VERY_HEAVY_K = 273.15 + 25.0   # +25 °C
+_POUR_POINT_HEAVY_K = 273.15 + 10.0        # +10 °C
+_POUR_POINT_MEDIUM_K = 273.15 - 10.0       # -10 °C
+_POUR_POINT_LIGHT_K = 273.15 - 30.0        # -30 °C
+
+
+def pour_point_petroleum_K(api: float) -> float:
+    """Engineering-grade pour-point estimate from API gravity.
+
+    Returns an absolute temperature (K). Pour point is governed by wax
+    content, which is *not* predictable from API alone — this function
+    therefore returns a coarse band per Riazi/Daubert practice and is
+    only suitable as a freeze-protection sanity guard, never as a
+    process-design value.
+
+    Bands::
+        API < 15  → +25 °C   (e.g. Athabasca, Cold Lake)
+        API < 25  → +10 °C   (e.g. Maya, Marlim)
+        API < 35  → -10 °C   (e.g. Arab Light, WTI)
+        API ≥ 35  → -30 °C   (e.g. Brent, Tapis)
+    """
+    if api < _POUR_POINT_VERY_HEAVY_API:
+        return _POUR_POINT_VERY_HEAVY_K
+    if api < _POUR_POINT_HEAVY_API:
+        return _POUR_POINT_HEAVY_K
+    if api < _POUR_POINT_MEDIUM_API:
+        return _POUR_POINT_MEDIUM_K
+    return _POUR_POINT_LIGHT_K
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Crude oil database
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -14,6 +14,7 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.correlations.bell_delaware import (
     kern_shell_side_dP,
     shell_side_dP,
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 _DP_TUBE_LIMIT_PA = 70_000.0   # 0.7 bar
 _DP_SHELL_LIMIT_PA = 140_000.0  # 1.4 bar
 _RHO_V2_LIMIT = 2230.0          # TEMA erosion limit kg/m·s²
+
+# P2-25: bulk-viscosity threshold above which a missing wall μ is worth a WARN.
+# Below this we silently fall back to bulk because the Sieder-Tate correction
+# (μ_b/μ_w)^0.14 stays within ±2% of unity for water-like fluids regardless.
+_MU_VISCOUS_THRESHOLD_PA_S = 0.01  # 10 cP
 
 
 class Step10PressureDrops(BaseStep):
@@ -257,8 +263,34 @@ class Step10PressureDrops(BaseStep):
         # Layout angle
         layout_angle = _resolve_layout_angle(g.pitch_layout)
 
-        # Wall viscosity approximation (μ_w ≈ μ_bulk for v1)
-        mu_s_wall = mu_s
+        # Shell-side wall viscosity (P2-25): try to resolve a real value at
+        # the estimated wall temperature; fall back to bulk only when the
+        # property backend or the wall-T estimate is unavailable.
+        T_bulk_shell = _shell_bulk_temperature(state)
+        T_wall_shell = _estimate_shell_wall_temperature(state, T_bulk_shell)
+        shell_fluid_name = (
+            state.hot_fluid_name if state.shell_side_fluid == "hot"
+            else state.cold_fluid_name
+        )
+        shell_pressure_Pa = (
+            state.P_hot_Pa if state.shell_side_fluid == "hot"
+            else state.P_cold_Pa
+        )
+        mu_s_wall, mu_s_wall_basis, mu_s_wall_fail_reason = (
+            await _resolve_shell_wall_viscosity(
+                shell_fluid_name, T_wall_shell, shell_pressure_Pa, mu_s,
+            )
+        )
+        if (
+            mu_s_wall_basis == "approx_bulk"
+            and mu_s > _MU_VISCOUS_THRESHOLD_PA_S
+        ):
+            warnings.append(
+                f"shell-side wall viscosity unavailable "
+                f"({mu_s_wall_fail_reason}); Sieder-Tate correction "
+                f"defaulted to 1.0 — ΔP and h may drift ±15% for "
+                f"μ_bulk={mu_s * 1000:.1f} cP"
+            )
 
         # GeometrySpec stores baffle_cut as fraction; bell_delaware needs %
         baffle_cut_pct = g.baffle_cut * 100.0
@@ -450,6 +482,11 @@ class Step10PressureDrops(BaseStep):
         state.nozzle_auto_corrected_tube = nozzle_auto_corrected_tube
         state.nozzle_auto_corrected_shell = nozzle_auto_corrected_shell
 
+        # P2-25: expose wall-μ basis on state so Step 16 (and the UI) can show it
+        state.mu_s_wall_Pa_s = mu_s_wall
+        state.mu_s_wall_basis = mu_s_wall_basis
+        state.mu_s_wall_fail_reason = mu_s_wall_fail_reason
+
         # ── 8. Build outputs dict ─────────────────────────────────
         outputs: dict = {
             "dP_tube_Pa": dP_tube_total,
@@ -474,6 +511,9 @@ class Step10PressureDrops(BaseStep):
             "n_nozzles_shell": n_nozzles_shell,
             "nozzle_auto_corrected_tube": nozzle_auto_corrected_tube,
             "nozzle_auto_corrected_shell": nozzle_auto_corrected_shell,
+            "mu_s_wall_Pa_s": mu_s_wall,
+            "mu_s_wall_basis": mu_s_wall_basis,
+            "mu_s_wall_fail_reason": mu_s_wall_fail_reason,
         }
 
         return StepResult(
@@ -485,6 +525,74 @@ class Step10PressureDrops(BaseStep):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
+def _shell_bulk_temperature(state: "DesignState") -> float | None:
+    """Mean shell-side bulk temperature in °C, or None if inputs missing."""
+    if state.shell_side_fluid == "hot":
+        T_in, T_out = state.T_hot_in_C, state.T_hot_out_C
+    else:
+        T_in, T_out = state.T_cold_in_C, state.T_cold_out_C
+    if T_in is None or T_out is None:
+        return None
+    return (T_in + T_out) / 2.0
+
+
+def _estimate_shell_wall_temperature(
+    state: "DesignState", T_bulk_shell: float | None,
+) -> float | None:
+    """Estimate shell-side wall temperature from a film resistance split.
+
+    T_wall_shell ≈ T_bulk_shell − (h_shell / (h_shell + h_tube))
+                                 × (T_bulk_shell − T_bulk_tube)
+    Returns None when any required input is missing — callers fall back
+    to bulk and surface a fail_reason so the engineer sees the limitation.
+    """
+    if T_bulk_shell is None:
+        return None
+    if state.h_shell_W_m2K is None or state.h_tube_W_m2K is None:
+        return None
+
+    if state.shell_side_fluid == "hot":
+        T_in_t, T_out_t = state.T_cold_in_C, state.T_cold_out_C
+    else:
+        T_in_t, T_out_t = state.T_hot_in_C, state.T_hot_out_C
+    if T_in_t is None or T_out_t is None:
+        return None
+    T_bulk_tube = (T_in_t + T_out_t) / 2.0
+
+    h_total = state.h_shell_W_m2K + state.h_tube_W_m2K
+    if h_total <= 0:
+        return None
+    fraction = state.h_shell_W_m2K / h_total
+    return T_bulk_shell - fraction * (T_bulk_shell - T_bulk_tube)
+
+
+async def _resolve_shell_wall_viscosity(
+    fluid_name: str | None,
+    T_wall: float | None,
+    pressure_Pa: float | None,
+    mu_bulk: float,
+) -> tuple[float, str, str | None]:
+    """Resolve shell-side μ_wall.
+
+    Returns ``(mu_wall, basis, fail_reason)`` where ``basis`` is
+    ``"computed"`` when a real value was retrieved and ``"approx_bulk"``
+    when we silently fell back to ``mu_bulk``. ``fail_reason`` is set
+    only on fallback so callers can decide whether to WARN.
+    """
+    if fluid_name is None:
+        return mu_bulk, "approx_bulk", "shell_side_fluid_name_unavailable"
+    if T_wall is None:
+        return mu_bulk, "approx_bulk", "wall_temperature_unavailable"
+    try:
+        wall_props = await get_fluid_properties(fluid_name, T_wall, pressure_Pa)
+    except Exception as exc:  # noqa: BLE001 — propagate as fail_reason
+        return mu_bulk, "approx_bulk", f"viscosity_backend_error:{exc}"
+    mu_wall = getattr(wall_props, "viscosity_Pa_s", None)
+    if mu_wall is None or mu_wall <= 0:
+        return mu_bulk, "approx_bulk", "viscosity_backend_no_value"
+    return mu_wall, "computed", None
+
 
 def _resolve_layout_angle(pitch_layout: str | None) -> int:
     """Convert pitch_layout string to angle in degrees."""

@@ -403,3 +403,31 @@ def get_tema_clearances(
         "delta_sb_m": sb_mm / 1000.0,
         "delta_tb_m": tb_mm / 1000.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# P2-16 — Bundle-to-shell diametral clearance by TEMA rear-end type
+# ---------------------------------------------------------------------------
+# Diametral allowance added to the tube-bundle outer envelope to obtain
+# the final shell ID.  The clearance accommodates bundle pull-out
+# (floating heads), partition-plate flanges, and packing rings.
+# Sources: TEMA RGP-RCB-4.4, Serth §5.1, Perry's §11 (Saunders Table 11-12).
+#
+# Values are diametral (added to the bundle OD to get shell ID).
+BUNDLE_TO_SHELL_CLEARANCE_M: dict[str, float] = {
+    "BEM": 0.000,   # fixed tubesheet — bundle = shell ID
+    "AEP": 0.000,   # outside-packed floating head, packing on shell ID
+    "AEU": 0.016,   # U-tube — minimal pull-out clearance
+    "AES": 0.030,   # split-ring floating head — split-ring carrier
+    "AEW": 0.045,   # externally-sealed floating head — packing chamber
+}
+
+
+def get_bundle_to_shell_clearance_m(tema_type: str) -> float:
+    """Return diametral bundle-to-shell clearance (m) for a TEMA type.
+
+    Raises ``KeyError`` (not silent zero) if ``tema_type`` is unknown so
+    the pipeline fails loudly on unsupported variants rather than under-
+    sizing the shell.
+    """
+    return BUNDLE_TO_SHELL_CLEARANCE_M[tema_type]

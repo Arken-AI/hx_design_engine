@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from hx_engine.app.core.ai_engineer import AIEngineer
     from hx_engine.app.core.sse_manager import SSEManager
     from hx_engine.app.models.design_state import DesignState
+    from hx_engine.app.models.design_state import GeometrySpec
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,71 @@ PASSES_SEQUENCE: list[int] = [1, 2, 4, 6, 8]
 _BAFFLE_SPACING_ABS_FLOOR_M: Final[float] = 0.05   # TEMA absolute minimum (50 mm)
 _BAFFLE_SPACING_MAX_M: Final[float] = 2.0          # TEMA absolute maximum
 _BAFFLE_SPACING_TEMA_RATIO: Final[float] = 0.20    # Step 4 R5: B_min >= 0.2 × D_s
+
+# P2-15 — L/D recheck thresholds (mirror Step 4 module constants).
+# Re-imported locally to avoid a Step-12 → Step-04 import cycle on
+# module load; keep in sync with `step_04_tema_geometry.LD_RATIO_*`.
+_LD_RATIO_LOW_WARN: Final[float] = 5.0
+_LD_RATIO_HIGH_WARN: Final[float] = 10.0
+
+# P2-17 — Pitch-ratio layout floors (mirror step_04_rules constants).
+# Same cycle-avoidance reason as above.
+_SQUARE_LAYOUTS: frozenset[str] = frozenset({
+    "square", "square_90", "rotated_square", "rotated_square_45",
+})
+_SQUARE_MIN_PITCH_RATIO: Final[float] = 1.25
+_TRIANGULAR_MIN_PITCH_RATIO: Final[float] = 1.20
+
+
+def _check_pitch_layout_after_adjustment(
+    geometry: "GeometrySpec | None",
+) -> str | None:
+    """Return a WARN string if the pitch ratio violates the layout floor.
+
+    Returns ``None`` when geometry is incomplete or the ratio is valid.
+    The correctable=True rule in Step 4 handles auto-correction on the
+    next full pipeline pass; this function only surfaces the warning
+    inside the convergence-loop iteration record.
+    """
+    if geometry is None or geometry.pitch_layout is None or geometry.pitch_ratio is None:
+        return None
+    pr = geometry.pitch_ratio
+    layout = geometry.pitch_layout
+    if layout in _SQUARE_LAYOUTS and pr < _SQUARE_MIN_PITCH_RATIO:
+        return (
+            f"pitch_ratio={pr:.3f} now below {_SQUARE_MIN_PITCH_RATIO} "
+            f"for {layout} layout after geometry adjustment"
+        )
+    if layout not in _SQUARE_LAYOUTS and pr < _TRIANGULAR_MIN_PITCH_RATIO:
+        return (
+            f"pitch_ratio={pr:.3f} now below {_TRIANGULAR_MIN_PITCH_RATIO} "
+            f"for {layout} layout after geometry adjustment"
+        )
+    return None
+
+
+def _check_ld_band_after_adjustment(
+    geometry: "GeometrySpec | None",
+) -> str | None:
+    """Return a WARN string if a Step-12 adjustment pushed L/D out of band.
+
+    Returns ``None`` when geometry is incomplete or L/D is inside the
+    recommended band ``[5, 10]``.  The ESCALATE band ``[3, 15]`` is
+    enforced separately by the Step 4 Layer 2 rule.
+    """
+    if (
+        geometry is None
+        or geometry.tube_length_m is None
+        or geometry.shell_diameter_m is None
+        or geometry.shell_diameter_m <= 0
+    ):
+        return None
+    ld = geometry.tube_length_m / geometry.shell_diameter_m
+    if ld < _LD_RATIO_LOW_WARN:
+        return f"L/D={ld:.2f} now below {_LD_RATIO_LOW_WARN} after geometry adjustment"
+    if ld > _LD_RATIO_HIGH_WARN:
+        return f"L/D={ld:.2f} now above {_LD_RATIO_HIGH_WARN} after geometry adjustment"
+    return None
 
 
 def _clamp_baffle_spacing(
@@ -632,6 +698,20 @@ class Step12Convergence:
                 old_passes = g.n_passes
                 g.n_passes = new_n_passes
                 description_parts.append(f"n_passes {old_passes}→{new_n_passes}")
+
+        # P2-15 — Re-check L/D after geometry change.  WARN-only here;
+        # the ESCALATE band [3, 15] is enforced by the Step 4 Layer 2
+        # rule re-running on the next pipeline iteration if needed.
+        ld_warning = _check_ld_band_after_adjustment(g)
+        if ld_warning is not None:
+            description_parts.append(ld_warning)
+            state.warnings.append(ld_warning)
+
+        # P2-17 — Re-check pitch-ratio vs layout floor after geometry change.
+        pitch_warning = _check_pitch_layout_after_adjustment(g)
+        if pitch_warning is not None:
+            description_parts.append(pitch_warning)
+            state.warnings.append(pitch_warning)
 
         return ", ".join(description_parts) or "no change"
 

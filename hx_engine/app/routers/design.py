@@ -12,10 +12,15 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
+from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.core.pipeline_runner import PipelineRunner
 from hx_engine.app.core.requirements_validator import validate_requirements, verify_token
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
+from hx_engine.app.core.volumetric_flow import (
+    FlowResolution,
+    apply_flow_inputs,
+)
 from hx_engine.app.dependencies import (
     get_pipeline_runner,
     get_session_store,
@@ -60,6 +65,20 @@ class UserResponse(BaseModel):
     values: dict[str, Any] | None = None
 
 
+def _flow_audit(res: FlowResolution | None) -> dict | None:
+    """Serialise a :class:`FlowResolution` for the DesignState audit field."""
+    if res is None:
+        return None
+    return {
+        "value": res.input_value,
+        "unit": res.input_unit,
+        "basis": res.basis,
+        "m_dot_kg_s": res.m_dot_kg_s,
+        "density_kg_m3": res.density_kg_m3,
+        "density_source": res.density_source,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -80,6 +99,32 @@ async def start_design(
     In both cases invalid inputs are rejected before a session is created.
     """
     validation_dict = req.to_validation_dict()
+
+    # Resolve volumetric flow inputs to kg/s before token verification /
+    # inline validation (P2-20). The same deterministic resolution runs in
+    # /requirements, so the canonical (post-resolution) dict matches the
+    # signed payload.
+    try:
+        validation_dict, hot_res, cold_res = await apply_flow_inputs(
+            validation_dict,
+            hot_flow=validation_dict.get("hot_flow"),
+            cold_flow=validation_dict.get("cold_flow"),
+            hot_fluid_name=req.hot_fluid_name,
+            cold_fluid_name=req.cold_fluid_name,
+        )
+    except CalculationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "valid": False,
+                "errors": [{
+                    "field": "flow_input",
+                    "message": exc.message,
+                    "suggestion": "Provide m_dot_*_kg_s directly or fix the flow object.",
+                    "valid_range": "",
+                }],
+            },
+        )
 
     if req.token:
         if not verify_token(req.token, validation_dict):
@@ -117,13 +162,15 @@ async def start_design(
         T_hot_out_C=req.T_hot_out_C,
         T_cold_in_C=req.T_cold_in_C,
         T_cold_out_C=req.T_cold_out_C,
-        m_dot_hot_kg_s=req.m_dot_hot_kg_s,
-        m_dot_cold_kg_s=req.m_dot_cold_kg_s,
+        m_dot_hot_kg_s=validation_dict.get("m_dot_hot_kg_s"),
+        m_dot_cold_kg_s=validation_dict.get("m_dot_cold_kg_s"),
         hot_fluid_name=req.hot_fluid_name,
         cold_fluid_name=req.cold_fluid_name,
         P_hot_Pa=req.P_hot_Pa,
         P_cold_Pa=req.P_cold_Pa,
         tema_preference=req.tema_preference,
+        hot_flow_input=_flow_audit(hot_res),
+        cold_flow_input=_flow_audit(cold_res),
     )
     session_id = state.session_id
 

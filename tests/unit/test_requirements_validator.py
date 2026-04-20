@@ -163,7 +163,7 @@ class TestLayer1OptionalFields:
         assert not result.valid
         assert "tema_preference" in _error_fields(result)
 
-    @pytest.mark.parametrize("tema", ["AES", "BEM", "AEU", "AEP", "AEL", "AEW"])
+    @pytest.mark.parametrize("tema", ["AES", "BEM", "AEU", "AEP", "AEW"])
     def test_valid_tema_preferences(self, tema: str):
         d = _base()
         d["tema_preference"] = tema
