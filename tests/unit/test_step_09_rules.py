@@ -148,3 +148,59 @@ class TestRulePctSum:
         ok, msg = _rule_pct_sum(9, r)
         assert ok is False
         assert "90" in msg  # should be 90% now
+
+
+class TestRuleTubeDiametersOrdered:
+    """Phase 1 tests for R7 — _rule_tube_diameters_ordered."""
+
+    def test_ordered_diameters_pass(self):
+        # 3/4" OD x 16 BWG: d_o=0.01905, d_i=0.01575
+        r = _make_result(tube_od_m=0.01905, tube_id_m=0.01575)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok, reason = _rule_tube_diameters_ordered(9, r)
+        assert (ok, reason) == (True, None)
+
+    def test_equal_diameters_fail(self):
+        # d_i == d_o -> ln(1) = 0 -> wall resistance silently drops out
+        r = _make_result(tube_od_m=0.01905, tube_id_m=0.01905)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok, reason = _rule_tube_diameters_ordered(9, r)
+        assert ok is False
+        assert "non-physical" in reason
+        assert "0.019050" in reason
+
+    def test_inverted_diameters_fail(self):
+        # d_i > d_o -> ln(<1) < 0 -> negative R_wall
+        r = _make_result(tube_od_m=0.015, tube_id_m=0.020)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok, reason = _rule_tube_diameters_ordered(9, r)
+        assert ok is False
+        assert "strictly less than" in reason
+
+    def test_non_positive_inner_diameter_fails(self):
+        # d_i = 0 must fail without math.log being called
+        r_zero = _make_result(tube_od_m=0.01905, tube_id_m=0.0)
+        r_neg = _make_result(tube_od_m=0.01905, tube_id_m=-0.005)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok_zero, reason_zero = _rule_tube_diameters_ordered(9, r_zero)
+        ok_neg, reason_neg = _rule_tube_diameters_ordered(9, r_neg)
+        assert ok_zero is False
+        assert "inner diameter must be > 0" in reason_zero
+        assert ok_neg is False
+
+    def test_non_positive_outer_diameter_fails(self):
+        r = _make_result(tube_od_m=0.0, tube_id_m=0.01575)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok, reason = _rule_tube_diameters_ordered(9, r)
+        assert ok is False
+        assert "outer diameter must be > 0" in reason
+
+    def test_missing_outputs_defensive_pass(self):
+        # If outputs are missing the precondition gate in execute() fires first;
+        # rule must not raise when keys are absent.
+        r = _make_result()
+        r.outputs.pop("tube_od_m", None)
+        r.outputs.pop("tube_id_m", None)
+        from hx_engine.app.steps.step_09_rules import _rule_tube_diameters_ordered
+        ok, reason = _rule_tube_diameters_ordered(9, r)
+        assert (ok, reason) == (True, None)

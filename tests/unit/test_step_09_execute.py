@@ -469,3 +469,87 @@ class TestWallResistanceFormula:
         R_steel = d_o * math.log(d_o / d_i) / (2.0 * 50.0)
         R_ss = d_o * math.log(d_o / d_i) / (2.0 * 16.0)
         assert R_ss > R_steel
+
+
+# ===================================================================
+# Phase 2 — Precondition gate tests (d_i >= d_o guard)
+# ===================================================================
+
+
+def _make_state_with_raw_geometry(
+    tube_od_m: float,
+    tube_id_m: float,
+) -> DesignState:
+    """Build a Step 9-ready state with geometry that bypasses GeometrySpec
+    pydantic validation — needed to test the _check_preconditions gate
+    against non-physical diameters that GeometrySpec would normally reject.
+    """
+    state = _make_state()  # valid state with normal geometry
+    # Use model_construct to replace geometry, bypassing validators
+    raw_geom = state.geometry.model_construct(
+        **{**state.geometry.model_dump(), "tube_od_m": tube_od_m, "tube_id_m": tube_id_m},
+    )
+    state.geometry = raw_geom
+    return state
+
+
+class TestDiameterPreconditionGate:
+    """Phase 2: _check_preconditions raises CalculationError before math.log
+    is ever called when tube diameters are non-physical.
+    """
+
+    @pytest.mark.asyncio
+    async def test_equal_diameters_raise_calculation_error(self, step):
+        # d_i == d_o -> ln(1) = 0 -> wall resistance silently drops;
+        # precondition gate must raise before math.log runs.
+        state = _make_state_with_raw_geometry(
+            tube_od_m=0.01905, tube_id_m=0.01905
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            await step.execute(state)
+        assert "strictly less than" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_inverted_diameters_raise_calculation_error(self, step):
+        # d_i > d_o -> ln(<1) < 0 -> negative R_wall without this guard
+        state = _make_state_with_raw_geometry(
+            tube_od_m=0.015, tube_id_m=0.020
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            await step.execute(state)
+        assert "strictly less than" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_zero_inner_diameter_raises_calculation_error(self, step):
+        # d_i = 0 would cause math.log(d_o / 0) -> ZeroDivisionError without guard
+        state = _make_state_with_raw_geometry(
+            tube_od_m=0.01905, tube_id_m=0.0
+        )
+        with pytest.raises(CalculationError):
+            await step.execute(state)
+
+    @pytest.mark.asyncio
+    async def test_negative_inner_diameter_raises_calculation_error(self, step):
+        state = _make_state_with_raw_geometry(
+            tube_od_m=0.01905, tube_id_m=-0.005
+        )
+        with pytest.raises(CalculationError):
+            await step.execute(state)
+
+    @pytest.mark.asyncio
+    async def test_valid_geometry_does_not_raise(self, step):
+        # Regression: normal 3/4" OD x 16 BWG geometry must still pass cleanly.
+        state = _make_state(tube_od_m=0.01905, tube_id_m=0.01483)
+        result = await step.execute(state)
+        assert result.outputs["U_dirty_W_m2K"] > 0
+
+    @pytest.mark.asyncio
+    async def test_corrupted_state_does_not_leak_u_to_state(self, step):
+        # U_overall must NOT be written to state when the gate fires.
+        state = _make_state_with_raw_geometry(
+            tube_od_m=0.01905, tube_id_m=0.01905
+        )
+        assert state.U_overall_W_m2K is None
+        with pytest.raises(CalculationError):
+            await step.execute(state)
+        assert state.U_overall_W_m2K is None
