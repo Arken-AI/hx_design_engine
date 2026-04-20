@@ -633,3 +633,85 @@ class TestBuildSnapshot:
         assert snap["delta_U_pct"] == 0.8
         assert snap["n_tubes"] == state.geometry.n_tubes
         assert snap["substep_failed"] is False
+
+
+# ===================================================================
+# Single-shell iteration-count regression (P0-1 guard)
+# ===================================================================
+#
+# Pins the iteration count required for a stable, in-band single-shell
+# trajectory to converge. The P0-1 fix only changed the multi-shell
+# `A_provided` formula (single-shell is byte-for-byte identical), so the
+# single-shell convergence path MUST be unchanged. If a future change
+# alters Step 12's tuning (thresholds, adjustment rules, convergence
+# criteria) and slows single-shell convergence, this test fails first
+# and points at the right culprit.
+
+# Captured from a stable single-shell trajectory where Step 9 returns a
+# constant U_dirty and Step 11 returns a constant in-band overdesign.
+# Convergence requires `delta_U_pct < 1.0` AND `delta_U_pct is not None`,
+# which is only true from iteration 2 onward — hence the pinned value.
+SINGLE_SHELL_BASELINE_ITERATIONS: int = 2
+
+
+def _stable_single_shell_substep_outputs(step_id: int) -> dict:
+    """Deterministic in-band sub-step outputs for a single-shell design.
+
+    Every iteration returns the same numbers, so:
+      - delta_U_pct = 0 from iteration 2 onward (< 1% threshold ✓)
+      - overdesign_pct = 14% (∈ [10, 25] ✓)
+      - dP_tube / dP_shell within limits ✓
+      - tube_velocity ∈ [0.8, 2.5] m/s ✓
+    """
+    if step_id == 7:
+        return {"h_tube_W_m2K": 2500.0, "tube_velocity_m_s": 1.4, "Re_tube": 25_000.0}
+    if step_id == 8:
+        return {"h_shell_W_m2K": 1200.0, "Re_shell": 15_000.0}
+    if step_id == 9:
+        return {"U_dirty_W_m2K": 350.0, "U_clean_W_m2K": 385.0}
+    if step_id == 10:
+        return {"dP_tube_Pa": 45_000.0, "dP_shell_Pa": 95_000.0}
+    if step_id == 11:
+        return {
+            "area_required_m2": 25.0,
+            "area_provided_m2": 28.5,
+            "overdesign_pct": 14.0,
+        }
+    return {}
+
+
+class TestSingleShellIterationCountRegression:
+    """Locks single-shell convergence iteration count against future drift."""
+
+    @pytest.fixture
+    def sse_manager(self) -> MockSSEManager:
+        return MockSSEManager()
+
+    @pytest.fixture
+    def ai_engineer(self) -> AIEngineer:
+        return AIEngineer(stub_mode=True)
+
+    @pytest.mark.asyncio
+    async def test_single_shell_converges_in_pinned_iteration_count(
+        self, sse_manager, ai_engineer,
+    ):
+        """Stable single-shell trajectory converges in exactly the pinned count."""
+        state = _converging_state()
+        state.geometry.n_shells = 1   # explicit single-shell baseline
+        step12 = Step12Convergence()
+
+        async def mock_run_with_review_loop(inner_self, state, ai_eng):
+            return StepResult(
+                step_id=inner_self.step_id,
+                step_name=inner_self.step_name,
+                outputs=_stable_single_shell_substep_outputs(inner_self.step_id),
+            )
+
+        with patch(
+            "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
+            new=mock_run_with_review_loop,
+        ):
+            await step12.run(state, ai_engineer, sse_manager, "single-shell-baseline")
+
+        assert state.convergence_converged is True
+        assert state.convergence_iteration == SINGLE_SHELL_BASELINE_ITERATIONS

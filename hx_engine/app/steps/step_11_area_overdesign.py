@@ -126,8 +126,11 @@ class Step11AreaOverdesign(BaseStep):
                 state.U_dirty_W_m2K * state.F_factor * state.LMTD_K
             )
 
-        # 4. Compute A_provided = π × d_o × L × N_t
-        A_provided = math.pi * g.tube_od_m * g.tube_length_m * g.n_tubes
+        # 4. Compute A_provided = π × d_o × L × N_t × n_shells
+        #    Defensive fallback: treat None / 0 n_shells as a single shell so
+        #    legacy or partial GeometrySpec instances never collapse area to zero.
+        n_shells = g.n_shells or 1
+        A_provided = math.pi * g.tube_od_m * g.tube_length_m * g.n_tubes * n_shells
 
         # 5. Compute overdesign %
         overdesign_pct = (A_provided - A_required) / A_required * 100.0
@@ -141,7 +144,7 @@ class Step11AreaOverdesign(BaseStep):
         if overdesign_pct < 0:
             warnings.append(
                 f"Exchanger is undersized: overdesign = {overdesign_pct:.1f}% "
-                f"(A_provided = {A_provided:.2f} m², "
+                f"(A_provided = {A_provided:.2f} m² across {n_shells} shell(s), "
                 f"A_required = {A_required:.2f} m²)"
             )
 
