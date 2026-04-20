@@ -146,6 +146,13 @@ class Step03FluidProperties(BaseStep):
             state.T_cold_in_C, state.T_cold_out_C,
         )
 
+        # --- Track pressure provenance ---
+        # Liquids tolerate a 1 atm fallback; gases do not (density scales
+        # linearly with P). We tag the source so a Layer 2 rule can
+        # escalate when a vapor phase is detected with no user pressure.
+        hot_pressure_source = "user" if state.P_hot_Pa is not None else "default_1atm"
+        cold_pressure_source = "user" if state.P_cold_Pa is not None else "default_1atm"
+
         # --- C2: crude oil / crude warning ---
         for name in (state.hot_fluid_name, state.cold_fluid_name):
             if name and name.strip().lower() in _CRUDE_ALIASES:
@@ -267,6 +274,8 @@ class Step03FluidProperties(BaseStep):
             "hot_phase": hot_phase,
             "cold_phase": cold_phase,
             "n_increments": n_increments,
+            "hot_pressure_source": hot_pressure_source,
+            "cold_pressure_source": cold_pressure_source,
         }
 
         return StepResult(

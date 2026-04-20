@@ -107,6 +107,35 @@ def _rule_pr_consistency(
     return True, None
 
 
+_GAS_PHASES = frozenset({"vapor", "condensing", "evaporating"})
+
+
+def _rule_gas_pressure_required(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """R7 — Gas-phase streams require an explicit operating pressure.
+
+    Liquid density is nearly pressure-independent, so a silent 1 atm
+    fallback is acceptable. Gas density scales linearly with P, and
+    defaulting to 1 atm when the real system runs at 10–100 bar produces
+    wildly under-sized velocities and h_shell values. Route these cases
+    to the user via ESCALATE instead of returning wrong numbers.
+    """
+    checks = (
+        ("hot", result.outputs.get("hot_phase"), result.outputs.get("hot_pressure_source")),
+        ("cold", result.outputs.get("cold_phase"), result.outputs.get("cold_pressure_source")),
+    )
+    for side, phase, source in checks:
+        if phase in _GAS_PHASES and source == "default_1atm":
+            return False, (
+                f"{side} stream phase='{phase}' but no operating pressure was "
+                f"supplied (P_{side}_Pa is None). Silent 1 atm default is unsafe "
+                f"for gas-phase service — please provide P_{side}_Pa so density, "
+                f"saturation temperature and h_shell are computed correctly."
+            )
+    return True, None
+
+
 def register_step3_rules() -> None:
     """Register all Layer 2 rules for step_id=3."""
     register_rule(3, _rule_all_properties_positive)
@@ -115,6 +144,9 @@ def register_step3_rules() -> None:
     register_rule(3, _rule_k_bounds)
     register_rule(3, _rule_cp_bounds)
     register_rule(3, _rule_pr_consistency)
+    # Missing gas-phase pressure is a user-input gap, not an AI-fixable
+    # geometry problem — route straight to ESCALATE.
+    register_rule(3, _rule_gas_pressure_required, correctable=False)
 
 
 register_step3_rules()

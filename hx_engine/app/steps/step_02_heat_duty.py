@@ -308,13 +308,45 @@ class Step02HeatDuty(BaseStep):
         m_dot_hot = state.m_dot_hot_kg_s
         m_dot_cold = temp_result.get("m_dot_cold_kg_s") or state.m_dot_cold_kg_s
 
-        Q_hot: float | None = None
+        Q_hot_sensible: float | None = None
         if m_dot_hot is not None and T_hot_in is not None and T_hot_out is not None:
-            Q_hot = self._compute_Q(m_dot_hot, cp_hot, T_hot_in, T_hot_out)
+            Q_hot_sensible = self._compute_Q(m_dot_hot, cp_hot, T_hot_in, T_hot_out)
 
-        Q_cold: float | None = None
+        Q_cold_sensible: float | None = None
         if m_dot_cold is not None and T_cold_in is not None and T_cold_out is not None:
-            Q_cold = self._compute_Q(m_dot_cold, cp_cold, T_cold_out, T_cold_in)
+            Q_cold_sensible = self._compute_Q(m_dot_cold, cp_cold, T_cold_out, T_cold_in)
+
+        # --- Phase-change detection & latent Q override ---
+        # Bare Cp·ΔT is silently wrong for condensers and reboilers because
+        # ΔT ≈ 0 produces a near-zero sensible duty while the real duty is
+        # m_dot · h_fg · Δx. Detect isothermal phase-change sides, query the
+        # saturation backend for h_fg, and replace the sensible Q on that
+        # side with the latent contribution.
+        # Quality endpoints (x_in, x_out) come from applied_corrections so
+        # partial condensers / partial reboilers can be modelled correctly.
+        # Default is full phase change: hot 1.0 → 0.0, cold 0.0 → 1.0.
+        hot_latent = await self._latent_duty_for_side(
+            side="hot",
+            fluid_name=state.hot_fluid_name,
+            T_in_C=T_hot_in, T_out_C=T_hot_out,
+            m_dot_kg_s=m_dot_hot, pressure_Pa=state.P_hot_Pa,
+            x_in=self._quality_override(state, "hot_quality_in", 1.0),
+            x_out=self._quality_override(state, "hot_quality_out", 0.0),
+            warnings=warnings,
+        )
+        cold_latent = await self._latent_duty_for_side(
+            side="cold",
+            fluid_name=state.cold_fluid_name,
+            T_in_C=T_cold_in, T_out_C=T_cold_out,
+            m_dot_kg_s=m_dot_cold, pressure_Pa=state.P_cold_Pa,
+            x_in=self._quality_override(state, "cold_quality_in", 0.0),
+            x_out=self._quality_override(state, "cold_quality_out", 1.0),
+            warnings=warnings,
+        )
+
+        Q_hot = hot_latent["Q_W"] if hot_latent else Q_hot_sensible
+        Q_cold = cold_latent["Q_W"] if cold_latent else Q_cold_sensible
+        has_phase_change = bool(hot_latent or cold_latent)
 
         # Determine final Q and imbalance
         imbalance_pct: float | None = None
@@ -347,16 +379,25 @@ class Step02HeatDuty(BaseStep):
         # Store for conditional AI trigger
         self._imbalance_pct = imbalance_pct
 
-        # Energy balance warning (> 5% implies a data inconsistency)
-        if imbalance_pct is not None and imbalance_pct > 5.0:
+        # Energy balance warning — phase-change streams tolerate slightly
+        # wider imbalance because h_fg backends and sensible Cp come from
+        # different correlations.
+        imbalance_threshold = 10.0 if has_phase_change else 5.0
+        if imbalance_pct is not None and imbalance_pct > imbalance_threshold:
             warnings.append(
-                f"Energy balance imbalance {imbalance_pct:.1f}% — "
+                f"Energy balance imbalance {imbalance_pct:.1f}% "
+                f"(> {imbalance_threshold:.0f}% phase-aware threshold) — "
                 "hot and cold Q values differ significantly. "
-                "Check flow rates, temperatures, and Cp assumptions."
+                "Check flow rates, temperatures, and Cp/h_fg assumptions."
             )
 
-        # Corner case: very small hot-side ΔT → small LMTD ahead
-        if T_hot_in is not None and T_hot_out is not None:
+        # Corner case: very small hot-side ΔT is expected for a condenser,
+        # so suppress the small-ΔT warning when the hot side went latent.
+        if (
+            T_hot_in is not None
+            and T_hot_out is not None
+            and hot_latent is None
+        ):
             dT_hot = T_hot_in - T_hot_out
             if 0 < dT_hot < 5.0:
                 warnings.append(
@@ -379,7 +420,14 @@ class Step02HeatDuty(BaseStep):
             "T_hot_out_C": T_hot_out,
             "T_cold_in_C": T_cold_in,
             "T_cold_out_C": T_cold_out,
+            "heat_duty_basis": self._duty_basis_label(hot_latent, cold_latent),
         }
+        if hot_latent is not None:
+            outputs["hot_h_fg_J_kg"] = hot_latent["h_fg"]
+            outputs["hot_duty_mode"] = hot_latent["mode"]
+        if cold_latent is not None:
+            outputs["cold_h_fg_J_kg"] = cold_latent["h_fg"]
+            outputs["cold_duty_mode"] = cold_latent["mode"]
         if temp_result["calculated_field"] is not None:
             outputs["calculated_field"] = temp_result["calculated_field"]
         if imbalance_pct is not None:
@@ -395,3 +443,126 @@ class Step02HeatDuty(BaseStep):
             validation_passed=True,
             warnings=warnings,
         )
+
+    # ------------------------------------------------------------------
+    # Phase-change duty helpers
+    # ------------------------------------------------------------------
+
+    _ISOTHERMAL_DT_THRESHOLD_C: float = 0.5
+    _T_SAT_TOLERANCE_C: float = 2.0
+
+    @staticmethod
+    def _quality_override(
+        state: "DesignState", key: str, default: float,
+    ) -> float:
+        """Read a quality endpoint from applied_corrections, clamped to [0, 1]."""
+        corrections = getattr(state, "applied_corrections", None) or {}
+        raw = corrections.get(key, default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        if value < 0.0 or value > 1.0:
+            return default
+        return value
+
+    @classmethod
+    async def _latent_duty_for_side(
+        cls,
+        *,
+        side: str,
+        fluid_name: str,
+        T_in_C: float | None,
+        T_out_C: float | None,
+        m_dot_kg_s: float | None,
+        pressure_Pa: float | None,
+        x_in: float,
+        x_out: float,
+        warnings: list[str],
+    ) -> dict | None:
+        """Return latent duty dict ``{Q_W, h_fg, mode, dx}`` when the side is
+        undergoing isothermal phase change, else ``None``.
+
+        ``dx`` is the magnitude of the quality change actually used. Total
+        condensation/evaporation gives ``dx = 1.0``; partial phase change
+        scales the duty linearly: ``Q = ṁ · h_fg · dx``.
+
+        Phase change is detected when:
+          * ΔT on the side is ≤ 0.5°C (near-isothermal service), AND
+          * the saturation backend yields T_sat close to the operating
+            temperature (|T_mean − T_sat| ≤ 2°C), AND
+          * a positive h_fg is available, m_dot is known, and dx > 0.
+
+        Missing pressure is fatal for this path (same reasoning as the
+        Step 3 gas-pressure rule), so we fall back to sensible Q and
+        surface a warning rather than silently mis-sizing.
+        """
+        if (
+            T_in_C is None
+            or T_out_C is None
+            or m_dot_kg_s is None
+            or not fluid_name
+        ):
+            return None
+
+        dT = abs(T_in_C - T_out_C)
+        if dT > cls._ISOTHERMAL_DT_THRESHOLD_C:
+            return None
+
+        # Quality direction: condensing (hot) reduces x; evaporating (cold) raises x.
+        dx = (x_in - x_out) if side == "hot" else (x_out - x_in)
+        if dx <= 0.0:
+            return None
+
+        if pressure_Pa is None:
+            warnings.append(
+                f"{side.capitalize()} side appears isothermal (ΔT={dT:.2f}°C) but "
+                f"P_{side}_Pa is None — latent duty cannot be computed. "
+                f"Provide the operating pressure for phase-change service."
+            )
+            return None
+
+        try:
+            from hx_engine.app.adapters.thermo_adapter import get_saturation_props
+
+            sat = get_saturation_props(fluid_name, pressure_Pa)
+        except Exception:
+            return None
+
+        T_sat_C = sat.get("T_sat_C") if isinstance(sat, dict) else None
+        h_fg = sat.get("h_fg") if isinstance(sat, dict) else None
+        if T_sat_C is None or h_fg is None or h_fg <= 0:
+            return None
+
+        T_mean = 0.5 * (T_in_C + T_out_C)
+        if abs(T_mean - T_sat_C) > cls._T_SAT_TOLERANCE_C:
+            return None
+
+        mode = "condensing" if side == "hot" else "evaporating"
+        Q_W = m_dot_kg_s * h_fg * dx
+        partial_note = "" if dx >= 0.999 else f" (Δx={dx:.2f}, partial)"
+        warnings.append(
+            f"{side.capitalize()} side treated as {mode}{partial_note}: "
+            f"Q = ṁ·h_fg·Δx = {m_dot_kg_s:.3f} × {h_fg:.0f} × {dx:.2f} "
+            f"= {Q_W / 1e3:.1f} kW (T_sat={T_sat_C:.1f}°C, ΔT={dT:.2f}°C)."
+        )
+        return {
+            "Q_W": Q_W,
+            "h_fg": h_fg,
+            "mode": mode,
+            "T_sat_C": T_sat_C,
+            "dx": dx,
+        }
+
+    @staticmethod
+    def _duty_basis_label(
+        hot_latent: dict | None, cold_latent: dict | None,
+    ) -> str:
+        """Classify the Q basis for downstream steps."""
+        if hot_latent is None and cold_latent is None:
+            return "sensible"
+        if hot_latent is not None and cold_latent is not None:
+            return "latent_both"
+        if hot_latent is not None:
+            return "latent_condensing"
+        return "latent_evaporating"
