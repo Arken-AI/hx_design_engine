@@ -78,6 +78,36 @@ def _rule_dp_shell_within_limit(
 
 
 # ---------------------------------------------------------------------------
+# Shared nozzle ρv² check (R5 + R6)
+# ---------------------------------------------------------------------------
+
+def _check_nozzle_rho_v2(
+    side: str,
+    val: float | None,
+    auto_corrected: bool,
+) -> tuple[bool, str | None]:
+    # auto_corrected is message-only: the flag marks when an upsize was applied,
+    # not when the resulting ρv² is verified under the limit.
+    if val is None:
+        return True, None  # missing output is a Layer 1 contract issue
+    if val <= _RHO_V2_LIMIT:
+        return True, None
+    if auto_corrected:
+        reason = (
+            f"{side.capitalize()}-side nozzle ρv² {val:.0f} kg/m·s² exceeds "
+            f"TEMA erosion limit ({_RHO_V2_LIMIT:.0f} kg/m·s²) even after "
+            f"auto-correction (larger nozzle / dual-nozzle exhausted)"
+        )
+    else:
+        reason = (
+            f"{side.capitalize()}-side nozzle ρv² {val:.0f} kg/m·s² exceeds "
+            f"TEMA erosion limit ({_RHO_V2_LIMIT:.0f} kg/m·s²); "
+            f"auto-correction was not applied"
+        )
+    return False, reason
+
+
+# ---------------------------------------------------------------------------
 # R5 — Tube nozzle ρv² within TEMA erosion limit
 # ---------------------------------------------------------------------------
 
@@ -85,15 +115,8 @@ def _rule_nozzle_rho_v2_tube(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("rho_v2_tube_nozzle")
-    if val is not None and val > _RHO_V2_LIMIT:
-        # Auto-correction in execute() should have upsized the nozzle.
-        # If ρv² is still over the limit after auto-correction, warn
-        # but allow the pipeline to continue.
-        auto_corrected = result.outputs.get("nozzle_auto_corrected_tube", False)
-        if auto_corrected:
-            return True, None   # auto-corrected — pass with warning in outputs
-        return True, None       # pass — warning added by execute()
-    return True, None
+    auto_corrected = bool(result.outputs.get("nozzle_auto_corrected_tube", False))
+    return _check_nozzle_rho_v2("tube", val, auto_corrected)
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +127,8 @@ def _rule_nozzle_rho_v2_shell(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("rho_v2_shell_nozzle")
-    if val is not None and val > _RHO_V2_LIMIT:
-        auto_corrected = result.outputs.get("nozzle_auto_corrected_shell", False)
-        if auto_corrected:
-            return True, None
-        return True, None  # pass — warning added by execute()
-    return True, None
+    auto_corrected = bool(result.outputs.get("nozzle_auto_corrected_shell", False))
+    return _check_nozzle_rho_v2("shell", val, auto_corrected)
 
 
 # ---------------------------------------------------------------------------

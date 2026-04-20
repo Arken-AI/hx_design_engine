@@ -262,7 +262,6 @@ class TestAITrigger:
 # ══════════════════════════════════════════════════════════════════════
 
 def _make_result(**kwargs) -> StepResult:
-    """Create a StepResult with given outputs."""
     defaults = {
         "dP_tube_Pa": 50_000.0,
         "dP_shell_Pa": 80_000.0,
@@ -297,37 +296,61 @@ class TestRules:
         assert passed is False
         assert "1.4 bar" in msg
 
-    def test_nozzle_tube_over_limit(self) -> None:
-        result = _make_result(rho_v2_tube_nozzle=2500.0)
+    @pytest.mark.parametrize("rho_v2_key,rule_fn", [
+        ("rho_v2_tube_nozzle", rules_mod._rule_nozzle_rho_v2_tube),
+        ("rho_v2_shell_nozzle", rules_mod._rule_nozzle_rho_v2_shell),
+    ])
+    def test_nozzle_over_limit_without_auto_correction_fails(self, rho_v2_key, rule_fn) -> None:
+        result = _make_result(**{rho_v2_key: 2500.0})
+        passed, msg = rule_fn(10, result)
+        assert passed is False
+        assert "2500" in msg
+        assert "auto-correction was not applied" in msg
+
+    @pytest.mark.parametrize("rho_v2_key,corrected_key,rule_fn", [
+        ("rho_v2_tube_nozzle", "nozzle_auto_corrected_tube", rules_mod._rule_nozzle_rho_v2_tube),
+        ("rho_v2_shell_nozzle", "nozzle_auto_corrected_shell", rules_mod._rule_nozzle_rho_v2_shell),
+    ])
+    def test_nozzle_over_limit_after_auto_correction_fails(
+        self, rho_v2_key, corrected_key, rule_fn,
+    ) -> None:
+        result = _make_result(**{rho_v2_key: 2800.0, corrected_key: True})
+        passed, msg = rule_fn(10, result)
+        assert passed is False
+        assert "2800" in msg
+        assert "even after auto-correction" in msg
+
+    def test_nozzle_tube_at_limit_passes(self) -> None:
+        # <= boundary: 2230.0 must pass (mirrors _rule_dp_*_within_limit > semantics)
+        result = _make_result(rho_v2_tube_nozzle=2230.0)
         passed, msg = rules_mod._rule_nozzle_rho_v2_tube(10, result)
-        # Auto-correction in execute() handles upsizing; rule now passes
         assert passed is True
         assert msg is None
 
-    def test_nozzle_shell_over_limit(self) -> None:
-        result = _make_result(rho_v2_shell_nozzle=2500.0)
-        passed, msg = rules_mod._rule_nozzle_rho_v2_shell(10, result)
-        # Auto-correction in execute() handles upsizing; rule now passes
+    @pytest.mark.parametrize("rho_v2_key,rule_fn", [
+        ("rho_v2_tube_nozzle", rules_mod._rule_nozzle_rho_v2_tube),
+        ("rho_v2_shell_nozzle", rules_mod._rule_nozzle_rho_v2_shell),
+    ])
+    def test_nozzle_missing_output_passes_defensively(self, rho_v2_key, rule_fn) -> None:
+        result = _make_result()
+        result.outputs.pop(rho_v2_key, None)
+        passed, msg = rule_fn(10, result)
         assert passed is True
         assert msg is None
 
-    def test_all_rules_pass_healthy(self) -> None:
-        result = _make_result(
-            dP_tube_Pa=50_000.0,
-            dP_shell_Pa=80_000.0,
-            rho_v2_tube_nozzle=500.0,
-            rho_v2_shell_nozzle=500.0,
-        )
-        for rule_fn in [
-            rules_mod._rule_dp_tube_positive,
-            rules_mod._rule_dp_shell_positive,
-            rules_mod._rule_dp_tube_within_limit,
-            rules_mod._rule_dp_shell_within_limit,
-            rules_mod._rule_nozzle_rho_v2_tube,
-            rules_mod._rule_nozzle_rho_v2_shell,
-        ]:
-            passed, msg = rule_fn(10, result)
-            assert passed is True, f"Rule {rule_fn.__name__} failed: {msg}"
+    @pytest.mark.parametrize("rule_fn", [
+        rules_mod._rule_dp_tube_positive,
+        rules_mod._rule_dp_shell_positive,
+        rules_mod._rule_dp_tube_within_limit,
+        rules_mod._rule_dp_shell_within_limit,
+        rules_mod._rule_nozzle_rho_v2_tube,
+        rules_mod._rule_nozzle_rho_v2_shell,
+    ])
+    def test_each_rule_passes_for_healthy_design(self, rule_fn) -> None:
+        result = _make_result()
+        passed, msg = rule_fn(10, result)
+        assert passed is True
+        assert msg is None
 
 
 # ══════════════════════════════════════════════════════════════════════
