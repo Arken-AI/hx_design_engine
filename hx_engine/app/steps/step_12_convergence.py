@@ -14,7 +14,7 @@ import json
 import logging
 import math
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from hx_engine.app.core.state_utils import apply_outputs
 from hx_engine.app.data.tema_tables import find_shell_diameter, get_tube_count
@@ -47,6 +47,54 @@ _SUB_STEP_CLASSES: list[str] = [
 ]
 
 PASSES_SEQUENCE: list[int] = [1, 2, 4, 6, 8]
+
+
+# Step 4 R5: baffle_spacing_m >= max(0.2 × D_s, 0.05 m)
+_BAFFLE_SPACING_ABS_FLOOR_M: Final[float] = 0.05   # TEMA absolute minimum (50 mm)
+_BAFFLE_SPACING_MAX_M: Final[float] = 2.0          # TEMA absolute maximum
+_BAFFLE_SPACING_TEMA_RATIO: Final[float] = 0.20    # Step 4 R5: B_min >= 0.2 × D_s
+
+
+def _clamp_baffle_spacing(
+    spacing_m: float, shell_diameter_m: float | None,
+) -> tuple[float, bool]:
+    """Returns (clamped_spacing_m, floor_binding); falls back to 50 mm floor when shell_diameter_m is None."""
+    floor = _BAFFLE_SPACING_ABS_FLOOR_M
+    if shell_diameter_m is not None and shell_diameter_m > 0:
+        floor = max(floor, _BAFFLE_SPACING_TEMA_RATIO * shell_diameter_m)
+    ceiling = _BAFFLE_SPACING_MAX_M
+    clamped = max(floor, min(spacing_m, ceiling))
+    floor_binding = spacing_m < floor
+    return clamped, floor_binding
+
+
+def _rescale_secondary_baffles(
+    geometry: "GeometrySpec", ratio: float, shell_diameter_m: float | None,
+) -> None:
+    """Rescale inlet/outlet baffle spacings by ``ratio`` and clamp to TEMA.
+
+    Mutates ``geometry`` in place. Skips fields that are unset. Used by both
+    the direct-adjustment branch and the shell-upsize branch so the TEMA
+    floor is enforced identically in both paths (single source of truth).
+    """
+    if geometry.inlet_baffle_spacing_m is not None:
+        geometry.inlet_baffle_spacing_m, _ = _clamp_baffle_spacing(
+            geometry.inlet_baffle_spacing_m * ratio, shell_diameter_m,
+        )
+    if geometry.outlet_baffle_spacing_m is not None:
+        geometry.outlet_baffle_spacing_m, _ = _clamp_baffle_spacing(
+            geometry.outlet_baffle_spacing_m * ratio, shell_diameter_m,
+        )
+
+
+def _format_baffle_change_description(
+    old_bs: float | None, new_bs: float, floor_binding: bool,
+) -> str:
+    """Trajectory string for a baffle-spacing change (e.g. ``150mm→120mm``)."""
+    suffix = " (clamped to TEMA floor)" if floor_binding else ""
+    if old_bs:
+        return f"baffle_spacing {old_bs*1000:.0f}mm→{new_bs*1000:.0f}mm{suffix}"
+    return f"baffle_spacing→{new_bs*1000:.0f}mm{suffix}"
 
 
 def _load_sub_steps() -> list[type]:
@@ -515,20 +563,16 @@ class Step12Convergence:
         # Apply baffle spacing change (independent of tube changes)
         if "baffle_spacing_m" in changes:
             old_bs = g.baffle_spacing_m
-            new_bs = changes["baffle_spacing_m"]
-            # Clamp to TEMA range
-            new_bs = max(0.05, min(new_bs, 2.0))
+            new_bs, floor_binding = _clamp_baffle_spacing(
+                changes["baffle_spacing_m"], g.shell_diameter_m,
+            )
             g.baffle_spacing_m = new_bs
-            if g.inlet_baffle_spacing_m is not None and old_bs and old_bs > 0:
-                g.inlet_baffle_spacing_m = g.inlet_baffle_spacing_m * (new_bs / old_bs)
-            if g.outlet_baffle_spacing_m is not None and old_bs and old_bs > 0:
-                g.outlet_baffle_spacing_m = g.outlet_baffle_spacing_m * (new_bs / old_bs)
-            # Recalculate n_baffles
+            if old_bs and old_bs > 0:
+                _rescale_secondary_baffles(g, new_bs / old_bs, g.shell_diameter_m)
             if g.tube_length_m and g.baffle_spacing_m:
                 g.n_baffles = max(1, int(g.tube_length_m / g.baffle_spacing_m) - 1)
             description_parts.append(
-                f"baffle_spacing {old_bs*1000:.0f}mm→{new_bs*1000:.0f}mm"
-                if old_bs else f"baffle_spacing→{new_bs*1000:.0f}mm"
+                _format_baffle_change_description(old_bs, new_bs, floor_binding),
             )
 
         # Handle tube count / shell changes
@@ -563,15 +607,10 @@ class Step12Convergence:
                     # Recalculate baffle spacing proportionally on shell upsize
                     if g.baffle_spacing_m is not None and old_shell > 0:
                         ratio = new_shell_m / old_shell
-                        g.baffle_spacing_m = max(0.05, min(g.baffle_spacing_m * ratio, 2.0))
-                        if g.inlet_baffle_spacing_m is not None:
-                            g.inlet_baffle_spacing_m = max(0.05, min(
-                                g.inlet_baffle_spacing_m * ratio, 2.0
-                            ))
-                        if g.outlet_baffle_spacing_m is not None:
-                            g.outlet_baffle_spacing_m = max(0.05, min(
-                                g.outlet_baffle_spacing_m * ratio, 2.0
-                            ))
+                        g.baffle_spacing_m, _ = _clamp_baffle_spacing(
+                            g.baffle_spacing_m * ratio, new_shell_m,
+                        )
+                        _rescale_secondary_baffles(g, ratio, new_shell_m)
 
                     # Recalculate n_baffles
                     if g.tube_length_m and g.baffle_spacing_m:
