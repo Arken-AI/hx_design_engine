@@ -37,16 +37,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CONFIDENCE_WEIGHTS: dict[str, float] = {
-    "geometry_convergence": 0.25,
-    "ai_agreement_rate": 0.25,
-    "supermemory_similarity": 0.25,
-    "validation_passes": 0.25,
+    "geometry_convergence": 1 / 3,
+    "ai_agreement_rate": 1 / 3,
+    "validation_passes": 1 / 3,
 }
-
-SUPERMEMORY_SIMILARITY_PLACEHOLDER = 0.5
-
-# Confidence threshold for future Supermemory save (stub/TODO)
-SUPERMEMORY_SAVE_THRESHOLD = 0.75
 
 # P2-22: Gnielinski is least accurate in the 2300 < Re < 10 000 band (±15%).
 _THERMAL_PENALTY_TRANSITION_ZONE = 0.90
@@ -195,14 +189,12 @@ class Step16FinalValidation(BaseStep):
             state.convergence_iteration,
         )
         ai_agreement_rate = _compute_ai_agreement_rate(state.step_records)
-        supermemory_similarity = SUPERMEMORY_SIMILARITY_PLACEHOLDER
         validation_passes = _compute_validation_pass_rate(state.step_records)
 
         # 3. Build breakdown dict
         confidence_breakdown = {
             "geometry_convergence": round(geometry_convergence, 4),
             "ai_agreement_rate": round(ai_agreement_rate, 4),
-            "supermemory_similarity": round(supermemory_similarity, 4),
             "validation_passes": round(validation_passes, 4),
         }
 
@@ -258,20 +250,11 @@ class Step16FinalValidation(BaseStep):
                 f"review flagged issues. Consider manual review."
             )
 
-        # 6. Supermemory save stub (TODO: integrate when Supermemory is available)
-        if confidence_score >= SUPERMEMORY_SAVE_THRESHOLD:
-            logger.info(
-                "Confidence %.2f ≥ %.2f — design eligible for Supermemory "
-                "save (not yet integrated).",
-                confidence_score,
-                SUPERMEMORY_SAVE_THRESHOLD,
-            )
-
-        # 7. Write deterministic results to state
+        # 6. Write deterministic results to state
         state.confidence_score = confidence_score
         state.confidence_breakdown = confidence_breakdown
 
-        # 8. Generate fallback summary in case AI is not called
+        # 7. Generate fallback summary in case AI is not called
         #    (shouldn't happen for FULL mode, but defensively)
         fallback_summary = (
             f"Heat exchanger design ({state.tema_type or 'unknown TEMA'}, "

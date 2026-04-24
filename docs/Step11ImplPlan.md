@@ -12,7 +12,7 @@ Step 11 computes the **required heat transfer area** (from the calculated U) and
 it to the **provided heat transfer area** (from the physical geometry). The ratio yields
 the **overdesign percentage** — the primary convergence signal for Step 12.
 
-No new correlations, no external data, no Supermemory calls. Pure arithmetic on existing
+No new correlations, no external data. Pure arithmetic on existing
 DesignState fields.
 
 **AI Mode:** CONDITIONAL — AI called only when overdesign < 8% or > 30%.

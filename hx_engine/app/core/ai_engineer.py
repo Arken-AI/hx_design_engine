@@ -1343,13 +1343,10 @@ def _build_step_context_inner(
         score = result.outputs.get("confidence_score")
 
         lines.append("CONFIDENCE BREAKDOWN (deterministic):")
-        for key in ("geometry_convergence", "ai_agreement_rate",
-                     "supermemory_similarity", "validation_passes"):
+        for key in ("geometry_convergence", "ai_agreement_rate", "validation_passes"):
             val = bd.get(key)
             label = f"  {key}:"
-            if key == "supermemory_similarity":
-                lines.append(f"{label} {val} (placeholder)")
-            elif val is not None:
+            if val is not None:
                 lines.append(f"{label} {val:.4f}")
         if score is not None:
             lines.append(f"  WEIGHTED SCORE: {score:.4f}")

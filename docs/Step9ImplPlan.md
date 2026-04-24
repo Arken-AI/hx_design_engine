@@ -1,7 +1,7 @@
 # Step 9 Implementation Plan: Overall U + Resistance Breakdown
 
 **Status:** Planning  
-**Depends on:** Steps 7 & 8 complete, MaterialPropertyAdapter (from SUPERMEMORY_IMPLEMENTATION_PLAN.md)  
+**Depends on:** Steps 7 & 8 complete, MaterialPropertyAdapter  
 **AI Mode:** FULL (always called outside convergence loop)  
 **Convergence Behavior:** AI skipped when `in_convergence_loop=True`  
 **Reference:** ARKEN_MASTER_PLAN.md §6.3, STEPS_6_16_PLAN.md Phase A
@@ -226,7 +226,7 @@ class Step09OverallU(BaseStep):
    a. If state.k_wall_W_mK already set → use it (from prior step or convergence iteration)
    b. Else → use MaterialPropertyAdapter.get_k_wall()
       - Determines material from resolve_material_from_fluid()
-      - Queries Supermemory → stub fallback
+      - Queries material stub (ASME table lookup)
    c. Store material props on state
 
 3. Map fouling resistances to inner/outer
@@ -660,12 +660,11 @@ if state.h_shell_kern_W_m2K is not None:
 | `hx_engine/app/core/ai_engineer.py`     | Add `_STEP_PROMPTS[9]` + step context builder for step 9 |
 | `requirements.txt`                      | (ht already installed — no change needed)                |
 
-### Dependencies (from Supermemory plan)
+### Dependencies
 
 | File                                         | Change                  | Needed For         |
 | -------------------------------------------- | ----------------------- | ------------------ |
 | `hx_engine/app/adapters/material_adapter.py` | MaterialPropertyAdapter | k_w resolution     |
-| `hx_engine/app/adapters/memory_client.py`    | MemoryClient            | Supermemory access |
 
 ---
 
@@ -888,7 +887,7 @@ def test_wall_resistance_matches_ht():
 | Very low k_w (<10)           | Wall resistance becomes large. Warn if >15% of total. AI reviews.                                                           |
 | `h_shell_kern = None`        | Skip Kern cross-check. Set `U_kern_W_m2K = None`. No error.                                                                 |
 | `U_estimated = None`         | Skip deviation calculation. Set `U_vs_estimated_deviation_pct = None`.                                                      |
-| Supermemory down             | MaterialPropertyAdapter falls back to stub. `k_wall_source = "stub_default"`, `needs_ai_review = True`. AI flags in review. |
+| Material lookup unavailable  | MaterialPropertyAdapter falls back to stub. `k_wall_source = "stub_default"`, `needs_ai_review = True`. AI flags in review. |
 | Exotic material not in stubs | Default to carbon steel + WARNING. AI should catch material mismatch.                                                       |
 
 ---
@@ -898,7 +897,7 @@ def test_wall_resistance_matches_ht():
 ```
 Phase 1: Foundation (can start immediately)
   1. Add DesignState fields (Step 9 outputs + material fields)
-  2. Build MaterialPropertyAdapter (stub mode only — no Supermemory wiring)
+  2. Build MaterialPropertyAdapter (stub mode only)
   3. Unit test MaterialPropertyAdapter
 
 Phase 2: Core Step (depends on Phase 1)
@@ -913,11 +912,4 @@ Phase 3: Integration (depends on Phase 2)
   10. Convergence behavior tests
   11. Run existing pipeline tests to verify no regression
 
-Phase 4: Supermemory Wiring (depends on SUPERMEMORY_IMPLEMENTATION_PLAN.md)
-  12. Wire MaterialPropertyAdapter to live Supermemory
-  13. Ingest ASME PDF
-  14. Validate retrieval quality
-  15. Switch from stub to live adapter
-```
-
-**Steps 1–11 can proceed now.** Steps 12–15 depend on the Supermemory pipeline being operational.
+**All steps can proceed now.**

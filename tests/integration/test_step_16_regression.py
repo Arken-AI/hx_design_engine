@@ -103,13 +103,13 @@ class TestExtremeValues:
             ],
         )
         result = await step.execute(state)
-        # geo=0.0, ai_agree=0.0, supermem=0.5, val_pass=0.0
-        # score = 0.25*0 + 0.25*0 + 0.25*0.5 + 0.25*0 = 0.125
+        # geo=0.0, ai_agree=0.0, val_pass=0.0
+        # score = (1/3)*(0 + 0 + 0) = 0.0
         assert 0.0 <= state.confidence_score <= 1.0
 
     @pytest.mark.asyncio
     async def test_all_components_max(self, step):
-        """T9.3b: All components 1.0 → score = 1.0 (minus supermemory)."""
+        """T9.3b: All components 1.0 → score = 1.0."""
         records = [
             _make_step_record(
                 i, ai_called=True,
@@ -123,9 +123,9 @@ class TestExtremeValues:
             step_records=records,
         )
         result = await step.execute(state)
-        # geo=1.0, ai=1.0, supermem=0.5, val=1.0
-        # score = 0.25*1 + 0.25*1 + 0.25*0.5 + 0.25*1 = 0.875
-        assert abs(state.confidence_score - 0.875) < 0.01
+        # geo=1.0, ai=1.0, val=1.0
+        # score = (1/3)*(1 + 1 + 1) = 1.0
+        assert abs(state.confidence_score - 1.0) < 0.01
 
     def test_iteration_zero(self):
         """T9.4: convergence_iteration=0 → geometry_convergence = 1.0."""
@@ -161,39 +161,6 @@ class TestSpecialCharacters:
         )
         vr = check(16, result)
         assert vr.passed, f"Layer 2 failed: {vr.errors}"
-
-
-class TestSupermemoryThreshold:
-    """T9.7: Confidence exactly at Supermemory threshold."""
-
-    @pytest.mark.asyncio
-    async def test_score_075(self, step):
-        """T9.7: Confidence score at Supermemory threshold."""
-        # With geo=1.0, ai=1.0, supermem=0.5, val=0.5
-        # score = 0.25*(1+1+0.5+0.5) = 0.75
-        records_first = [
-            _make_step_record(
-                i, ai_called=True,
-                ai_decision=AIDecisionEnum.PROCEED,
-                validation_passed=True,
-            )
-            for i in range(1, 8)
-        ]
-        records_later = [
-            _make_step_record(
-                i, ai_called=True,
-                ai_decision=AIDecisionEnum.PROCEED,
-                validation_passed=False,
-            )
-            for i in range(8, 16)
-        ]
-        # validation pass rate: 7 first-attempt passes / 15 total
-        # Actually need different mix for exactly 0.75
-        # Let's just verify the threshold logic works for any value >= 0.75
-        state = _minimal_state(convergence_iteration=5)
-        result = await step.execute(state)
-        # Score will be determined by the records; just verify it's valid
-        assert 0.0 <= state.confidence_score <= 1.0
 
 
 class TestWeightedScoreClamping:

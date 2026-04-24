@@ -290,15 +290,14 @@ class TestConfidenceScore:
         assert _compute_confidence_score(bd, CONFIDENCE_WEIGHTS) == 0.0
 
     def test_mixed_components(self):
-        """T2.21: [1.0, 0.8, 0.5, 0.6] → 0.725."""
+        """T2.21: [1.0, 0.8, 0.6] → ~0.8."""
         bd = {
             "geometry_convergence": 1.0,
             "ai_agreement_rate": 0.8,
-            "supermemory_similarity": 0.5,
             "validation_passes": 0.6,
         }
         result = _compute_confidence_score(bd, CONFIDENCE_WEIGHTS)
-        assert abs(result - 0.725) < 0.001
+        assert abs(result - (1.0 + 0.8 + 0.6) / 3) < 0.001
 
     def test_weights_sum_to_one(self):
         """T2.22: Weights sum to 1.0."""

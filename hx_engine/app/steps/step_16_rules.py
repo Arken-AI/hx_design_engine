@@ -12,7 +12,6 @@ from hx_engine.app.models.step_result import StepResult
 _EXPECTED_BREAKDOWN_KEYS = frozenset({
     "geometry_convergence",
     "ai_agreement_rate",
-    "supermemory_similarity",
     "validation_passes",
 })
 
@@ -38,15 +37,15 @@ def _rule_confidence_computed(
 def _rule_breakdown_complete(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """R16.2 — confidence_breakdown must have exactly 4 keys."""
+    """R16.2 — confidence_breakdown must have exactly 3 keys."""
     bd = result.outputs.get("confidence_breakdown")
     if bd is None:
         return False, "confidence_breakdown is missing from Step 16 outputs"
     if not isinstance(bd, dict):
         return False, f"confidence_breakdown must be a dict, got {type(bd).__name__}"
-    if len(bd) != 4:
+    if len(bd) != 3:
         return False, (
-            f"confidence_breakdown must have exactly 4 components, "
+            f"confidence_breakdown must have exactly 3 components, "
             f"got {len(bd)}: {sorted(bd.keys())}"
         )
     return True, None

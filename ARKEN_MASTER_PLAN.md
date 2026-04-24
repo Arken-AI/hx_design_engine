@@ -20,7 +20,6 @@
 5. [The AI Senior Engineer](#5-the-ai-senior-engineer)
 6. [AI Review Protocol — All 16 Steps](#6-ai-review-protocol--all-16-steps)
 7. [Key Contracts & Data Models](#7-key-contracts--data-models)
-8. [Supermemory — Complete Integration](#8-supermemory--complete-integration)
 9. [Real-Time Event Streaming](#9-real-time-event-streaming)
 10. [HX Engine Microservice](#10-hx-engine-microservice)
 11. [Backend Changes](#11-backend-changes)
@@ -79,7 +78,7 @@ CURRENT STATE          THIS PLAN (8 weeks)         12-MONTH IDEAL
 ─────────────────      ────────────────────────    ──────────────────────────────
 No product.            16-step Bell-Delaware       20 paying engineers.
 No users.              pipeline + chat UI +        HTRI calibration data feeds
-No validation.         Supermemory + autores.      accuracy improvement loops.
+No validation.         autores. deferred.          accuracy improvement loops.
                        Auth + org_id ready.        API tier for integrators.
                        Confidence breakdown        Multi-HX session memory.
                        visible to engineers.       TEMA library of past designs.
@@ -145,7 +144,7 @@ All confirmed:
 
 | Approach | Description | Rejected Because |
 |----------|-------------|------------------|
-| **A** | Full v6.0: 16-step pipeline + AI review + Supermemory + autoresearch, 8-week build, then find users | Demand validated at Week 8, not Week 1 |
+| **A** | Full v6.0: 16-step pipeline + AI review + autoresearch, 8-week build, then find users | Demand validated at Week 8, not Week 1 |
 | **B — Ship Fast** | Minimal 10-day build: Steps 1–5 + simple UI, no AI review, no optimization | Misses the 10× value prop; no confidence scoring, no audit trail, indistinguishable from a spreadsheet |
 | **C — API-First** | REST API for integrators before building a UI | No demand signal yet; API without a reference UI is hard to sell; B2B SaaS premise (#4 in §1.10) favors end-user product first |
 
@@ -211,7 +210,7 @@ Reverse Proxy: nginx :80 (routes /api/v1/hx/ → HX Engine, everything else → 
 
 ### 2.3 Secrets Management [Decision CEO-2A]
 
-- `.env` file for all secrets (ANTHROPIC_API_KEY, SUPERMEMORY_API_KEY, INTERNAL_SECRET, HX_ENGINE_SECRET, JWT_SECRET, MONGODB_URI, REDIS_URL)
+- `.env` file for all secrets (ANTHROPIC_API_KEY, INTERNAL_SECRET, HX_ENGINE_SECRET, JWT_SECRET, MONGODB_URI, REDIS_URL)
 - `.env.example` committed with placeholder values
 - `.env` in `.gitignore`
 - docker-compose.yml references `env_file: .env`
@@ -282,18 +281,10 @@ async def run_step_9(design_state, ai_engineer, memory):
     if validation.fails:
         return handle_hard_failure(step=9, validation)
 
-    # Your code fetches context from Supermemory (NOT the AI)
-    hot = design_state.shell_fluid.name
-    cold = design_state.tube_fluid.name
-    book_ctx, past_ctx = await asyncio.gather(
-        _safe_memory_call(memory.search_books(f"overall U {hot} {cold} typical range")),
-        _safe_memory_call(memory.search_past_designs(f"{hot} {cold} heat exchanger U value"))
-    )
-
     # Layer 3 + 4: AI review via shared correction loop [Decision ENG-1A, ENG-1B]
     # Full loop logic lives in BaseStep.run_with_review_loop() — see §7.5.
     review = await self.run_with_review_loop(
-        result, design_state, ai_engineer, book_ctx, past_ctx
+        result, design_state, ai_engineer
     )
 
     design_state.update(step=9, result=result, review=review)
@@ -373,7 +364,7 @@ LOOP 1 (Backend — Claude orchestration):
 
 This is critical. The AI reviewer does NOT:
 - Decide its own next action
-- Call tools (including Supermemory)
+- Call external tools or services
 - Loop or iterate
 - Have a multi-turn conversation
 
@@ -583,9 +574,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 | Loop 1 (Backend Claude) | ~3 calls | Orchestration: tool selection + narrative generation |
 | Loop 2 (HX Engine AI reviews) | 6–8 calls | 6 FULL steps always + 0–2 CONDITIONAL triggers |
 | **Total AI calls** | **~9–11** | |
-| Supermemory reads | ~8 calls | Steps 1, 4, 6, 8, 9, 13, 16 (books + past designs + profile) |
-| Supermemory writes | ~2 calls | Step 16: save design + store conversation |
-| **Total Supermemory** | **~10** | |
 
 ### 6.2 AI Mode Summary Table
 
@@ -596,17 +584,17 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 | 3 | Fluid Properties | CONDITIONAL | AI if Pr < 0.5 or > 1000 |
 | 4 | TEMA Type + Geometry | FULL always | Escalate if two types equally valid |
 | 5 | LMTD + F-Factor | CONDITIONAL (F < 0.85) | Hard fail if F < 0.75 |
-| 6 | Initial U + Size | CONDITIONAL + Supermemory | asyncio.gather books + past |
+| 6 | Initial U + Size | CONDITIONAL | asyncio.gather if needed |
 | 7 | Tube-side h | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
 | 8 | Shell-side h (Bell-Delaware) | FULL always | Serth 5.1 validated |
-| 9 | Overall U + Resistances | FULL + parallel Supermemory | asyncio.gather books + past |
+| 9 | Overall U + Resistances | FULL | always called outside convergence loop |
 | 10 | Pressure Drops | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
 | 11 | Area + Overdesign | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
 | 12 | Convergence Loop (7→11) | NONE (try/finally) | Max 20 iterations, CG1A reset |
 | 13 | Vibration (5 mechanisms) | FULL always (safety) | Connors pre-filter in autoresearch |
 | 14 | Mechanical (ASME VIII) | CONDITIONAL | AI if P > 30 bar |
 | 15 | Cost (Turton + CEPCI) | CONDITIONAL | AI if cost anomalous vs past |
-| 16 | Final Validation + Confidence | FULL + all 3 Supermemory | asyncio.gather all three |
+| 16 | Final Validation + Confidence | FULL | always called (final sign-off) |
 
 ### 6.3 Complete Step-by-Step Protocol
 
@@ -614,7 +602,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 - **Tier:** FULL AI — Always called
 - **Layer 1:** Extract structured data from request (fluids, temps, flows)
 - **Layer 2:** Check all blocking inputs present (fluid names, 3+ temps, flow rates)
-- **Supermemory:** Fetch user profile (preferences, industry, past patterns)
 - **AI checks:** Are defaults reasonable? Should pressure be higher (phase change risk)? Industry-specific rules (TEMA Class R for refinery)?
 - **Can correct:** Override default pressure, set TEMA class from context, flag ambiguous fluids
 - **Escalates when:** Fluid identity ambiguous, less than 3 temperatures, flow rate missing
@@ -622,7 +609,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - User says "oil" — could be crude, thermal, vegetable. AI must ask.
   - User provides temps in °F — system must handle unit conversion
   - User provides 4 temperatures that don't satisfy energy balance — flag error
-  - User says "same as last time" — fetch from Supermemory user profile
 
 #### Step 2: Calculate Heat Duty
 - **Tier:** CONDITIONAL — AI called only if anomaly
@@ -655,7 +641,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 - **Tier:** FULL AI — Always called
 - **Layer 1:** Decision tree for TEMA type based on process conditions. Heuristic selection of tube OD, pitch, layout angle, passes, length, baffle cut.
 - **Layer 2:** Selected geometry parameters within TEMA standards
-- **Supermemory:** Search books for TEMA selection rules. Search past designs for similar service.
 - **AI checks:** TEMA type vs thermal expansion (ΔT > 50°C → floating head), tube allocation (fouling fluid tube-side), pitch angle (90° for cleaning), industry rules
 - **Can correct:** Switch BEM→AES if expansion problematic, switch to square pitch if fouling, change tube allocation if high-pressure on wrong side
 - **Escalates when:** Two TEMA types equally valid — present trade-offs to user
@@ -685,7 +670,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 - **Tier:** CONDITIONAL — AI called if U outside typical range or past designs available
 - **Layer 1:** Look up typical U for fluid pair. Compute A = Q/(U×F×LMTD). Compute N_tubes = A/(π×d_o×L). Look up shell diameter from TEMA tube count tables.
 - **Layer 2:** U > 0, A > 0, tube count maps to a standard shell size
-- **Supermemory:** Search past designs for empirical U average (better than book midpoint). Uses asyncio.gather [Decision 9A].
 - **Can correct:** Use past design avg U instead of book midpoint. Adjust shell to next standard size if tube count between table entries.
 - **Corner cases:**
   - Required tube count exceeds largest single shell — need shells in series or parallel
@@ -711,7 +695,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 - **Tier:** FULL AI — Always called (most complex calculation)
 - **Layer 1:** Compute all geometric areas (cross-flow, leakage A_sb, A_tb, bypass A_bp). Compute ideal h. Compute 5 J-factors. h_o = h_ideal × J_c × J_l × J_b × J_s × J_r.
 - **Layer 2:** h_o > 0, all J-factors in range (0.2–1.2)
-- **Supermemory:** Search books for J-factor diagnostic ranges
 - **review_protocol.py thresholds:**
   - J_l: warn_below 0.55, correct_below 0.45
   - J_b: warn_below 0.60, correct_below 0.50
@@ -732,7 +715,6 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 - **Tier:** FULL AI — Always called
 - **Layer 1:** 1/U = 1/h_o + R_f,o + t_w/k_w + R_f,i + (d_o/d_i)/h_i. Compute each resistance as percentage.
 - **Layer 2:** U > 0, all resistances > 0, percentages sum to 100%
-- **Supermemory:** Search books for typical U range. Search past designs for empirical comparison. Uses asyncio.gather [Decision 9A].
 - **AI checks:** U in typical range? Resistance breakdown makes physical sense? Kern cross-check deviation < 15%? Controlling resistance identified correctly?
 - **Can correct:** Flag if U far from expected — likely indicates a problem upstream
 - **Corner cases:**
@@ -802,7 +784,6 @@ finally:
 - **Tier:** FULL AI — Always called (safety-critical)
 - **Layer 1:** Natural frequency at each span. Cross-flow velocity at each baffle compartment. Check 5 mechanisms: fluidelastic instability (Connors), vortex shedding, turbulent buffeting, acoustic resonance (gas only), fluid-elastic whirling.
 - **Layer 2:** u_cross/u_crit < 0.5 at every span (Connors criterion with safety factor)
-- **Supermemory:** Search books for vibration safety criteria
 - **AI checks:** All 5 mechanisms at every span. Inlet/outlet spans (longest) are most critical.
 - **Can correct:** Reduce baffle spacing (shorter span = higher natural frequency), add intermediate supports, add impingement baffle at inlet
 - **Escalates when:** Vibration fix conflicts with dP limit — present trade-off (rod baffles, helical baffles, or accept higher dP)
@@ -842,14 +823,12 @@ finally:
 #### Step 16: Final Validation and Confidence
 - **Tier:** FULL AI — Always called (final sign-off)
 - **Layer 1:** Run all final checks. Compute confidence score.
-- **Supermemory:** Full context search — books + past designs + user profile. Uses asyncio.gather for all 3 [Decision 9A].
 - **Confidence Score [CEO-CP2]:**
-  - `confidence_breakdown` dict with 4 keys:
+  - `confidence_breakdown` dict with 3 keys:
     - `geometry_convergence`: float [0.0, 1.0]
     - `ai_agreement_rate`: float [0.0, 1.0]
-    - `supermemory_similarity`: float [0.0, 1.0]
     - `validation_passes`: float [0.0, 1.0]
-  - `CONFIDENCE_WEIGHTS` constant: equal weights 0.25 each [Decision CEO-7A], tunable
+  - `CONFIDENCE_WEIGHTS` constant: equal weights 1/3 each [Decision CEO-7A], tunable
   - `confidence_score` = weighted sum of breakdown × weights
   - Both stored in DesignState and shown in DesignSummary card (breakdown expandable)
 - **AI produces:**
@@ -857,7 +836,6 @@ finally:
   2. Plain-English summary of the design and trade-offs
   3. List of all assumptions made and their impact
   4. Recommendations if confidence < 0.80
-- **Save to Supermemory:** If confidence ≥ 0.75, store design summary to past_designs
 - **Corner cases:**
   - Confidence < 0.70 — design may be unreliable. Strong warning to user.
   - Multiple corrections made — compound uncertainty. Reduce confidence.
@@ -937,7 +915,7 @@ class DesignState(BaseModel):
     confidence_score: Optional[float] = None
     confidence_breakdown: Optional[dict] = None   # CEO-CP2: explainability
     # confidence_breakdown keys: geometry_convergence, ai_agreement_rate,
-    #   supermemory_similarity, validation_passes — all floats [0.0, 1.0]
+    #   validation_passes — all floats [0.0, 1.0]
     tema_type: Optional[str] = None
     warnings: List[str] = []
     step_records: List[StepRecord] = Field(default_factory=list)  # CEO Amendment: default_factory
@@ -1384,150 +1362,6 @@ engines:
 - JWT payload includes `user_id` and `session_id` [Decision CEO-5A]
 - GET /stream validates JWT: checks signature, expiry, user_id, session_id match
 - Unauthorized → 401
-
----
-
-## 8. Supermemory — Complete Integration
-
-### 8.1 What Supermemory Is (and Is NOT)
-
-> **Supermemory is a storage and retrieval system. It does NOT calculate, does NOT judge, does NOT decide. All intelligence comes from the AI Senior Engineer (Layer 3). Supermemory is the library shelf. Your code is the librarian. The AI is the engineer.**
-
-| Component | Role | Analogy |
-|-----------|------|---------|
-| **Supermemory** | Stores text, returns search results by meaning | The bookshelf and filing cabinet |
-| **Your Code** (pipeline_runner.py) | Builds queries from design_state, calls Supermemory at hardcoded points | The junior engineer who pulls the right book |
-| **AI Reviewer** (Layer 3) | Reads search results, compares with calculation, makes judgment | The senior engineer who reads and decides |
-
-**Critical rule:** The AI does NOT call Supermemory. Your code calls Supermemory, builds the query, and passes results INTO the AI's review prompt.
-
-### 8.2 We Do NOT Build RAG
-
-Supermemory IS the RAG infrastructure. We do NOT build:
-- Chunking pipeline
-- Embedding model deployment
-- Vector database (no Pinecone, Qdrant, Weaviate, Chroma)
-- Retrieval service
-- Document ingestion service
-
-Total code for the entire knowledge layer: ~100 lines.
-
-### 8.3 Three Knowledge Sources
-
-| Source | Stored When | Contents | Retrieved At |
-|--------|------------|----------|-------------|
-| **Engineering Books** | Once (ingestion script, ~10 min) | 16+ PDFs: Serth, Coulson, Perry's, TEMA, ASME, Kern, Incropera | Steps 4, 8, 9, 13, 16 |
-| **Past Designs** | After every completed design (conf ≥ 0.75) | Final summary: fluids, Q, U, geometry, corrections, confidence | Steps 6, 9, 16 |
-| **User Profiles** | After every conversation (auto-extracted) | Static facts + dynamic context | Step 1 |
-
-### 8.4 Book Ingestion (run once)
-
-```python
-# scripts/ingest_books.py — 15 lines, run once
-from supermemory import Supermemory
-from pathlib import Path
-
-client = Supermemory()
-books = [
-    ("serth_process_heat_transfer.pdf", "serth"),
-    ("coulson_richardson_vol6.pdf", "coulson"),
-    ("perrys_handbook.pdf", "perrys"),
-    ("tema_standards_10th.pdf", "tema"),
-    ("kern_process_heat_transfer.pdf", "kern"),
-    ("incropera_heat_mass_transfer.pdf", "incropera"),
-    ("asme_bpvc_section_viii.pdf", "asme"),
-]
-for filename, tag in books:
-    client.documents.upload_file(
-        file=Path(f"books/{filename}"),
-        container_tags=["engineering_books"],
-        metadata={"book": tag}
-    )
-```
-
-### 8.5 Memory Client Wrapper
-
-```python
-# hx_engine/app/memory/supermemory_client.py — ~50 lines
-from supermemory import AsyncSupermemory
-
-class MemoryClient:
-    def __init__(self):
-        self.sm = AsyncSupermemory()
-
-    async def search_books(self, query, limit=5):
-        results = await self.sm.search.memories(
-            q=query, container_tags=["engineering_books"],
-            search_mode="hybrid", limit=limit
-        )
-        return [r.chunk or r.memory for r in results.results]
-
-    async def search_past_designs(self, query, limit=10):
-        results = await self.sm.search.memories(
-            q=query, container_tags=["hx_designs"],
-            search_mode="memories", limit=limit
-        )
-        return results.results
-
-    async def get_user_profile(self, user_id, query):
-        return await self.sm.profile(container_tag=user_id, q=query)
-
-    async def store_design(self, user_id, run_id, summary, metadata):
-        await self.sm.add(
-            content=summary,
-            container_tags=[user_id, "hx_designs"],
-            metadata=metadata,
-            custom_id=f"hx-{run_id}"
-        )
-
-    async def store_conversation(self, user_id, conversation):
-        await self.sm.add(content=conversation, container_tag=user_id)
-```
-
-### 8.6 Query Templates (Built from design_state)
-
-| Step | Searches | Query Built From | Example Query |
-|------|----------|-----------------|---------------|
-| 1 | User profiles | user_id + user message | "crude oil cooling water heat exchanger" |
-| 4 | Books | hot_fluid + cold_fluid + delta_T | "TEMA type crude oil water 60C differential" |
-| 6 | Past designs | hot_fluid + cold_fluid + duty_kW | "crude oil water U value 6300kW" |
-| 8 | Books | cold_fluid + J-factor keywords | "Bell-Delaware J-factor range water shell-side" |
-| 9 | Books + Past | hot_fluid + cold_fluid | "overall U crude oil water typical range" |
-| 13 | Books | vibration keywords + geometry | "vibration Connors criterion baffle span" |
-| 16 | All three | all key parameters | "crude oil water 6300kW U=378 AES validation" |
-
-### 8.7 What Gets Stored After Design
-
-**We store:** Final design summary + key corrections. ONE record per design.
-
-```python
-summary = f"""HX Design: {hot_fluid}/{cold_fluid}, Q={duty}kW,
-U={U_calc} W/m²K, {tema_type}, {shell_mm}mm shell,
-{n_tubes} tubes × {tube_od}mm OD, {pitch_angle}° pitch,
-dP_tube={dp_t}kPa, dP_shell={dp_s}kPa, overdesign={od}%,
-confidence={conf}.
-Corrections: Step 3 viscosity 0.45→0.80 mPa·s (thermo underestimate).
-Step 8 baffle clearance 0.8→0.4mm (low J_l). Step 10 spacing 250→275mm
-(dP margin <15%)."""
-```
-
-**We do NOT store:** Intermediate calculations (Re, Pr, Nu, h_i, individual J-factor values). These are transient — computed fresh each time.
-
-### 8.8 Data Sharing Strategy
-
-- **Books:** Shared with all users. `container_tags=["engineering_books"]`.
-- **Past designs (starting phase):** Shared anonymously. `container_tags=["hx_designs"]`. Builds knowledge faster.
-- **Past designs (later):** Dual-tagged. `container_tags=[user_id, "hx_designs"]`. Private + shared.
-- **User profiles/conversations:** Always private. `container_tag=user_id`.
-
-### 8.9 Learning Over Time
-
-| Designs | Supermemory Returns | Impact |
-|---------|-------------------|--------|
-| 0 | Book ranges: 300–500 W/m²K | Baseline generic guidance |
-| 20 | Books + 8 past designs, avg U=382 | Better seed U, faster convergence |
-| 50 | Patterns: "thermo underestimates crude viscosity" | Proactive anomaly catch |
-| 100+ | Statistical trends + user preferences | Designs match expectations from start |
 
 ---
 
@@ -2387,26 +2221,11 @@ useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
 
 ---
 
-### Week 7 — Supermemory Integration
+### Week 7 — DEFERRED (Autoresearch / Loop 3)
 
-- `hx_engine/app/memory/supermemory_client.py` — search_books(), search_past_designs(), get_user_profile(), save_design(), update_user_profile()
-- `hx_engine/app/memory/memory_queries.py` — Query builders for Steps 6, 9, 16
-- Wire asyncio.gather calls in Steps 6, 9, 16 to real SupermemoryClient via _safe_memory_call (replace mocks)
-- Step 16: save to past_designs if confidence ≥ 0.75
-- `hx_engine/scripts/ingest_books.py` — One-time PDF ingestion (Serth, Kern, Perry's, TEMA, ASME VIII)
+**Autoresearch deferred to post-beta [Eng Review, 2026-03-21].** The beta build is 6 weeks. Full autoresearch implementation plan in §20 P2. See §12 for the design spec.
 
-**Week 7 Tests**
-- `tests/unit/memory/test_supermemory_client.py` — Mock HTTP, all 5 methods
-- `tests/unit/memory/test_memory_queries.py` — Query string validation
-- `tests/integration/test_memory_integration.py` — Sandbox collection, ingest 3 synthetic designs, verify retrieval
-
----
-
-### Week 8 — DEFERRED (Autoresearch / Loop 3)
-
-**Autoresearch deferred to post-beta [Eng Review, 2026-03-21].** The beta build is 7 weeks. Week 7 (Supermemory) is the final beta week. Full autoresearch implementation plan in §20 P2. See §12 for the design spec.
-
-**Beta build ends at Week 7. Ship checkpoint is Integration Checkpoint 7 (Supermemory live).**
+**Beta build ends at Week 6. Ship checkpoint is Integration Checkpoint 6 (full system live).**
 
 ---
 
@@ -2544,17 +2363,7 @@ def mock_supermemory():
 - `restore(snapshot)` after field mutation: original value restored
 - `restore(snapshot)` after partial mutation: only snapshotted fields restored, other fields unchanged
 
-### 15.4 Supermemory / _safe_memory_call [Decision CEO-4A]
-
-- Timeout: asyncio.wait_for raises TimeoutError → empty string returned, no exception propagated
-- ConnectError: service down → empty string returned, WARNING logged
-- Both calls fail simultaneously in asyncio.gather → step proceeds with empty context
-- store_design(): confidence ≥ 0.75 stores, < 0.75 does not store
-- search_books(): returns results above 0.6 similarity threshold
-- search_past_designs(): fluid pair matching — query "crude oil / cooling water" returns designs with same fluid pair ranked first; unrelated pairs (e.g. "steam / ammonia") excluded or ranked below 0.6 threshold
-- Supermemory fully down (all 3 gather calls timeout): design completes with empty context, confidence_score reduced vs. same design with Supermemory available (standalone comparison test)
-
-### 15.5 JWT Stream Auth [Decision CEO-5A — user_id in token]
+### 15.4 JWT Stream Auth [Decision CEO-5A — user_id in token]
 
 - No token → 401
 - Expired token (manufactured with 1s TTL) → 401
@@ -2563,19 +2372,19 @@ def mock_supermemory():
 - Token with mismatched session_id → 401
 - Valid token with correct user_id and session_id → 200 + events stream
 
-### 15.6 Internal Webhook Auth [3R-1A]
+### 15.5 Internal Webhook Auth [3R-1A]
 
 - Missing X-Internal-Token header → 403
 - Wrong token value → 403
 - Correct token → 200, result stored in MongoDB
 
-### 15.7 Webhook Retry [Eng Decision 2]
+### 15.6 Webhook Retry [Eng Decision 2]
 
 - Backend returns 500 three times → verify CRITICAL log, design still complete in Redis
 - Backend down on first call, up on second → verify retry succeeds silently
 - All 3 retries fail → result retrievable via GET /status for 24h
 
-### 15.8 Bell-Delaware Accuracy (Week 3 — hard gate)
+### 15.7 Bell-Delaware Accuracy (Week 3 — hard gate)
 
 - Serth Example 5.1: U within 5%, all 5 J-factors within 10%, dP within 10%
 - Run against implementation BEFORE wiring into Steps 6–9
@@ -2586,17 +2395,17 @@ def mock_supermemory():
 1. Activate Kern fallback — use simplified Kern correlation (Kern, *Process Heat Transfer*, 1950) for shell-side h in Step 8. Document the deviation in `bell_delaware.py` with a `# KERN_FALLBACK_ACTIVE` comment.
 2. Proceed to Weeks 4-5 with Kern fallback active. Continue debugging Bell-Delaware in parallel as a background track.
 3. Escalation: if Bell-Delaware remains unresolved after 3 days, ring-fence a week-long deep dive during Weeks 4-5 (does not block frontend/HTRI comparison work on separate tracks).
-4. **Hard gate before Week 7:** Bell-Delaware must be passing ±5% on U before Supermemory integration begins. Note: Autoresearch is deferred to post-beta — the original gate was "before Week 8." Supermemory does not depend on Bell-Delaware accuracy, but the gate still applies: do not proceed past Week 6 with Kern fallback active, as post-beta autoresearch will require accurate shell-side h.
+4. Do not proceed past Week 6 with Kern fallback active, as post-beta autoresearch will require accurate shell-side h.
 5. Kern fallback is deactivated as soon as Bell-Delaware passes the Serth 5.1 gate.
 
-### 15.9 Validation Rules
+### 15.8 Validation Rules
 
 - All boundary values: F=0.75 (pass), F=0.74 (fail), velocity=0.5 (pass), velocity=0.499 (fail)
 - LMTD edge: ΔT1 = ΔT2 → verify arithmetic mean, no divide-by-zero
 - F-factor edge: R = 1.0 → verify L'Hôpital formula branch
 - GeometrySpec validators: baffle_spacing_m < 0.05 → ValueError, > 2.0 → ValueError [CG3A]
 
-### 15.10 Convergence Loop (Step 12)
+### 15.9 Convergence Loop (Step 12)
 
 - in_convergence_loop=True: verify Steps 7/10/11 skip conditional AI [Decision 3A]
 - Loop terminates in < 20 iterations on standard case
@@ -2605,7 +2414,7 @@ def mock_supermemory():
 - Post-convergence AI review: after Step 12 converges, Steps 13–16 run with ai_mode=FULL (not CONDITIONAL) — verify AI is called in Step 13 and Step 16 even though in_convergence_loop was recently True
 - Oscillation damping: mock ΔU that alternates [+5%, −4%, +3%, −2%…] → verify convergence detects damped oscillation and terminates early when amplitude < 1%, not after 20 iterations
 
-### 15.11 Geometry Proposer Fallback [Eng Decision 4] — POST-BETA
+### 15.10 Geometry Proposer Fallback [Eng Decision 4] — POST-BETA
 
 **Deferred with autoresearch [Eng Review].** See §12 and §20 P2. Tests written when autoresearch is built.
 
@@ -2619,13 +2428,13 @@ def mock_supermemory():
 - "Rate this existing exchanger [with geometry]" → hx_rate (not hx_design)
 - "Optimize for cost" → hx_optimize (only after design exists in session)
 - "What fluid properties does ethylene glycol have?" → hx_get_fluid_properties only
-- "Same as last time but hotter inlet" → hx_design with Supermemory profile fetch
+- "Same as last time but hotter inlet" → hx_design
 
 ### 15.14 Confidence Breakdown [CEO scope accepted]
 
-- Step 16 populates all 4 keys: geometry_convergence, ai_agreement_rate, supermemory_similarity, validation_passes — all floats in [0.0, 1.0]
+- Step 16 populates all 3 keys: geometry_convergence, ai_agreement_rate, validation_passes — all floats in [0.0, 1.0]
 - CONFIDENCE_WEIGHTS sum to 1.0
-- confidence_score == weighted sum of breakdown × weights (equal 0.25 each)
+- confidence_score == weighted sum of breakdown × weights (equal 1/3 each)
 - confidence_score ∈ [0.0, 1.0] always
 
 ### 15.15 Redis / Session Store
@@ -2667,9 +2476,8 @@ def mock_supermemory():
 4. Failed AI review with fallback: AI down → WARN cards → design completes with reduced confidence
 5. SSE disconnect → poll fallback → reconnect on completion [CG2A]
 6. Internal webhook failure → 3 retries → CRITICAL log → result retrievable via GET /status
-7. Supermemory down → all 3 gather calls timeout in 5s → design completes with empty context
-8. SSE event-order verification: record all SSE events in order → assert `step_started(N)` before any terminal event for step N (`step_approved`/`step_corrected`/`step_warning`/`step_escalated`/`step_error`), all 16 steps present in order, `design_complete` is the final event, no terminal event for step N without a preceding `step_started(N)` [regression test; note: `step_started` is emitted by `pipeline_runner.py` before each step's execute(), not inside BaseStep]
-9. Webhook happy path (full flow): HX Engine completes Step 16 → POST /internal/design-complete with X-Internal-Token → Backend stores result in MongoDB → GET /api/v1/hx/design/{session_id}/status returns complete result with all 16 step records
+7. SSE event-order verification: record all SSE events in order → assert `step_started(N)` before any terminal event for step N (`step_approved`/`step_corrected`/`step_warning`/`step_escalated`/`step_error`), all 16 steps present in order, `design_complete` is the final event, no terminal event for step N without a preceding `step_started(N)` [regression test; note: `step_started` is emitted by `pipeline_runner.py` before each step's execute(), not inside BaseStep]
+8. Webhook happy path (full flow): HX Engine completes Step 16 → POST /internal/design-complete with X-Internal-Token → Backend stores result in MongoDB → GET /api/v1/hx/design/{session_id}/status returns complete result with all 16 step records
 
 ---
 
@@ -2707,8 +2515,7 @@ Expected envelope:
 | 4 | End Week 4 | Convergence loop: standard case converges ≤ 15 iterations; CG1A try/finally verified |
 | 5 | End Week 5 | All 16 steps complete; crude oil design envelope check passes; all 7 SSE types emitted |
 | 6 (SYSTEM) | End Week 6 | Frontend types → Backend Loop 1 → HX Engine 16 steps → live StepCards; 5 orchestration tests pass |
-| 7 | End Week 7 | Supermemory book context returned; past design saved after Step 16; user profile non-empty |
-| 8 (POST-BETA) | End Week 8 | **Deferred.** Autoresearch / Loop 3. See §20 P2. |
+| 7 (POST-BETA) | End Week 7 | **Deferred.** Autoresearch / Loop 3. See §20 P2. |
 
 ### Benchmark Targets Summary
 
@@ -2837,18 +2644,7 @@ STEP_8_CHECKS = {
 | User doesn't respond to escalation | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
 | Layer 2 still fails after user response (re-escalation) | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts. |
 
-### 18.5 Supermemory Edge Cases
-
-| Case | Handling |
-|------|----------|
-| Search returns 0 results | Proceed without context. AI reviewer relies on training knowledge. |
-| Search returns irrelevant results (low similarity) | Filter by similarity threshold (> 0.6). Pass only relevant results to AI. |
-| Past design data contradicts book data | Pass both to AI. Let AI weigh them. Note: past designs may be more accurate for specific conditions. |
-| User profile contains contradictory facts | Supermemory handles contradiction resolution automatically ("moved to SF" supersedes "lives in NYC"). |
-| Stored design later found to be incorrect | Quarterly audit script flags it. Manual review and delete/downgrade. |
-| Book PDF has poor OCR quality | Some chunks will be garbled. Retrieval quality degrades for that book. Re-upload with better scan. |
-
-### 18.6 Autoresearch Edge Cases
+### 18.5 Autoresearch Edge Cases
 
 | Case | Handling |
 |------|----------|
@@ -3034,7 +2830,6 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | 6A | StepProtocol | `@runtime_checkable Protocol` for all 16 steps |
 | 7A | 5 golden orchestration tests | VCR cassette determinism |
 | 8A | AI reproducibility test | 10× identical inputs → ≥ 9/10 same decision (nightly) |
-| 9A | Parallel Supermemory | `asyncio.gather` for book + past design searches |
 | 10A | Connors pre-filter | Quick vibration check before full autoresearch experiment |
 | CG1A | try/finally flag reset | `in_convergence_loop` always cleared, even on exception |
 | CG2A | Poll fallback | GET /status endpoint for SSE disconnect recovery |
@@ -3058,11 +2853,10 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | CEO-1A | nginx reverse proxy | One public origin, routes /api/v1/hx/ → HX Engine |
 | CEO-2A | Secrets management | `.env` + `.env.example` + `.gitignore` |
 | CEO-3A | AI retry logic | Retry 2× with backoff, then WARN+proceed (ai_called=False) |
-| CEO-4A | Supermemory timeout | `_safe_memory_call()` wrapper with 5s `asyncio.wait_for` timeout |
 | CEO-5A | user_id in stream JWT | Stream JWT payload includes user_id for session authorization |
 | CEO-6A | InputBar disable on ESCALATE | Prevent concurrent input while any step is ESCALATED |
-| CEO-7A | Confidence weights | Equal weights 0.25 each via CONFIDENCE_WEIGHTS constant |
-| CEO-CP2 | Confidence breakdown | `confidence_breakdown` dict in DesignState (4 keys) |
+| CEO-7A | Confidence weights | Equal weights 1/3 each via CONFIDENCE_WEIGHTS constant (3 components) |
+| CEO-CP2 | Confidence breakdown | `confidence_breakdown` dict in DesignState (3 keys: geometry_convergence, ai_agreement_rate, validation_passes) |
 | CEO-CP4 | org_id field | `org_id: Optional[str] = None` in DesignState for future team accounts |
 | CEO-CP5 | JWT auth in Week 6 | Full auth flow: login, JWT, admin create_user.py, no self-signup |
 
@@ -3133,7 +2927,7 @@ All architecture decisions from CEO review, engineering review, and convergence 
 | Week 3 engineering accuracy | Serth Example 5.1: U within 5%, dP within 10%, all J-factors within 10% |
 | Week 5 end-to-end | Full 16-step design runs in < 30 seconds, all SSE events stream correctly |
 | Week 5 HTRI validation | One real engineer runs the HTRI comparison and deviation is < 10% on U [Decision OH-1A]. First session run together on a call (see §24). |
-| Week 8 complete | Supermemory retrieval improves seed U guess vs. book midpoint; autoresearch returns Pareto front in < 30s |
+| Week 8 complete | Autoresearch returns Pareto front in < 30s |
 | First user trust signal | The first beta user describes the product as "an audit trail" — not "a calculator." The reasoning layer is the differentiator, not the number. |
 | First user validation | One process engineer runs a real design and says the result is trustworthy |
 
@@ -3185,7 +2979,6 @@ These are the three steps from first successful comparison to first revenue. The
 8. Disconnect wifi during Step 9 → UI falls back to poll → reconnects on Step 14
 9. Ask: "Optimize for cost" → ParetoChart appears with ≥ 3 Pareto points
 10. Check MongoDB: design result stored via internal webhook
-11. Check Supermemory: design summary stored (confidence ≥ 0.75)
 
 ---
 
