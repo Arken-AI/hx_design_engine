@@ -115,12 +115,12 @@ class TestValidationRules:
         assert "3000" in msg
 
     def test_density_too_low_fails_r2(self):
-        """ρ = 10 → R2 fails (too low for any liquid/dense gas in HX)."""
+        """ρ = 0.001 → R2 fails (below physical range)."""
         result = StepResult(
             step_id=3, step_name="Fluid Properties",
             outputs={
                 "hot_fluid_props": type("FP", (), {
-                    "density_kg_m3": 10.0, "viscosity_Pa_s": 0.001,
+                    "density_kg_m3": 0.001, "viscosity_Pa_s": 0.001,
                     "cp_J_kgK": 2000.0, "k_W_mK": 0.13, "Pr": 15.0,
                 })(),
                 "cold_fluid_props": _good_cold(),
@@ -128,7 +128,7 @@ class TestValidationRules:
         )
         passed, msg = _rule_density_bounds(3, result)
         assert passed is False
-        assert "10" in msg
+        assert "0.001" in msg
 
     def test_viscosity_too_high_fails_r3(self):
         """μ = 5.0 → R3 fails (beyond heavy bitumen range)."""

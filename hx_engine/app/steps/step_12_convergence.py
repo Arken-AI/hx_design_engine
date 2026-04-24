@@ -14,7 +14,7 @@ import json
 import logging
 import math
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from hx_engine.app.core.state_utils import apply_outputs
 from hx_engine.app.data.tema_tables import find_shell_diameter, get_tube_count
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from hx_engine.app.core.ai_engineer import AIEngineer
     from hx_engine.app.core.sse_manager import SSEManager
     from hx_engine.app.models.design_state import DesignState
+    from hx_engine.app.models.design_state import GeometrySpec
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,119 @@ _SUB_STEP_CLASSES: list[str] = [
 ]
 
 PASSES_SEQUENCE: list[int] = [1, 2, 4, 6, 8]
+
+
+# Step 4 R5: baffle_spacing_m >= max(0.2 × D_s, 0.05 m)
+_BAFFLE_SPACING_ABS_FLOOR_M: Final[float] = 0.05   # TEMA absolute minimum (50 mm)
+_BAFFLE_SPACING_MAX_M: Final[float] = 2.0          # TEMA absolute maximum
+_BAFFLE_SPACING_TEMA_RATIO: Final[float] = 0.20    # Step 4 R5: B_min >= 0.2 × D_s
+
+# P2-15 — L/D recheck thresholds (mirror Step 4 module constants).
+# Re-imported locally to avoid a Step-12 → Step-04 import cycle on
+# module load; keep in sync with `step_04_tema_geometry.LD_RATIO_*`.
+_LD_RATIO_LOW_WARN: Final[float] = 5.0
+_LD_RATIO_HIGH_WARN: Final[float] = 10.0
+
+# P2-17 — Pitch-ratio layout floors (mirror step_04_rules constants).
+# Same cycle-avoidance reason as above.
+_SQUARE_LAYOUTS: frozenset[str] = frozenset({
+    "square", "square_90", "rotated_square", "rotated_square_45",
+})
+_SQUARE_MIN_PITCH_RATIO: Final[float] = 1.25
+_TRIANGULAR_MIN_PITCH_RATIO: Final[float] = 1.20
+
+
+def _check_pitch_layout_after_adjustment(
+    geometry: "GeometrySpec | None",
+) -> str | None:
+    """Return a WARN string if the pitch ratio violates the layout floor.
+
+    Returns ``None`` when geometry is incomplete or the ratio is valid.
+    The correctable=True rule in Step 4 handles auto-correction on the
+    next full pipeline pass; this function only surfaces the warning
+    inside the convergence-loop iteration record.
+    """
+    if geometry is None or geometry.pitch_layout is None or geometry.pitch_ratio is None:
+        return None
+    pr = geometry.pitch_ratio
+    layout = geometry.pitch_layout
+    if layout in _SQUARE_LAYOUTS and pr < _SQUARE_MIN_PITCH_RATIO:
+        return (
+            f"pitch_ratio={pr:.3f} now below {_SQUARE_MIN_PITCH_RATIO} "
+            f"for {layout} layout after geometry adjustment"
+        )
+    if layout not in _SQUARE_LAYOUTS and pr < _TRIANGULAR_MIN_PITCH_RATIO:
+        return (
+            f"pitch_ratio={pr:.3f} now below {_TRIANGULAR_MIN_PITCH_RATIO} "
+            f"for {layout} layout after geometry adjustment"
+        )
+    return None
+
+
+def _check_ld_band_after_adjustment(
+    geometry: "GeometrySpec | None",
+) -> str | None:
+    """Return a WARN string if a Step-12 adjustment pushed L/D out of band.
+
+    Returns ``None`` when geometry is incomplete or L/D is inside the
+    recommended band ``[5, 10]``.  The ESCALATE band ``[3, 15]`` is
+    enforced separately by the Step 4 Layer 2 rule.
+    """
+    if (
+        geometry is None
+        or geometry.tube_length_m is None
+        or geometry.shell_diameter_m is None
+        or geometry.shell_diameter_m <= 0
+    ):
+        return None
+    ld = geometry.tube_length_m / geometry.shell_diameter_m
+    if ld < _LD_RATIO_LOW_WARN:
+        return f"L/D={ld:.2f} now below {_LD_RATIO_LOW_WARN} after geometry adjustment"
+    if ld > _LD_RATIO_HIGH_WARN:
+        return f"L/D={ld:.2f} now above {_LD_RATIO_HIGH_WARN} after geometry adjustment"
+    return None
+
+
+def _clamp_baffle_spacing(
+    spacing_m: float, shell_diameter_m: float | None,
+) -> tuple[float, bool]:
+    """Returns (clamped_spacing_m, floor_binding); falls back to 50 mm floor when shell_diameter_m is None."""
+    floor = _BAFFLE_SPACING_ABS_FLOOR_M
+    if shell_diameter_m is not None and shell_diameter_m > 0:
+        floor = max(floor, _BAFFLE_SPACING_TEMA_RATIO * shell_diameter_m)
+    ceiling = _BAFFLE_SPACING_MAX_M
+    clamped = max(floor, min(spacing_m, ceiling))
+    floor_binding = spacing_m < floor
+    return clamped, floor_binding
+
+
+def _rescale_secondary_baffles(
+    geometry: "GeometrySpec", ratio: float, shell_diameter_m: float | None,
+) -> None:
+    """Rescale inlet/outlet baffle spacings by ``ratio`` and clamp to TEMA.
+
+    Mutates ``geometry`` in place. Skips fields that are unset. Used by both
+    the direct-adjustment branch and the shell-upsize branch so the TEMA
+    floor is enforced identically in both paths (single source of truth).
+    """
+    if geometry.inlet_baffle_spacing_m is not None:
+        geometry.inlet_baffle_spacing_m, _ = _clamp_baffle_spacing(
+            geometry.inlet_baffle_spacing_m * ratio, shell_diameter_m,
+        )
+    if geometry.outlet_baffle_spacing_m is not None:
+        geometry.outlet_baffle_spacing_m, _ = _clamp_baffle_spacing(
+            geometry.outlet_baffle_spacing_m * ratio, shell_diameter_m,
+        )
+
+
+def _format_baffle_change_description(
+    old_bs: float | None, new_bs: float, floor_binding: bool,
+) -> str:
+    """Trajectory string for a baffle-spacing change (e.g. ``150mm→120mm``)."""
+    suffix = " (clamped to TEMA floor)" if floor_binding else ""
+    if old_bs:
+        return f"baffle_spacing {old_bs*1000:.0f}mm→{new_bs*1000:.0f}mm{suffix}"
+    return f"baffle_spacing→{new_bs*1000:.0f}mm{suffix}"
 
 
 def _load_sub_steps() -> list[type]:
@@ -79,8 +193,22 @@ class Step12Convergence:
     OVERDESIGN_HIGH: float = 25.0        # % maximum overdesign
     DP_TUBE_LIMIT: float = 70_000.0      # Pa (0.7 bar)
     DP_SHELL_LIMIT: float = 140_000.0    # Pa (1.4 bar)
-    VELOCITY_LOW: float = 0.8            # m/s
-    VELOCITY_HIGH: float = 2.5           # m/s
+    VELOCITY_LOW_LIQUID: float = 0.8     # m/s — liquid tube-side
+    VELOCITY_HIGH_LIQUID: float = 2.5    # m/s — liquid tube-side
+    VELOCITY_LOW_GAS: float = 5.0        # m/s — gas tube-side
+    VELOCITY_HIGH_GAS: float = 30.0      # m/s — gas tube-side
+
+    def _velocity_limits(self, state: "DesignState") -> tuple[float, float]:
+        """Return (v_low, v_high) based on tube-side phase."""
+        shell_side = getattr(state, "shell_side_fluid", None) or "hot"
+        tube_side = "cold" if shell_side == "hot" else "hot"
+        tube_phase = (
+            getattr(state, "hot_phase", None) if tube_side == "hot"
+            else getattr(state, "cold_phase", None)
+        ) or "liquid"
+        if tube_phase == "vapor":
+            return self.VELOCITY_LOW_GAS, self.VELOCITY_HIGH_GAS
+        return self.VELOCITY_LOW_LIQUID, self.VELOCITY_HIGH_LIQUID
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -253,7 +381,8 @@ class Step12Convergence:
             return False
         if state.tube_velocity_m_s is None:
             return False
-        if not (self.VELOCITY_LOW <= state.tube_velocity_m_s <= self.VELOCITY_HIGH):
+        v_low, v_high = self._velocity_limits(state)
+        if not (v_low <= state.tube_velocity_m_s <= v_high):
             return False
         return True
 
@@ -285,11 +414,12 @@ class Step12Convergence:
             elif state.overdesign_pct > self.OVERDESIGN_HIGH:
                 violations.append("overdesign")
 
-        # Priority 3: Velocity
+        # Priority 3: Velocity (phase-aware thresholds)
         if state.tube_velocity_m_s is not None:
-            if state.tube_velocity_m_s < self.VELOCITY_LOW:
+            v_low, v_high = self._velocity_limits(state)
+            if state.tube_velocity_m_s < v_low:
                 violations.append("velocity_low")
-            elif state.tube_velocity_m_s > self.VELOCITY_HIGH:
+            elif state.tube_velocity_m_s > v_high:
                 violations.append("velocity_high")
 
         return violations
@@ -499,20 +629,16 @@ class Step12Convergence:
         # Apply baffle spacing change (independent of tube changes)
         if "baffle_spacing_m" in changes:
             old_bs = g.baffle_spacing_m
-            new_bs = changes["baffle_spacing_m"]
-            # Clamp to TEMA range
-            new_bs = max(0.05, min(new_bs, 2.0))
+            new_bs, floor_binding = _clamp_baffle_spacing(
+                changes["baffle_spacing_m"], g.shell_diameter_m,
+            )
             g.baffle_spacing_m = new_bs
-            if g.inlet_baffle_spacing_m is not None and old_bs and old_bs > 0:
-                g.inlet_baffle_spacing_m = g.inlet_baffle_spacing_m * (new_bs / old_bs)
-            if g.outlet_baffle_spacing_m is not None and old_bs and old_bs > 0:
-                g.outlet_baffle_spacing_m = g.outlet_baffle_spacing_m * (new_bs / old_bs)
-            # Recalculate n_baffles
+            if old_bs and old_bs > 0:
+                _rescale_secondary_baffles(g, new_bs / old_bs, g.shell_diameter_m)
             if g.tube_length_m and g.baffle_spacing_m:
                 g.n_baffles = max(1, int(g.tube_length_m / g.baffle_spacing_m) - 1)
             description_parts.append(
-                f"baffle_spacing {old_bs*1000:.0f}mm→{new_bs*1000:.0f}mm"
-                if old_bs else f"baffle_spacing→{new_bs*1000:.0f}mm"
+                _format_baffle_change_description(old_bs, new_bs, floor_binding),
             )
 
         # Handle tube count / shell changes
@@ -547,15 +673,10 @@ class Step12Convergence:
                     # Recalculate baffle spacing proportionally on shell upsize
                     if g.baffle_spacing_m is not None and old_shell > 0:
                         ratio = new_shell_m / old_shell
-                        g.baffle_spacing_m = max(0.05, min(g.baffle_spacing_m * ratio, 2.0))
-                        if g.inlet_baffle_spacing_m is not None:
-                            g.inlet_baffle_spacing_m = max(0.05, min(
-                                g.inlet_baffle_spacing_m * ratio, 2.0
-                            ))
-                        if g.outlet_baffle_spacing_m is not None:
-                            g.outlet_baffle_spacing_m = max(0.05, min(
-                                g.outlet_baffle_spacing_m * ratio, 2.0
-                            ))
+                        g.baffle_spacing_m, _ = _clamp_baffle_spacing(
+                            g.baffle_spacing_m * ratio, new_shell_m,
+                        )
+                        _rescale_secondary_baffles(g, ratio, new_shell_m)
 
                     # Recalculate n_baffles
                     if g.tube_length_m and g.baffle_spacing_m:
@@ -577,6 +698,20 @@ class Step12Convergence:
                 old_passes = g.n_passes
                 g.n_passes = new_n_passes
                 description_parts.append(f"n_passes {old_passes}→{new_n_passes}")
+
+        # P2-15 — Re-check L/D after geometry change.  WARN-only here;
+        # the ESCALATE band [3, 15] is enforced by the Step 4 Layer 2
+        # rule re-running on the next pipeline iteration if needed.
+        ld_warning = _check_ld_band_after_adjustment(g)
+        if ld_warning is not None:
+            description_parts.append(ld_warning)
+            state.warnings.append(ld_warning)
+
+        # P2-17 — Re-check pitch-ratio vs layout floor after geometry change.
+        pitch_warning = _check_pitch_layout_after_adjustment(g)
+        if pitch_warning is not None:
+            description_parts.append(pitch_warning)
+            state.warnings.append(pitch_warning)
 
         return ", ".join(description_parts) or "no change"
 

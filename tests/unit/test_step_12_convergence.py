@@ -31,9 +31,11 @@ from hx_engine.app.models.step_result import (
     AIReview,
     StepResult,
 )
+from hx_engine.app.steps.step_04_rules import _rule_baffle_spacing_min
 from hx_engine.app.steps.step_12_convergence import (
     PASSES_SEQUENCE,
     Step12Convergence,
+    _clamp_baffle_spacing,
 )
 
 
@@ -633,3 +635,238 @@ class TestBuildSnapshot:
         assert snap["delta_U_pct"] == 0.8
         assert snap["n_tubes"] == state.geometry.n_tubes
         assert snap["substep_failed"] is False
+
+
+# ===================================================================
+# Single-shell iteration-count regression (P0-1 guard)
+# ===================================================================
+#
+# Pins the iteration count required for a stable, in-band single-shell
+# trajectory to converge. The P0-1 fix only changed the multi-shell
+# `A_provided` formula (single-shell is byte-for-byte identical), so the
+# single-shell convergence path MUST be unchanged. If a future change
+# alters Step 12's tuning (thresholds, adjustment rules, convergence
+# criteria) and slows single-shell convergence, this test fails first
+# and points at the right culprit.
+
+# Captured from a stable single-shell trajectory where Step 9 returns a
+# constant U_dirty and Step 11 returns a constant in-band overdesign.
+# Convergence requires `delta_U_pct < 1.0` AND `delta_U_pct is not None`,
+# which is only true from iteration 2 onward — hence the pinned value.
+SINGLE_SHELL_BASELINE_ITERATIONS: int = 2
+
+
+def _stable_single_shell_substep_outputs(step_id: int) -> dict:
+    """Deterministic in-band sub-step outputs for a single-shell design.
+
+    Every iteration returns the same numbers, so:
+      - delta_U_pct = 0 from iteration 2 onward (< 1% threshold ✓)
+      - overdesign_pct = 14% (∈ [10, 25] ✓)
+      - dP_tube / dP_shell within limits ✓
+      - tube_velocity ∈ [0.8, 2.5] m/s ✓
+    """
+    if step_id == 7:
+        return {"h_tube_W_m2K": 2500.0, "tube_velocity_m_s": 1.4, "Re_tube": 25_000.0}
+    if step_id == 8:
+        return {"h_shell_W_m2K": 1200.0, "Re_shell": 15_000.0}
+    if step_id == 9:
+        return {"U_dirty_W_m2K": 350.0, "U_clean_W_m2K": 385.0}
+    if step_id == 10:
+        return {"dP_tube_Pa": 45_000.0, "dP_shell_Pa": 95_000.0}
+    if step_id == 11:
+        return {
+            "area_required_m2": 25.0,
+            "area_provided_m2": 28.5,
+            "overdesign_pct": 14.0,
+        }
+    return {}
+
+
+class TestSingleShellIterationCountRegression:
+    """Locks single-shell convergence iteration count against future drift."""
+
+    @pytest.fixture
+    def sse_manager(self) -> MockSSEManager:
+        return MockSSEManager()
+
+    @pytest.fixture
+    def ai_engineer(self) -> AIEngineer:
+        return AIEngineer(stub_mode=True)
+
+    @pytest.mark.asyncio
+    async def test_single_shell_converges_in_pinned_iteration_count(
+        self, sse_manager, ai_engineer,
+    ):
+        """Stable single-shell trajectory converges in exactly the pinned count."""
+        state = _converging_state()
+        state.geometry.n_shells = 1   # explicit single-shell baseline
+        step12 = Step12Convergence()
+
+        async def mock_run_with_review_loop(inner_self, state, ai_eng):
+            return StepResult(
+                step_id=inner_self.step_id,
+                step_name=inner_self.step_name,
+                outputs=_stable_single_shell_substep_outputs(inner_self.step_id),
+            )
+
+        with patch(
+            "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
+            new=mock_run_with_review_loop,
+        ):
+            await step12.run(state, ai_engineer, sse_manager, "single-shell-baseline")
+
+        assert state.convergence_converged is True
+        assert state.convergence_iteration == SINGLE_SHELL_BASELINE_ITERATIONS
+
+
+# P0-2 — Baffle spacing TEMA floor (Step 4 R5) regression
+# Bug: artifacts/bugs/bug_p0_2_step12_baffle_spacing_clamp_violates_step4_r5.md
+# Plan: artifacts/plans/implementation_plan_p0_2_step12_baffle_spacing_tema_floor.md
+
+
+class TestClampBaffleSpacingHelper:
+    """`_clamp_baffle_spacing` enforces `max(0.2 × D_s, 0.05 m)`."""
+
+    def test_clamp_uses_tema_floor_for_large_shell(self):
+        # D_s = 0.6 m → TEMA floor = 0.12 m, propose 0.08 m
+        clamped, binding = _clamp_baffle_spacing(0.08, 0.6)
+        assert clamped == pytest.approx(0.12)
+        assert binding is True
+
+    def test_clamp_uses_absolute_floor_for_small_shell(self):
+        # D_s = 0.2 m → 0.2*D_s = 0.04 m; abs floor 0.05 m wins
+        clamped, binding = _clamp_baffle_spacing(0.03, 0.2)
+        assert clamped == pytest.approx(0.05)
+        assert binding is True
+
+    def test_clamp_uses_tema_floor_for_large_shell_1200mm(self):
+        # D_s = 1.2 m → TEMA floor = 0.24 m, propose 0.15 m
+        clamped, binding = _clamp_baffle_spacing(0.15, 1.2)
+        assert clamped == pytest.approx(0.24)
+        assert binding is True
+
+    def test_clamp_passes_through_when_above_floor(self):
+        # D_s = 0.6 m → floor 0.12 m, propose 0.20 m → unchanged
+        clamped, binding = _clamp_baffle_spacing(0.20, 0.6)
+        assert clamped == pytest.approx(0.20)
+        assert binding is False
+
+    def test_clamp_falls_back_to_abs_floor_when_shell_unknown(self):
+        clamped, binding = _clamp_baffle_spacing(0.02, None)
+        assert clamped == pytest.approx(0.05)
+        assert binding is True
+
+    def test_clamp_caps_at_ceiling(self):
+        clamped, binding = _clamp_baffle_spacing(3.0, 0.6)
+        assert clamped == pytest.approx(2.0)
+        assert binding is False
+
+
+class TestApplyAdjustmentBaffleSpacingTEMAFloor:
+    """Direct-adjustment path routes through the TEMA helper."""
+
+    def test_apply_adjustment_clamps_baffle_spacing_to_tema_floor(self):
+        step12 = Step12Convergence()
+        state = _converging_state()
+        state.geometry.shell_diameter_m = 0.6   # → TEMA floor = 0.12 m
+        state.geometry.baffle_spacing_m = 0.20
+
+        desc = step12._apply_adjustment(state, {"baffle_spacing_m": 0.08})
+
+        assert state.geometry.baffle_spacing_m == pytest.approx(0.12)
+        assert "clamped to TEMA floor" in desc
+
+    def test_apply_adjustment_no_suffix_when_floor_not_binding(self):
+        step12 = Step12Convergence()
+        state = _converging_state()
+        state.geometry.shell_diameter_m = 0.6   # → TEMA floor = 0.12 m
+        state.geometry.baffle_spacing_m = 0.20
+
+        desc = step12._apply_adjustment(state, {"baffle_spacing_m": 0.18})
+
+        assert state.geometry.baffle_spacing_m == pytest.approx(0.18)
+        assert "clamped to TEMA floor" not in desc
+
+    def test_apply_adjustment_inlet_outlet_also_respect_floor(self):
+        """Rescaled inlet/outlet spacings must also satisfy the TEMA floor."""
+        step12 = Step12Convergence()
+        state = _converging_state()
+        state.geometry.shell_diameter_m = 0.6   # floor = 0.12 m
+        state.geometry.baffle_spacing_m = 0.20
+        state.geometry.inlet_baffle_spacing_m = 0.20
+        state.geometry.outlet_baffle_spacing_m = 0.20
+
+        # Propose 0.08 → clamped to 0.12; inlet/outlet rescale by 0.12/0.20=0.6
+        # → 0.12 m each, also at the floor.
+        step12._apply_adjustment(state, {"baffle_spacing_m": 0.08})
+
+        floor = 0.2 * state.geometry.shell_diameter_m
+        assert state.geometry.inlet_baffle_spacing_m >= floor - 1e-9
+        assert state.geometry.outlet_baffle_spacing_m >= floor - 1e-9
+
+
+class TestShellUpsizeBaffleSpacingTEMAFloor:
+    """Shell-upsize proportional rescale must use the *new* shell's floor."""
+
+    def test_shell_upsize_proportional_rescale_respects_new_tema_floor(self):
+        step12 = Step12Convergence()
+        state = _converging_state()
+        old_shell = state.geometry.shell_diameter_m
+        step12._apply_adjustment(state, {"n_tubes": 5000})
+
+        assert state.geometry.shell_diameter_m > old_shell, "upsize did not fire — fixture may need a larger n_tubes"
+        floor = 0.2 * state.geometry.shell_diameter_m
+        assert state.geometry.baffle_spacing_m >= floor - 1e-9
+        if state.geometry.inlet_baffle_spacing_m is not None:
+            assert state.geometry.inlet_baffle_spacing_m >= floor - 1e-9
+        if state.geometry.outlet_baffle_spacing_m is not None:
+            assert state.geometry.outlet_baffle_spacing_m >= floor - 1e-9
+
+    def test_shell_upsize_below_floor_is_clamped(self):
+        """When proportional rescale lands below the new floor, clamp holds."""
+        step12 = Step12Convergence()
+        state = _converging_state()
+        state.geometry.baffle_spacing_m = 0.05
+        state.geometry.inlet_baffle_spacing_m = 0.05
+        state.geometry.outlet_baffle_spacing_m = 0.05
+
+        old_shell = state.geometry.shell_diameter_m
+        step12._apply_adjustment(state, {"n_tubes": 5000})
+
+        assert state.geometry.shell_diameter_m > old_shell, "upsize did not fire — fixture may need a larger n_tubes"
+        floor = 0.2 * state.geometry.shell_diameter_m
+        assert state.geometry.baffle_spacing_m >= floor - 1e-9
+        assert state.geometry.inlet_baffle_spacing_m >= floor - 1e-9
+        assert state.geometry.outlet_baffle_spacing_m >= floor - 1e-9
+
+
+class TestStep4R5HoldsAfterStep12Adjustments:
+    """End-to-end: post-adjustment geometry passes the Step 4 R5 rule."""
+
+    def _r5_check(self, state: DesignState) -> tuple[bool, str | None]:
+        result = StepResult(
+            step_id=4, step_name="Geometry",
+            outputs={"geometry": state.geometry},
+        )
+        return _rule_baffle_spacing_min(4, result)
+
+    def test_r5_passes_after_direct_baffle_adjustment_on_large_shell(self):
+        step12 = Step12Convergence()
+        state = _converging_state()
+        state.geometry.shell_diameter_m = 0.6
+        state.geometry.baffle_spacing_m = 0.20
+
+        step12._apply_adjustment(state, {"baffle_spacing_m": 0.08})
+
+        ok, msg = self._r5_check(state)
+        assert ok is True, msg
+
+    def test_r5_passes_after_shell_upsize(self):
+        step12 = Step12Convergence()
+        state = _converging_state()
+        old_shell = state.geometry.shell_diameter_m
+        step12._apply_adjustment(state, {"n_tubes": 5000})
+
+        assert state.geometry.shell_diameter_m > old_shell, "upsize did not fire — fixture may need a larger n_tubes"
+        ok, msg = self._r5_check(state)
+        assert ok is True, msg

@@ -89,3 +89,28 @@ class TestStep05Rules:
         vr = check(5, _make_result(P=1.1))
         assert not vr.passed
         assert any("outside valid range" in e for e in vr.errors)
+
+    # --- Isothermal phase-change bypass (P1-7 regression guard) ---
+
+    def test_isothermal_bypass_skips_R_positive_rule(self):
+        """f_factor_basis=isothermal_phase_change → R=0 must NOT fail R4."""
+        vr = check(5, _make_result(
+            R=0.0, P=1.0, F_factor=1.0,
+            f_factor_basis="isothermal_phase_change",
+        ))
+        assert vr.passed, f"Bypass should clear R/P rules; got errors: {vr.errors}"
+
+    def test_isothermal_bypass_skips_P_in_range_rule(self):
+        """f_factor_basis=isothermal_phase_change → P=1.0 must NOT fail R5."""
+        vr = check(5, _make_result(
+            R=0.0, P=1.0, F_factor=1.0,
+            f_factor_basis="isothermal_phase_change",
+        ))
+        assert vr.passed
+        assert not any("P =" in e for e in vr.errors)
+
+    def test_R_zero_without_bypass_still_fails(self):
+        """Regression guard: bypass must be opt-in, not silent for all cases."""
+        vr = check(5, _make_result(R=0.0))
+        assert not vr.passed
+        assert any("R = 0.0000" in e for e in vr.errors)

@@ -130,19 +130,22 @@ class TestTEMATypeSelection:
         assert any("square" in w.lower() for w in warnings)
 
     def test_delta_T_exactly_50_boundary(self):
-        """ΔT=50°C → BEM if both fluids clean (boundary exclusive)."""
+        """Tubesheet ΔT = 50°C → BEM (boundary exclusive).  P2-14 semantics:
+        decision is driven by |T_shell_mean − T_tube_mean|, not stream span."""
+        # Hot mean = 110, cold mean = 60 → |110−60| = 50 K
         state = _make_state(
-            T_hot_in_C=80, T_hot_out_C=50,
-            T_cold_in_C=30, T_cold_out_C=60,
+            T_hot_in_C=115, T_hot_out_C=105,
+            T_cold_in_C=50, T_cold_out_C=70,
         )
         tema, reasoning, warnings = _select_tema_type(state, "cold")
         assert tema == "BEM"
 
     def test_delta_T_51_requires_floating(self):
-        """ΔT=51°C → not BEM (just above threshold)."""
+        """Tubesheet ΔT = 51°C → not BEM (just above threshold).  P2-14 semantics."""
+        # Hot mean = 110, cold mean = 59 → |110−59| = 51 K
         state = _make_state(
-            T_hot_in_C=81, T_hot_out_C=50,
-            T_cold_in_C=30, T_cold_out_C=60,
+            T_hot_in_C=115, T_hot_out_C=105,
+            T_cold_in_C=50, T_cold_out_C=68,
         )
         tema, reasoning, warnings = _select_tema_type(state, "cold")
         assert tema != "BEM"

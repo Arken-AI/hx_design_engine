@@ -568,13 +568,13 @@ class TestEscalationExhausted:
 class TestStep7EscalationOptionHandling:
     """Tests for Step 7 velocity escalation option handlers."""
 
-    def test_step7_option_a_swaps_fluid_allocation(self, base_state):
+    async def test_step7_option_a_swaps_fluid_allocation(self, base_state):
         """Step 7 Option A (index 0): Swap fluid allocation to put viscous fluid on shell-side."""
         # Arrange: shell_side_fluid is "hot" (meaning water is on shell, oil on tube)
         base_state.shell_side_fluid = "hot"
 
         # Act: Apply Option A (index 0) for Step 7
-        PipelineRunner._apply_user_text_override(
+        await PipelineRunner._apply_user_text_override(
             base_state, "", step_id=7, option_index=0
         )
 
@@ -583,7 +583,7 @@ class TestStep7EscalationOptionHandling:
             "Option A should swap shell_side_fluid from 'hot' to 'cold'"
         )
 
-    def test_step7_option_b_modifies_geometry(self, base_state):
+    async def test_step7_option_b_modifies_geometry(self, base_state):
         """Step 7 Option B (index 1): Reduce n_tubes and increase n_passes."""
         # Arrange: set up geometry with low velocity configuration
         from hx_engine.app.models.design_state import GeometrySpec
@@ -600,7 +600,7 @@ class TestStep7EscalationOptionHandling:
         )
 
         # Act: Apply Option B (index 1) for Step 7
-        PipelineRunner._apply_user_text_override(
+        await PipelineRunner._apply_user_text_override(
             base_state, "", step_id=7, option_index=1
         )
 
@@ -613,7 +613,7 @@ class TestStep7EscalationOptionHandling:
             "Option B should double n_passes (1 → 2)"
         )
 
-    def test_step7_option_b_respects_n_passes_limit(self, base_state):
+    async def test_step7_option_b_respects_n_passes_limit(self, base_state):
         """Step 7 Option B: n_passes should not exceed 8 (TEMA limit)."""
         # Arrange: geometry already at n_passes=6
         from hx_engine.app.models.design_state import GeometrySpec
@@ -630,7 +630,7 @@ class TestStep7EscalationOptionHandling:
         )
 
         # Act
-        PipelineRunner._apply_user_text_override(
+        await PipelineRunner._apply_user_text_override(
             base_state, "", step_id=7, option_index=1
         )
 
@@ -639,7 +639,7 @@ class TestStep7EscalationOptionHandling:
             "Option B should cap n_passes at 8 (TEMA limit)"
         )
 
-    def test_step7_regex_fallback_for_velocity_increase(self, base_state):
+    async def test_step7_regex_fallback_for_velocity_increase(self, base_state):
         """Step 7: Regex fallback for 'reduce n_tubes' / 'increase velocity' text."""
         from hx_engine.app.models.design_state import GeometrySpec
         base_state.geometry = GeometrySpec(
@@ -655,7 +655,7 @@ class TestStep7EscalationOptionHandling:
         )
 
         # Act: User types free text instead of clicking button
-        PipelineRunner._apply_user_text_override(
+        await PipelineRunner._apply_user_text_override(
             base_state, "Please reduce n_tubes and increase velocity", step_id=7, option_index=-1
         )
 

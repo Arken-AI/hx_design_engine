@@ -77,6 +77,38 @@ class Step06InitialU(BaseStep):
         return missing
 
     # ------------------------------------------------------------------
+    # Fluid category resolution (symmetric per side)
+    # ------------------------------------------------------------------
+
+    _HOT_OVERRIDE_KEYS: tuple[str, ...] = ("hot_fluid_category", "fluid_category")
+    _COLD_OVERRIDE_KEYS: tuple[str, ...] = ("cold_fluid_category",)
+
+    @classmethod
+    def _resolve_category(
+        cls,
+        *,
+        side: str,
+        fluid_name: str,
+        fluid_props,
+        applied_corrections: dict | None,
+        phase: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Resolve a fluid category for one side, honouring AI overrides.
+
+        Returns ``(category, override_source)`` where ``override_source`` is
+        the correction key that supplied the value (or ``None`` if the
+        category was derived from name/property classification).
+        ``phase`` from Step 3 activates phase-change categories (P2-21).
+        """
+        keys = cls._HOT_OVERRIDE_KEYS if side == "hot" else cls._COLD_OVERRIDE_KEYS
+        if applied_corrections:
+            for key in keys:
+                override = applied_corrections.get(key)
+                if override:
+                    return override, key
+        return classify_fluid_type(fluid_name, fluid_props, phase=phase), None
+
+    # ------------------------------------------------------------------
     # Core execute
     # ------------------------------------------------------------------
 
@@ -103,24 +135,30 @@ class Step06InitialU(BaseStep):
             )
 
         # 3. Lookup U assumption
-        # Check if the AI correction loop has overridden the fluid category
-        # (e.g. lubricating oil reclassified as heavy_organic). Use the
-        # corrected value so the re-run reflects the updated classification.
-        _hot_category_override = (
-            state.applied_corrections.get("fluid_category")
-            if state.applied_corrections else None
+        # Per-side AI overrides are applied symmetrically. Both sides accept
+        # a dedicated correction key; the legacy `fluid_category` key is
+        # preserved as a hot-side alias for backwards compatibility with
+        # older Step 6 skill responses.
+        hot_type, hot_override_source = self._resolve_category(
+            side="hot",
+            fluid_name=state.hot_fluid_name,
+            fluid_props=state.hot_fluid_props,
+            applied_corrections=state.applied_corrections,
+            phase=getattr(state, "hot_phase", None),
         )
-        hot_type = _hot_category_override or classify_fluid_type(
-            state.hot_fluid_name,
-            state.hot_fluid_props,
+        cold_type, cold_override_source = self._resolve_category(
+            side="cold",
+            fluid_name=state.cold_fluid_name,
+            fluid_props=state.cold_fluid_props,
+            applied_corrections=state.applied_corrections,
+            phase=getattr(state, "cold_phase", None),
         )
-        cold_type = classify_fluid_type(
-            state.cold_fluid_name,
-            state.cold_fluid_props,
-        )
-        # If the hot_type was overridden by a correction, look up the U table
-        # directly using the resolved types instead of re-classifying by name.
-        if _hot_category_override:
+
+        # When either side was overridden, bypass the name-based U lookup in
+        # `get_U_assumption` (which re-classifies by name) and query the
+        # table directly with the resolved types.
+        category_overridden = bool(hot_override_source or cold_override_source)
+        if category_overridden:
             u_pair_key = (hot_type, cold_type)
             u_low, u_mid, u_high = _U_TABLE.get(u_pair_key, (100, 250, 400))
             u_data = {"U_low": u_low, "U_mid": u_mid, "U_high": u_high}
@@ -130,6 +168,8 @@ class Step06InitialU(BaseStep):
                 state.cold_fluid_name,
                 hot_properties=state.hot_fluid_props,
                 cold_properties=state.cold_fluid_props,
+                hot_phase=getattr(state, "hot_phase", None),
+                cold_phase=getattr(state, "cold_phase", None),
             )
         U_low = u_data["U_low"]
         U_mid = u_data["U_mid"]

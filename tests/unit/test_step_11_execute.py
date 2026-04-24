@@ -404,3 +404,65 @@ class TestRules:
         passed, msg = rules_mod._rule_overdesign_not_negative(11, result)
         assert passed is False
         assert "missing" in msg
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Multi-shell area accounting (P0-1 fix)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestMultiShellAreaProvided:
+    """Regression tests for P0-1: A_provided must include n_shells multiplier."""
+
+    @pytest.mark.asyncio
+    async def test_single_shell_area_unchanged(self) -> None:
+        """n_shells=1 preserves the historical single-shell area exactly."""
+        state = _make_state(
+            tube_od_m=0.0254, tube_length_m=6.0, n_tubes=200,
+            Q_W=1_000_000, U_dirty=500, F_factor=0.9, LMTD_K=40,
+        )
+        state.geometry.n_shells = 1
+
+        result = await Step11AreaOverdesign().execute(state)
+
+        expected = math.pi * 0.0254 * 6.0 * 200 * 1
+        assert result.outputs["area_provided_m2"] == pytest.approx(expected, rel=1e-9)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("n_shells", [2, 3])
+    async def test_multi_shell_area_includes_n_shells(self, n_shells: int) -> None:
+        """A_provided scales linearly with n_shells for n_shells in {2, 3}."""
+        state = _make_state(
+            tube_od_m=0.0254, tube_length_m=6.0, n_tubes=200,
+            Q_W=1_000_000, U_dirty=500, F_factor=0.85, LMTD_K=40,
+        )
+        state.geometry.n_shells = n_shells
+
+        result = await Step11AreaOverdesign().execute(state)
+
+        expected = math.pi * 0.0254 * 6.0 * 200 * n_shells
+        assert result.outputs["area_provided_m2"] == pytest.approx(expected, rel=1e-9)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("n_shells_input", [None, 0])
+    async def test_n_shells_defensive_fallback(self, n_shells_input) -> None:
+        """n_shells = None or 0 falls back to 1; never zero, never NaN."""
+        state = _make_state(
+            tube_od_m=0.0254, tube_length_m=6.0, n_tubes=200,
+            Q_W=1_000_000, U_dirty=500, F_factor=0.9, LMTD_K=40,
+        )
+        state.geometry.n_shells = n_shells_input
+
+        result = await Step11AreaOverdesign().execute(state)
+
+        expected = math.pi * 0.0254 * 6.0 * 200
+        assert result.outputs["area_provided_m2"] == pytest.approx(expected, rel=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_undersized_warning_surfaces_n_shells(self) -> None:
+        """Undersized warning string mentions the shell count for audit clarity."""
+        state = _make_state(n_tubes=50, Q_W=2_000_000, U_dirty=300)
+        state.geometry.n_shells = 2
+
+        result = await Step11AreaOverdesign().execute(state)
+
+        assert any("2 shell(s)" in w for w in result.warnings)

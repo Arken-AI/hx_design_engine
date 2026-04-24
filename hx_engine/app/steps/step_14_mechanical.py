@@ -336,9 +336,28 @@ class Step14MechanicalCheck(BaseStep):
             within_tolerance = expansion_mm <= tolerance_mm
             if not within_tolerance:
                 warnings.append(
-                    f"EXPANSION EXCEEDS TOLERANCE — differential={expansion_mm:.2f} mm > "
+                    f"EXPANSION EXCEEDS TOLERANCE \u2014 differential={expansion_mm:.2f} mm > "
                     f"tolerance={tolerance_mm:.1f} mm for TEMA type {tema_type}"
                 )
+
+        # P2-12 — Highly toxic service: remind the engineer to evaluate
+        # double-tubesheet construction (set by Step 4 allocator).
+        if getattr(state, "requires_double_tubesheet_review", False):
+            warnings.append(
+                "Double-tubesheet construction recommended for highly toxic "
+                "service \u2014 a single tubesheet leak would breach "
+                "containment of the toxic stream."
+            )
+
+        # P2-16 — Hard guard: Step 4 must finalise the shell ID before
+        # mechanical sizing. Without the bundle-to-shell clearance the
+        # vessel wall calculations are based on an undersized shell ID.
+        if not getattr(state, "shell_id_finalised", False):
+            raise CalculationError(
+                14,
+                "Shell ID was not finalised by Step 4 (bundle-to-shell "
+                "clearance not applied) — re-run Step 4 before Step 14.",
+            )
 
         # ============================================================
         # 8. BUILD MECHANICAL DETAILS

@@ -29,6 +29,21 @@ if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
 
 
+# ── Transition-zone boundaries (P2-22) ──────────────────────────────
+# Gnielinski is validated for Re ≥ 10000; below that the flow is
+# unstable / partially developed. We use the same band for both the
+# engineer-facing warning and the AI conditional trigger.
+_TRANSITION_RE_LOW = 2300
+_TRANSITION_RE_HIGH = 10000
+
+
+def _flag_transition_zone(Re: float | None) -> bool:
+    """True when Re sits in the unstable transition / low-turbulent band."""
+    if Re is None:
+        return False
+    return _TRANSITION_RE_LOW < Re < _TRANSITION_RE_HIGH
+
+
 class Step07TubeSideH(BaseStep):
     """Step 7: Tube-side heat transfer coefficient calculation."""
 
@@ -163,7 +178,7 @@ class Step07TubeSideH(BaseStep):
         T_wall_est = (T_mean_tube + T_mean_shell) / 2.0
         mu_wall: float | None = None
         try:
-            wall_props = get_fluid_properties(
+            wall_props = await get_fluid_properties(
                 fluid_name, T_wall_est, pressure_Pa,
             )
             mu_wall = wall_props.viscosity_Pa_s
@@ -179,19 +194,41 @@ class Step07TubeSideH(BaseStep):
         # Collect correlation warnings
         warnings.extend(htc_result["warnings"])
 
-        # 9. Regime-specific warnings
-        if 2300 < Re < 4000:
+        # 9. Regime-specific warnings (phase-aware thresholds)
+        tube_phase = (
+            getattr(state, "hot_phase", None) if tube_side == "hot"
+            else getattr(state, "cold_phase", None)
+        ) or "liquid"
+        is_gas = tube_phase == "vapor"
+
+        if _flag_transition_zone(Re):
             warnings.append(
-                f"Transition zone (Re={Re:.0f}): flow genuinely unstable"
+                f"tube-side Re={Re:.0f} in transition / low-turbulent zone "
+                f"({_TRANSITION_RE_LOW}<Re<{_TRANSITION_RE_HIGH}); "
+                f"Gnielinski accuracy ±15%."
             )
-        if velocity < 0.8:
-            warnings.append(
-                f"Low velocity ({velocity:.2f} m/s): fouling risk"
-            )
-        if velocity > 2.5:
-            warnings.append(
-                f"High velocity ({velocity:.2f} m/s): erosion risk"
-            )
+
+        # Gas-phase velocity thresholds differ from liquid
+        if is_gas:
+            if velocity < 5.0:
+                warnings.append(
+                    f"Low gas velocity ({velocity:.2f} m/s): "
+                    f"minimum recommended ~5 m/s for gas service"
+                )
+            if velocity > 30.0:
+                warnings.append(
+                    f"High gas velocity ({velocity:.2f} m/s): "
+                    f"exceeds 30 m/s — erosion/vibration risk for gas service"
+                )
+        else:
+            if velocity < 0.8:
+                warnings.append(
+                    f"Low velocity ({velocity:.2f} m/s): fouling risk"
+                )
+            if velocity > 2.5:
+                warnings.append(
+                    f"High velocity ({velocity:.2f} m/s): erosion risk"
+                )
 
         # 10. Cache values for _conditional_ai_trigger
         self._velocity = velocity
@@ -199,12 +236,18 @@ class Step07TubeSideH(BaseStep):
         self._h_i = htc_result["h_i"]
 
         # 11. Write state directly
+        # Re-band the regime so the band the user sees matches the band the
+        # AI trigger and warning use (Gnielinski-validity, P2-22).
+        flow_regime = htc_result["flow_regime"]
+        if _flag_transition_zone(Re):
+            flow_regime = "transition_low_turbulent"
+
         state.h_tube_W_m2K = htc_result["h_i"]
         state.tube_velocity_m_s = velocity
         state.Re_tube = Re
         state.Pr_tube = Pr
         state.Nu_tube = htc_result["Nu"]
-        state.flow_regime_tube = htc_result["flow_regime"]
+        state.flow_regime_tube = flow_regime
         state.T_mean_hot_C = T_mean_hot
         state.T_mean_cold_C = T_mean_cold
 
@@ -215,7 +258,7 @@ class Step07TubeSideH(BaseStep):
             "Re_tube": Re,
             "Pr_tube": Pr,
             "Nu_tube": htc_result["Nu"],
-            "flow_regime_tube": htc_result["flow_regime"],
+            "flow_regime_tube": flow_regime,
             "method": htc_result["method"],
             "f_petukhov": htc_result["f_petukhov"],
             "viscosity_correction": htc_result["viscosity_correction"],
@@ -227,31 +270,50 @@ class Step07TubeSideH(BaseStep):
             "T_mean_cold_C": T_mean_cold,
         }
 
-        # Escalation hints
+        # Escalation hints (phase-aware)
         escalation_hints: list[dict] = []
-        if velocity < 0.8:
-            escalation_hints.append({
-                "trigger": "low_velocity",
-                "recommendation": (
-                    f"Tube velocity {velocity:.2f} m/s is below 0.8 m/s — "
-                    f"fouling risk. Consider increasing n_passes or reducing n_tubes."
-                ),
-            })
-        if velocity > 2.5:
-            escalation_hints.append({
-                "trigger": "high_velocity",
-                "recommendation": (
-                    f"Tube velocity {velocity:.2f} m/s exceeds 2.5 m/s — "
-                    f"erosion risk. Consider reducing n_passes."
-                ),
-            })
-        if 2300 < Re < 10000:
+        if is_gas:
+            if velocity < 5.0:
+                escalation_hints.append({
+                    "trigger": "low_gas_velocity",
+                    "recommendation": (
+                        f"Gas velocity {velocity:.2f} m/s is below 5 m/s — "
+                        f"poor heat transfer. Consider increasing n_passes."
+                    ),
+                })
+            if velocity > 30.0:
+                escalation_hints.append({
+                    "trigger": "high_gas_velocity",
+                    "recommendation": (
+                        f"Gas velocity {velocity:.2f} m/s exceeds 30 m/s — "
+                        f"vibration/erosion risk. Consider reducing n_passes."
+                    ),
+                })
+        else:
+            if velocity < 0.8:
+                escalation_hints.append({
+                    "trigger": "low_velocity",
+                    "recommendation": (
+                        f"Tube velocity {velocity:.2f} m/s is below 0.8 m/s — "
+                        f"fouling risk. Consider increasing n_passes or reducing n_tubes."
+                    ),
+                })
+            if velocity > 2.5:
+                escalation_hints.append({
+                    "trigger": "high_velocity",
+                    "recommendation": (
+                        f"Tube velocity {velocity:.2f} m/s exceeds 2.5 m/s — "
+                        f"erosion risk. Consider reducing n_passes."
+                    ),
+                })
+        if _flag_transition_zone(Re):
             escalation_hints.append({
                 "trigger": "transition_zone",
                 "recommendation": (
-                    f"Re = {Re:.0f} is in the transition zone. "
+                    f"Re = {Re:.0f} is in the transition / low-turbulent "
+                    f"zone ({_TRANSITION_RE_LOW}<Re<{_TRANSITION_RE_HIGH}). "
                     f"Flow is unstable; consider geometry changes to push "
-                    f"Re above 10000."
+                    f"Re above {_TRANSITION_RE_HIGH}."
                 ),
             })
         if escalation_hints:
@@ -276,22 +338,35 @@ class Step07TubeSideH(BaseStep):
         BaseStep._should_call_ai() before this method is called.
 
         Returns True if ANY of:
-          1. Velocity < 0.8 m/s (fouling risk)
-          2. Velocity > 2.5 m/s (erosion risk)
-          3. 2300 < Re < 10000 (transition zone)
-          4. h_i outside typical range (< 50 or > 15000 W/m²K)
+          1. Velocity outside phase-appropriate range
+          2. 2300 < Re < 10000 (transition zone)
+          3. h_i outside phase-appropriate range
         """
         velocity = getattr(self, "_velocity", None)
         Re = getattr(self, "_Re", None)
         h_i = getattr(self, "_h_i", None)
 
-        if velocity is not None and velocity < 0.8:
-            return True
-        if velocity is not None and velocity > 2.5:
-            return True
-        if Re is not None and 2300 < Re < 10000:
-            return True
-        if h_i is not None and (h_i < 50 or h_i > 15000):
+        # Determine tube-side phase
+        shell_side = state.shell_side_fluid or "hot"
+        tube_side = "cold" if shell_side == "hot" else "hot"
+        tube_phase = (
+            getattr(state, "hot_phase", None) if tube_side == "hot"
+            else getattr(state, "cold_phase", None)
+        ) or "liquid"
+        is_gas = tube_phase == "vapor"
+
+        if is_gas:
+            if velocity is not None and (velocity < 5.0 or velocity > 30.0):
+                return True
+            if h_i is not None and (h_i < 10 or h_i > 500):
+                return True
+        else:
+            if velocity is not None and (velocity < 0.8 or velocity > 2.5):
+                return True
+            if h_i is not None and (h_i < 50 or h_i > 15000):
+                return True
+
+        if _flag_transition_zone(Re):
             return True
 
         return False

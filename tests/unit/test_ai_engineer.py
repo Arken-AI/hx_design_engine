@@ -8,6 +8,9 @@ from hx_engine.app.core.ai_engineer import (
     AIEngineer,
     _BASE_PROMPT,
     _STEP_PROMPTS,
+    _STEP_FILE_NAMES,
+    _load_skill,
+    SKILLS_DIR,
     _build_system_prompt,
     _build_step_context,
 )
@@ -84,7 +87,7 @@ class TestBuildSystemPrompt:
 
     def test_step1_has_scope_check(self):
         prompt = _build_system_prompt(1, "Process Requirements")
-        assert "SINGLE-PHASE SCOPE CHECK" in prompt
+        assert "PHASE SCOPE CHECK" in prompt
 
     def test_step4_has_tema_selection(self):
         prompt = _build_system_prompt(4, "TEMA Geometry")
@@ -113,9 +116,52 @@ class TestBuildSystemPrompt:
         # Should still contain the base prompt
         assert "senior heat exchanger design engineer" in prompt
 
+    def test_all_16_steps_have_skill_files(self):
+        for sid in range(1, 17):
+            assert sid in _STEP_FILE_NAMES, f"Step {sid} missing from _STEP_FILE_NAMES"
+
     def test_all_5_steps_registered(self):
         for sid in (1, 2, 3, 4, 5):
             assert sid in _STEP_PROMPTS, f"Step {sid} missing from _STEP_PROMPTS"
+
+
+# -----------------------------------------------------------------------
+# Skill file loader
+# -----------------------------------------------------------------------
+
+class TestSkillLoader:
+    def test_missing_file_returns_empty_string(self, tmp_path, caplog):
+        """Missing .md file must log WARNING and return empty string."""
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+        # Clear cache for this test
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                with caplog.at_level(logging.WARNING):
+                    result = _load_skill("nonexistent_step.md")
+            assert result == ""
+            assert "could not load skill file" in caplog.text.lower()
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
+
+    def test_skill_file_loaded_and_cached(self, tmp_path):
+        """Skill file content is loaded and cached."""
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            (tmp_path / "test_skill.md").write_text("Test prompt content")
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                result = _load_skill("test_skill.md")
+            assert result == "Test prompt content"
+            assert "test_skill.md" in ai_engineer._SKILL_CACHE
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
 
 
 # -----------------------------------------------------------------------
@@ -236,3 +282,54 @@ class TestParseReview:
         review = self._parse("This is not JSON at all")
         assert review.decision == AIDecisionEnum.WARN
         assert review.ai_called is True
+
+    def test_nested_json_with_options_array(self):
+        """raw_decode must handle nested structures that the old regex missed."""
+        raw = 'Here is my review: {"decision":"escalate","confidence":0.5,"reasoning":"x","corrections":[],"options":["a","b"]}'
+        review = self._parse(raw)
+        assert review.decision == AIDecisionEnum.ESCALATE
+        assert review.confidence == 0.5
+        assert review.options == ["a", "b"]
+
+    def test_malformed_json_logs_warning(self, caplog):
+        """Malformed JSON must log a warning, not silently return empty."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            review = self._parse("Some preamble {broken json")
+        assert review.decision == AIDecisionEnum.WARN
+        assert "could not decode" in caplog.text.lower()
+
+
+# -----------------------------------------------------------------------
+# _call_claude — cache_control in system param
+# -----------------------------------------------------------------------
+
+class TestCallClaudeCacheControl:
+    @pytest.mark.asyncio
+    async def test_system_prompt_sent_as_list_with_cache_control(self):
+        """system param must be a list with cache_control, not a plain string."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        mock_response = MagicMock()
+        mock_block = MagicMock()
+        mock_block.text = '{"decision":"proceed","confidence":0.95,"reasoning":"ok","corrections":[]}'
+        mock_response.content = [mock_block]
+
+        mock_client = AsyncMock()
+        mock_client.messages.create.return_value = mock_response
+
+        with patch("hx_engine.app.core.ai_engineer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "test-key"
+            engineer = AIEngineer(stub_mode=False)
+            engineer._client = mock_client
+
+        state = DesignState()
+        step = _DummyStep()
+        result = StepResult(step_id=1, step_name="Dummy")
+
+        review = await engineer._call_claude(step, state, result)
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert isinstance(call_kwargs["system"], list)
+        assert call_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert review.decision == AIDecisionEnum.PROCEED

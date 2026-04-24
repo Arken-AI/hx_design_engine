@@ -89,7 +89,7 @@ class TestStep05Integration:
         assert state.hot_fluid_props is not None
         assert state.cold_fluid_props is not None
         assert state.geometry is not None
-        assert state.tema_type in {"BEM", "AES", "AEP", "AEU", "AEL", "AEW"}
+        assert state.tema_type in {"BEM", "AES", "AEP", "AEU", "AEW"}
 
     @pytest.mark.asyncio
     async def test_pipeline_all_thermal_fields_populated(self, step):

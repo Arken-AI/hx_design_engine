@@ -59,6 +59,35 @@ _U_TABLE: dict[tuple[str, str], tuple[float, float, float]] = {
     ("viscous_oil", "steam"):          (30,   80,   150),
     ("viscous_oil", "crude"):          (10,   30,   60),
     ("crude", "viscous_oil"):          (10,   30,   60),
+    # --- P2-21 Phase-change pairs (Coulson §12.1, Serth §3.5) ---
+    # Condensing vapour (shell or tube side) × coolant
+    ("condensing_vapor_water",       "water"):          (2000, 2750, 3500),  # steam condenser
+    ("condensing_vapor_water",       "light_organic"):  (600,  1000, 1500),
+    ("condensing_vapor_water",       "heavy_organic"):  (400,  700,  1000),
+    ("condensing_vapor_organic",     "water"):          (600,  900,  1200),  # organic condenser
+    ("condensing_vapor_organic",     "light_organic"):  (300,  600,  900),
+    ("condensing_vapor_organic",     "heavy_organic"):  (200,  400,  700),
+    ("condensing_vapor_refrigerant", "water"):          (600,  1000, 1500),  # refrigerant condenser
+    ("condensing_vapor_refrigerant", "light_organic"):  (400,  700,  1000),
+    # Boiling / evaporating (tube or shell side) × heating medium
+    ("boiling_water",       "steam"):                   (1000, 1400, 2000),  # steam-heated evaporator
+    ("boiling_water",       "condensing_vapor_water"):  (1000, 1400, 2000),
+    ("boiling_water",       "water"):                   (600,  1000, 1500),
+    ("boiling_water",       "light_organic"):           (400,  700,  1000),
+    ("boiling_organic",     "steam"):                   (400,  700,  1100),  # kettle reboiler
+    ("boiling_organic",     "condensing_vapor_water"):  (400,  700,  1100),
+    ("boiling_organic",     "water"):                   (300,  600,  900),
+    ("boiling_organic",     "light_organic"):           (200,  450,  700),
+    ("boiling_organic",     "heavy_organic"):           (150,  300,  500),
+    ("boiling_refrigerant", "water"):                   (700,  1000, 1400),  # DX evaporator
+    ("boiling_refrigerant", "light_organic"):           (500,  800,  1100),
+    # Reverse pairs (hot label is the coolant, cold label is the evaporant)
+    ("water",         "boiling_refrigerant"):           (700,  1000, 1400),
+    ("water",         "boiling_organic"):               (300,  600,  900),
+    ("water",         "boiling_water"):                 (600,  1000, 1500),
+    ("steam",         "boiling_organic"):               (400,  700,  1100),
+    ("light_organic", "boiling_refrigerant"):           (500,  800,  1100),
+    ("light_organic", "condensing_vapor_organic"):      (300,  600,  900),
 }
 
 # Default (liquid-liquid) when pair not found
@@ -104,11 +133,34 @@ _LIGHT_ORGANIC_NAMES = {
     "gasoline", "kerosene", "diesel", "light hydrocarbon",
     "light hydrocarbons", "methanol", "ethanol", "acetone",
     "toluene", "benzene", "xylene", "hexane", "heptane", "pentane",
-    "cyclohexane", "ammonia", "refrigerant", "organic solvent",
-    "organic solvents",
+    "cyclohexane", "organic solvent", "organic solvents",
+}
+
+_REFRIGERANT_NAMES = {
+    "r-134a", "r134a", "r-22", "r22", "r-404a", "r404a",
+    "r-410a", "r410a", "r-507", "r507", "r-32", "r32",
+    "r-290", "r290", "r-600a", "r600a", "r-717", "r717",
+    "refrigerant",
 }
 
 
+# ---------------------------------------------------------------------------
+# P2-21 — fluid-class helpers (used by phase-aware classify_fluid_type)
+# ---------------------------------------------------------------------------
+
+def _is_water_name(name: str) -> bool:
+    return name in _WATER_NAMES or name in _STEAM_NAMES or any(
+        k in name or name in k for k in _WATER_NAMES | _STEAM_NAMES
+    )
+
+
+def _is_refrigerant_name(name: str) -> bool:
+    return name in _REFRIGERANT_NAMES or any(
+        k in name or name in k for k in _REFRIGERANT_NAMES
+    )
+
+
+# ---------------------------------------------------------------------------
 # Viscosity threshold for viscous_oil classification (Pa·s).
 # Oils above this viscosity are typically in laminar tube-side flow
 # (Re < 2300) at normal industrial velocities, producing h_i ~ 50-80 W/m²K.
@@ -123,16 +175,33 @@ _HEAVY_ORGANIC_VISCOSITY_THRESHOLD = 0.001  # 1 cP
 def classify_fluid_type(
     fluid_name: str,
     properties: Optional[FluidProperties] = None,
+    phase: Optional[str] = None,
 ) -> str:
-    """Classify a fluid as 'water', 'steam', 'crude', 'viscous_oil',
-    'heavy_organic', 'light_organic', 'gas', or 'liquid' (generic fallback).
+    """Classify a fluid for U-table lookup.
 
-    Uses name matching first, then property-based heuristics if available.
-    The 'viscous_oil' category captures high-viscosity organics (lube oil,
-    gear oil, hydraulic oil, etc.) that produce laminar tube-side flow and
-    require a much lower U estimate than moderate-viscosity heavy organics.
+    When ``phase`` is ``"condensing"`` or ``"evaporating"`` (from Step 3),
+    returns a phase-change category before any sensible-service path.
+    Otherwise falls through to the existing sensible classification.
+
+    Phase-change categories (P2-21): ``condensing_vapor_water``,
+    ``condensing_vapor_organic``, ``condensing_vapor_refrigerant``,
+    ``boiling_water``, ``boiling_organic``, ``boiling_refrigerant``.
     """
     name = re.sub(r"\s+", " ", fluid_name.strip().lower())
+
+    # P2-21 — phase-change classification takes priority over sensible path
+    if phase == "condensing":
+        if _is_water_name(name):
+            return "condensing_vapor_water"
+        if _is_refrigerant_name(name):
+            return "condensing_vapor_refrigerant"
+        return "condensing_vapor_organic"
+    if phase == "evaporating":
+        if _is_water_name(name):
+            return "boiling_water"
+        if _is_refrigerant_name(name):
+            return "boiling_refrigerant"
+        return "boiling_organic"
 
     # Name-based classification — viscous_oil checked before heavy_organic
     if name in _WATER_NAMES:
@@ -195,16 +264,18 @@ def get_U_assumption(
     cold_fluid: str,
     hot_properties: Optional[FluidProperties] = None,
     cold_properties: Optional[FluidProperties] = None,
+    hot_phase: Optional[str] = None,
+    cold_phase: Optional[str] = None,
 ) -> dict[str, float]:
     """Return {"U_low": float, "U_mid": float, "U_high": float} in W/(m²·K).
 
     Classifies both fluids and looks up the pair. Falls back to a
     conservative liquid-liquid estimate if the pair is unknown.
-    When FluidProperties are provided, viscosity-based refinement can
-    upgrade a generic heavy_organic to viscous_oil for more accurate U.
+    Pass ``hot_phase`` / ``cold_phase`` from Step 3 to activate the
+    phase-change U categories (P2-21).
     """
-    hot_type = classify_fluid_type(hot_fluid, hot_properties)
-    cold_type = classify_fluid_type(cold_fluid, cold_properties)
+    hot_type = classify_fluid_type(hot_fluid, hot_properties, phase=hot_phase)
+    cold_type = classify_fluid_type(cold_fluid, cold_properties, phase=cold_phase)
 
     key = (hot_type, cold_type)
     u_low, u_mid, u_high = _U_TABLE.get(key, _DEFAULT_U)

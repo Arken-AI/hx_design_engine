@@ -9,7 +9,11 @@ from __future__ import annotations
 from hx_engine.app.core.validation_rules import register_rule
 from hx_engine.app.models.design_state import GeometrySpec
 from hx_engine.app.models.step_result import StepResult
-from hx_engine.app.steps.step_04_tema_geometry import VALID_TEMA_TYPES
+from hx_engine.app.steps.step_04_tema_geometry import (
+    LD_RATIO_LOW_ESCALATE,
+    LD_RATIO_HIGH_ESCALATE,
+    VALID_TEMA_TYPES,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +206,78 @@ def _rule_bem_delta_t(
 
 
 # ---------------------------------------------------------------------------
+# R7b — Pitch ratio vs layout consistency (P2-17)
+# ---------------------------------------------------------------------------
+# Square / rotated-square layouts need a wider pitch ratio (≥ 1.25) to
+# preserve a mechanical-cleaning lane between tubes; triangular layouts
+# can use the TEMA RGP floor of 1.20.
+
+# Accept both the canonical short forms ("square", "triangular") used by
+# Step 4 and the long forms ("square_90", "rotated_square_45") that may
+# arrive via AI corrections or future layout additions.
+SQUARE_LAYOUTS: frozenset[str] = frozenset({
+    "square", "square_90", "rotated_square", "rotated_square_45",
+})
+SQUARE_MIN_PITCH_RATIO: float = 1.25
+TRIANGULAR_MIN_PITCH_RATIO: float = 1.20
+
+
+def _rule_pitch_ratio_layout_consistency(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """Pitch ratio must respect the layout-specific floor.
+
+    Square / rotated-square layouts: ratio ≥ 1.25 (mechanical cleaning).
+    Triangular layouts: ratio ≥ 1.20 (TEMA RGP floor).
+    """
+    geom: GeometrySpec | None = result.outputs.get("geometry")
+    if geom is None:
+        return True, None
+    layout = geom.pitch_layout
+    pr = geom.pitch_ratio
+    if layout is None or pr is None:
+        return True, None
+    if layout in SQUARE_LAYOUTS:
+        if pr < SQUARE_MIN_PITCH_RATIO:
+            return False, (
+                f"pitch_ratio={pr:.3f} < {SQUARE_MIN_PITCH_RATIO} required "
+                f"for {layout} layout (mechanical-cleaning lane)"
+            )
+    elif pr < TRIANGULAR_MIN_PITCH_RATIO:
+        return False, (
+            f"pitch_ratio={pr:.3f} < {TRIANGULAR_MIN_PITCH_RATIO} required "
+            f"for {layout} layout (TEMA RGP floor)"
+        )
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# R10 — L/D ratio within ESCALATE band [3, 15] (P2-15)
+# ---------------------------------------------------------------------------
+
+def _rule_ld_ratio_within_extremes(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """L/D ratio must lie inside the [3, 15] escalation band.
+
+    Outside this range the geometry is no longer a recognisable
+    shell-and-tube proportion; let the user decide rather than
+    auto-correcting.  Registered with ``correctable=False`` so the
+    failure escalates rather than re-running Layer 1.
+    """
+    ld = result.outputs.get("LD_ratio")
+    if ld is None:
+        return True, None
+    if ld < LD_RATIO_LOW_ESCALATE or ld > LD_RATIO_HIGH_ESCALATE:
+        return False, (
+            f"L/D={ld:.2f} outside acceptable extremes "
+            f"[{LD_RATIO_LOW_ESCALATE}, {LD_RATIO_HIGH_ESCALATE}] — "
+            f"shell-and-tube proportion is unrealistic"
+        )
+    return True, None
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -214,8 +290,10 @@ def register_step4_rules() -> None:
     register_rule(4, _rule_baffle_spacing_min)
     register_rule(4, _rule_baffle_spacing_max)
     register_rule(4, _rule_pitch_ratio_range)
+    register_rule(4, _rule_pitch_ratio_layout_consistency, correctable=True)
     register_rule(4, _rule_n_tubes_positive)
     register_rule(4, _rule_bem_delta_t)
+    register_rule(4, _rule_ld_ratio_within_extremes, correctable=False)
 
 
 register_step4_rules()

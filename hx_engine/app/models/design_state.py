@@ -26,6 +26,7 @@ class FluidProperties(BaseModel):
     """Thermophysical properties for a single fluid stream.
 
     Every field has physical bounds enforced via Pydantic validators.
+    Supports liquid, vapor, and two-phase states.
     """
 
     density_kg_m3: Optional[float] = None
@@ -34,54 +35,108 @@ class FluidProperties(BaseModel):
     k_W_mK: Optional[float] = None
     Pr: Optional[float] = None
 
+    # --- Phase state (populated by thermo adapter) ---
+    phase: Optional[str] = None                # "liquid" | "vapor" | "two_phase"
+    quality: Optional[float] = None            # vapor mass fraction 0.0–1.0 (None for single-phase)
+    enthalpy_J_kg: Optional[float] = None      # specific enthalpy (J/kg)
+    latent_heat_J_kg: Optional[float] = None   # h_fg at saturation (J/kg)
+    T_sat_C: Optional[float] = None            # saturation temperature at operating pressure (°C)
+    P_sat_Pa: Optional[float] = None           # saturation pressure at operating temperature (Pa)
+
     # --- Property provenance (populated by thermo adapter) ---
     property_source: Optional[str] = None      # e.g. "iapws", "coolprop", "thermo", "petroleum-named", "petroleum-generic", "specialty"
     property_confidence: Optional[float] = None  # 0.0–1.0; None = not assessed
 
+    @field_validator("phase")
+    @classmethod
+    def _check_phase(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in {"liquid", "vapor", "two_phase"}:
+            raise ValueError(
+                f"phase='{v}' not in {{liquid, vapor, two_phase}}"
+            )
+        return v
+
+    @field_validator("quality")
+    @classmethod
+    def _check_quality(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0.0 or v > 1.0):
+            raise ValueError(
+                f"quality={v} outside range [0.0, 1.0]"
+            )
+        return v
+
     @field_validator("density_kg_m3")
     @classmethod
     def _check_density(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 50 or v > 2000):
+        if v is not None and (v < 0.01 or v > 2000):
             raise ValueError(
-                f"density_kg_m3={v} outside physical range [50, 2000]"
+                f"density_kg_m3={v} outside physical range [0.01, 2000]"
             )
         return v
 
     @field_validator("viscosity_Pa_s")
     @classmethod
     def _check_viscosity(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 1e-6 or v > 1.0):
+        if v is not None and (v < 1e-7 or v > 1.0):
             raise ValueError(
-                f"viscosity_Pa_s={v} outside physical range [1e-6, 1.0]"
+                f"viscosity_Pa_s={v} outside physical range [1e-7, 1.0]"
             )
         return v
 
     @field_validator("cp_J_kgK")
     @classmethod
     def _check_cp(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 500 or v > 10000):
+        if v is not None and (v < 100 or v > 100_000):
             raise ValueError(
-                f"cp_J_kgK={v} outside physical range [500, 10000]"
+                f"cp_J_kgK={v} outside physical range [100, 100000]"
             )
         return v
 
     @field_validator("k_W_mK")
     @classmethod
     def _check_k(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 0.01 or v > 100):
+        if v is not None and (v < 0.005 or v > 100):
             raise ValueError(
-                f"k_W_mK={v} outside physical range [0.01, 100]"
+                f"k_W_mK={v} outside physical range [0.005, 100]"
             )
         return v
 
     @field_validator("Pr")
     @classmethod
     def _check_Pr(cls, v: Optional[float]) -> Optional[float]:
-        if v is not None and (v < 0.5 or v > 1000):
+        if v is not None and (v < 0.001 or v > 10000):
             raise ValueError(
-                f"Pr={v} outside physical range [0.5, 1000]"
+                f"Pr={v} outside physical range [0.001, 10000]"
             )
         return v
+
+
+# ---------------------------------------------------------------------------
+# IncrementResult — per-segment results for incremental calculation
+# ---------------------------------------------------------------------------
+
+class IncrementResult(BaseModel):
+    """Results for a single segment of the incremental HX calculation.
+
+    Used when the shell-side fluid undergoes phase change (condensation
+    or evaporation). Each segment tracks local temperatures, quality,
+    heat transfer coefficients, and the area required for that segment.
+    """
+
+    segment_index: int = 0
+    T_hot_in_C: Optional[float] = None
+    T_hot_out_C: Optional[float] = None
+    T_cold_in_C: Optional[float] = None
+    T_cold_out_C: Optional[float] = None
+    quality_in: Optional[float] = None        # vapor fraction at segment inlet
+    quality_out: Optional[float] = None       # vapor fraction at segment outlet
+    phase: Optional[str] = None               # "liquid" | "vapor" | "two_phase"
+    h_tube_W_m2K: Optional[float] = None
+    h_shell_W_m2K: Optional[float] = None
+    U_local_W_m2K: Optional[float] = None
+    dQ_W: Optional[float] = None              # heat duty for this segment
+    dA_m2: Optional[float] = None             # area required for this segment
+    LMTD_local_K: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +398,17 @@ class DesignState(BaseModel):
     m_dot_hot_kg_s: Optional[float] = None
     m_dot_cold_kg_s: Optional[float] = None
 
+    # --- flow input audit (P2-20) ---
+    # When the request supplied a volumetric/mass flow object (hot_flow /
+    # cold_flow), the resolver records the original value, unit, and the
+    # density used for the conversion here. None when the caller passed
+    # m_dot_*_kg_s directly. Step 3 re-confirms these densities at the
+    # bulk-mean temperature and emits a WARN if drift exceeds
+    # DENSITY_DRIFT_WARN_PCT.
+    hot_flow_input: Optional[dict] = None
+    cold_flow_input: Optional[dict] = None
+    flow_density_drift: Optional[dict] = None  # {"hot": pct, "cold": pct}
+
     # --- fluid names ---
     hot_fluid_name: Optional[str] = None
     cold_fluid_name: Optional[str] = None
@@ -354,6 +420,17 @@ class DesignState(BaseModel):
     # --- fluid properties (populated by Step 3) ---
     hot_fluid_props: Optional[FluidProperties] = None
     cold_fluid_props: Optional[FluidProperties] = None
+
+    # --- phase regime (populated by Step 3) ---
+    # Declared phase regime for each stream
+    hot_phase: Optional[str] = None    # "liquid" | "vapor" | "condensing" | "evaporating"
+    cold_phase: Optional[str] = None   # "liquid" | "vapor" | "condensing" | "evaporating"
+    # Number of increments for incremental (zone-based) calculation
+    n_increments: Optional[int] = None
+    # Per-segment results for incremental calculation
+    increment_results: list[IncrementResult] = Field(default_factory=list)
+    # P2-18 — per-side μ variation: {"hot": {"mu_ratio": ..., ...}, "cold": {...}}
+    viscosity_variation: Optional[dict] = None
 
     # --- geometry (populated by Step 4+) ---
     geometry: Optional[GeometrySpec] = None
@@ -386,7 +463,7 @@ class DesignState(BaseModel):
     Re_tube: Optional[float] = None
     Pr_tube: Optional[float] = None
     Nu_tube: Optional[float] = None
-    flow_regime_tube: Optional[str] = None   # "laminar" | "transition" | "turbulent"
+    flow_regime_tube: Optional[str] = None   # "laminar" | "transition_low_turbulent" | "turbulent"
 
     # --- shell-side heat transfer (populated by Step 8) ---
     h_shell_W_m2K: Optional[float] = None
@@ -405,6 +482,8 @@ class DesignState(BaseModel):
     U_kern_W_m2K: Optional[float] = None
     U_kern_deviation_pct: Optional[float] = None
     U_vs_estimated_deviation_pct: Optional[float] = None
+    # P2-18 — cross-method agreement reliability: 1.0 (normal) or 0.85 (viscous service)
+    cross_method_agreement_weight: Optional[float] = None
 
     # --- tube material properties (resolved by Step 9) ---
     tube_material: Optional[str] = None
@@ -435,12 +514,20 @@ class DesignState(BaseModel):
     dP_shell_simplified_delaware_Pa: Optional[float] = None
     dP_shell_kern_Pa: Optional[float] = None
     dP_shell_bell_vs_kern_pct: Optional[float] = None
+    # P2-25 — shell-side wall viscosity (basis ∈ {"computed","approx_bulk"})
+    mu_s_wall_Pa_s: Optional[float] = None
+    mu_s_wall_basis: Optional[str] = None
+    mu_s_wall_fail_reason: Optional[str] = None
 
     # --- area + overdesign (populated by Step 11) ---
     area_required_m2: Optional[float] = None       # Q / (U_dirty × F × LMTD)
     area_provided_m2: Optional[float] = None       # π × d_o × L × N_t
     overdesign_pct: Optional[float] = None          # (A_provided - A_required) / A_required × 100
     A_estimated_vs_required_pct: Optional[float] = None  # (A_m2 - area_required_m2) / area_required_m2 × 100
+    service_classification: Optional[str] = None   # P2-23: clean_utility / phase_change / standard_process / fouling_service
+    overdesign_band_low: Optional[float] = None    # P2-23: lower AI-trigger bound for this service (%)
+    overdesign_band_high: Optional[float] = None   # P2-23: upper AI-trigger bound for this service (%)
+    fouling_paradox_severity: Optional[str] = None  # P2-24: None / "warn" / "escalate"
 
     # --- convergence loop tracking (populated by Step 12) ---
     convergence_iteration: Optional[int] = None       # Which iteration converged (None if not run yet)
@@ -496,6 +583,10 @@ class DesignState(BaseModel):
     # +50-75 mm clearance. True for fixed-tubesheet types (BEM, etc.) and
     # after Step 15 confirms the shell ID.
     shell_id_finalised: bool = False
+
+    # P2-12 — Highly toxic service triggers double-tubesheet evaluation
+    # in Step 14 (set by Step 4 allocator).
+    requires_double_tubesheet_review: bool = False
 
     # --- design strengths / risks (FE-5, populated by Step 16) ---
     design_strengths: list[str] = Field(default_factory=list)

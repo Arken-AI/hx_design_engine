@@ -59,6 +59,32 @@ def _rule_overdesign_not_negative(
 
 
 # ---------------------------------------------------------------------------
+# R4 — Low-velocity fouling paradox ESCALATE (P2-24)
+# ---------------------------------------------------------------------------
+
+def _rule_fouling_paradox_escalate(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """R4 — Escalate when Layer 1 flagged the low-velocity fouling paradox.
+
+    The paradox (excess area → low velocity → accelerated fouling) cannot be
+    resolved by geometry correction alone; it requires the engineer to decide
+    whether to reduce tube count, add a shell, or re-evaluate the fouling
+    resistance. Routes straight to ESCALATE (correctable=False).
+    """
+    if result.outputs.get("fouling_paradox_severity") != "escalate":
+        return True, None
+    od = result.outputs.get("overdesign_pct")
+    od_str = f"{od:.1f}%" if od is not None else "unknown"
+    return False, (
+        f"Low-velocity fouling paradox requires intervention: "
+        f"overdesign={od_str} — excess area reduces tube velocity and "
+        f"accelerates fouling deposit. Reduce tube count, add a parallel "
+        f"shell, or revise the fouling resistance assumption."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -67,6 +93,7 @@ def register_step11_rules() -> None:
     register_rule(11, _rule_area_required_positive)
     register_rule(11, _rule_area_provided_positive)
     register_rule(11, _rule_overdesign_not_negative)
+    register_rule(11, _rule_fouling_paradox_escalate, correctable=False)
 
 
 # Auto-register on import

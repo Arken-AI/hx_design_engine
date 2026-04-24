@@ -63,6 +63,53 @@ class Step05LMTD(BaseStep):
         return missing
 
     # ------------------------------------------------------------------
+    # Isothermal phase-change detection
+    # ------------------------------------------------------------------
+
+    _ISOTHERMAL_DT_THRESHOLD_C: float = 0.5
+
+    @classmethod
+    def _isothermal_bypass_reason(cls, state: "DesignState") -> str | None:
+        """Return a human-readable reason if either side is isothermal phase-change.
+
+        Two triggers (either is sufficient):
+
+        * Step 3 flagged the side as ``condensing`` or ``evaporating`` AND
+          the terminal temperature change on that side is ≤ 0.5°C.
+        * The terminal ΔT on a side is effectively zero (|ΔT| ≤ 0.5°C),
+          which indicates near-isothermal service even if Step 3 did not
+          label the phase explicitly.
+        """
+        hot_phase = getattr(state, "hot_phase", None)
+        cold_phase = getattr(state, "cold_phase", None)
+
+        dT_hot = (
+            abs(state.T_hot_in_C - state.T_hot_out_C)
+            if state.T_hot_in_C is not None and state.T_hot_out_C is not None
+            else None
+        )
+        dT_cold = (
+            abs(state.T_cold_out_C - state.T_cold_in_C)
+            if state.T_cold_in_C is not None and state.T_cold_out_C is not None
+            else None
+        )
+
+        if hot_phase == "condensing" and (
+            dT_hot is None or dT_hot <= cls._ISOTHERMAL_DT_THRESHOLD_C
+        ):
+            return f"hot side condensing at near-constant temperature (ΔT_hot≈{dT_hot or 0:.2f}°C)"
+        if cold_phase == "evaporating" and (
+            dT_cold is None or dT_cold <= cls._ISOTHERMAL_DT_THRESHOLD_C
+        ):
+            return f"cold side evaporating at near-constant temperature (ΔT_cold≈{dT_cold or 0:.2f}°C)"
+
+        if dT_hot is not None and dT_hot <= cls._ISOTHERMAL_DT_THRESHOLD_C:
+            return f"hot side isothermal (ΔT_hot={dT_hot:.2f}°C)"
+        if dT_cold is not None and dT_cold <= cls._ISOTHERMAL_DT_THRESHOLD_C:
+            return f"cold side isothermal (ΔT_cold={dT_cold:.2f}°C)"
+        return None
+
+    # ------------------------------------------------------------------
     # Result builder
     # ------------------------------------------------------------------
 
@@ -136,6 +183,31 @@ class Step05LMTD(BaseStep):
                 f"May not be economically viable."
             )
 
+        # 3a. Isothermal phase-change bypass — F ≡ 1.0 when one side is
+        # condensing or evaporating at near-constant temperature. Bowman's
+        # F-factor correlation is undefined for isothermal sides (R=0 or
+        # P→1), so skipping R/P/F avoids spurious singularities.
+        bypass_reason = self._isothermal_bypass_reason(state)
+        if bypass_reason is not None:
+            self._F_factor = 1.0
+            self._R = None
+            self._auto_corrected = False
+            warnings.append(
+                f"F-factor bypass — {bypass_reason}. F set to 1.0 per "
+                f"standard practice for isothermal phase-change service."
+            )
+            state.LMTD_K = LMTD
+            state.F_factor = 1.0
+            result = self._build_result(
+                LMTD_K=LMTD, F_factor=1.0, R=None, P=None,
+                shell_passes=state.geometry.shell_passes or 1,
+                auto_corrected=False,
+                warnings=warnings,
+            )
+            result.outputs["f_factor_basis"] = "isothermal_phase_change"
+            result.outputs["f_factor_bypass_reason"] = bypass_reason
+            return result
+
         # 4. Pure counter-current short circuit
         n_passes = state.geometry.n_passes
         shell_passes = state.geometry.shell_passes or 1
@@ -205,14 +277,37 @@ class Step05LMTD(BaseStep):
                     f"{detail_2} with 2 shell passes. "
                     f"Both below 0.75 — design is thermally infeasible."
                 )
-                # Raise CalculationError for domain violations where
-                # no auto-correction is possible
-                raise CalculationError(
-                    5,
-                    f"F-factor infeasible: 1-shell={detail_1}, "
-                    f"2-shell={detail_2}. R={R:.4f}, P={P:.4f}. "
-                    f"Consider reducing temperature cross, changing "
-                    f"TEMA type, or splitting into multiple units.",
+                # Do NOT raise here: return a StepResult carrying the
+                # infeasible F so Layer 2 (`_rule_f_factor_minimum`,
+                # correctable=False) triggers a structured user escalation
+                # via `run_with_layer2_recovery` with the options below.
+                self._F_factor = F
+                self._R = R
+                self._auto_corrected = False
+                escalation_hints = [
+                    {
+                        "trigger": "F_factor_infeasible",
+                        "attempts": {
+                            "1_shell_pass": detail_1,
+                            "2_shell_passes": detail_2,
+                        },
+                        "R": R,
+                        "P": P,
+                        "options": [
+                            "Add a third (or more) shell pass in series",
+                            "Switch TEMA type (e.g. X-shell for isothermal, G/H for split flow)",
+                            "Swap which stream is on the shell side",
+                            "Relax terminal temperatures to reduce cross",
+                            "Split the duty across multiple exchangers",
+                        ],
+                    }
+                ]
+                state.LMTD_K = LMTD
+                return self._build_result(
+                    LMTD_K=LMTD, F_factor=F, R=R, P=P,
+                    shell_passes=shell_passes, auto_corrected=False,
+                    warnings=warnings,
+                    escalation_hints=escalation_hints,
                 )
 
         # 8. High R warnings

@@ -33,10 +33,21 @@ def _rule_h_positive(
 _J_FACTOR_KEYS = ("J_c", "J_l", "J_b", "J_s", "J_r")
 
 
+def _is_shah_condensing(result: StepResult) -> bool:
+    """True when Step 8 used the Shah condensation correlation.
+
+    Shah outputs have no J-factors; the Bell-Delaware J-factor rules must
+    not run on this branch.
+    """
+    return result.outputs.get("method") == "shah_condensation"
+
+
 def _rule_j_factors_range(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """Each J-factor must be within [0.2, 1.2]."""
+    """Each J-factor must be within [0.2, 1.2] (Bell-Delaware path only)."""
+    if _is_shah_condensing(result):
+        return True, None
     for key in _J_FACTOR_KEYS:
         val = result.outputs.get(key)
         if val is None:
@@ -49,25 +60,58 @@ def _rule_j_factors_range(
 
 
 # ---------------------------------------------------------------------------
-# R3 — J_c × J_l × J_b product floor
+# R3 — Full 5-factor Bell-Delaware J-product floor
 # ---------------------------------------------------------------------------
+
+_J_PRODUCT_FLOOR = 0.30
+
+# Geometry remediation hints keyed by the dominant (lowest) J-factor.
+_J_LEVER_HINTS: dict[str, str] = {
+    "J_c": "increase baffle cut or reduce baffle overlap",
+    "J_l": "tighten shell-to-baffle / tube-to-baffle clearances",
+    "J_b": "add sealing strips to close bundle-to-shell bypass lanes",
+    "J_s": "even out inlet/outlet baffle spacing",
+    "J_r": "raise shell-side Reynolds (tighter baffle spacing or higher flow)",
+}
+
 
 def _rule_j_product_floor(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """Combined correction product J_c × J_l × J_b must be > 0.30."""
-    J_c = result.outputs.get("J_c")
-    J_l = result.outputs.get("J_l")
-    J_b = result.outputs.get("J_b")
-    if J_c is None or J_l is None or J_b is None:
-        return False, "J_c, J_l, or J_b missing from Step 8 outputs"
-    product = J_c * J_l * J_b
-    if product < 0.30:
+    """Full Bell-Delaware product J_c·J_l·J_b·J_s·J_r must exceed the floor.
+
+    The original 3-factor check silently dropped J_s and J_r, masking
+    infeasible geometries where unequal baffle spacing or low Re dragged
+    the true product below 0.30 while the partial product was benign.
+
+    Skipped for the Shah condensation path — that path has no J-factors.
+    """
+    if _is_shah_condensing(result):
+        return True, None
+    factors = {key: result.outputs.get(key) for key in _J_FACTOR_KEYS}
+    missing = [key for key, val in factors.items() if val is None]
+    if missing:
         return False, (
-            f"J_c × J_l × J_b = {product:.4f} below minimum 0.30 — "
-            f"geometry suspect (J_c={J_c:.4f}, J_l={J_l:.4f}, J_b={J_b:.4f})"
+            f"Missing J-factors {missing} in Step 8 outputs — cannot evaluate "
+            f"Bell-Delaware correction product"
         )
-    return True, None
+
+    product = 1.0
+    for val in factors.values():
+        product *= val
+
+    if product >= _J_PRODUCT_FLOOR:
+        return True, None
+
+    dominant_key = min(factors, key=lambda k: factors[k])
+    dominant_val = factors[dominant_key]
+    lever = _J_LEVER_HINTS.get(dominant_key, "revise shell-side geometry")
+    breakdown = ", ".join(f"{k}={factors[k]:.4f}" for k in _J_FACTOR_KEYS)
+    return False, (
+        f"J_c·J_l·J_b·J_s·J_r = {product:.4f} below minimum {_J_PRODUCT_FLOOR:.2f} — "
+        f"dominant low factor {dominant_key}={dominant_val:.4f} ({lever}). "
+        f"Breakdown: {breakdown}."
+    )
 
 
 # ---------------------------------------------------------------------------

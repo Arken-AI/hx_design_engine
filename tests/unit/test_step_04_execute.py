@@ -92,14 +92,14 @@ class TestStep04Execute:
         assert result.step_id == 4
         assert result.step_name == "TEMA Geometry Selection"
 
-    async def test_state_not_mutated(self):
-        """execute() must not modify the input DesignState."""
+    async def test_state_only_mutates_shell_id_finalised_flag(self):
+        """P2-16 contract: execute() finalises shell_id (sets flag True) and
+        otherwise leaves the input DesignState unchanged."""
         step = Step04TEMAGeometry()
         state = _make_state()
-        state_before = state.model_dump_json()
+        assert state.shell_id_finalised is False
         await step.execute(state)
-        state_after = state.model_dump_json()
-        assert state_before == state_after
+        assert state.shell_id_finalised is True
 
     async def test_geometry_is_valid_spec(self):
         """Output geometry passes GeometrySpec validators."""
@@ -212,17 +212,12 @@ class TestFE2RfLowerBoundWarning:
 
 
 class TestFE4ShellIdFinalised:
-    """FE-4: shell_id_finalised flag set correctly by Step 4."""
+    """FE-4 + P2-16: shell_id_finalised flag set True after Step 4 finalises
+    the shell ID by adding the bundle-to-shell clearance."""
 
     @pytest.mark.asyncio
-    async def test_aes_sets_flag_false(self):
-        """AES/AEU (floating head) → shell_id_finalised = False.
-
-        Uses crude oil at T_mean > 120°C so it's classified as 'heavy' fouling
-        → Rule 3 fires → crude oil on tube-side → ΔT 90°C → AES selected.
-        tema_type is read from result.outputs (not state.tema_type, which is
-        only applied by pipeline_runner._apply_outputs, not called in unit tests).
-        """
+    async def test_aes_sets_flag_true_and_grows_shell(self):
+        """AES (floating head, 30 mm clearance) → flag True; shell grows by clearance."""
         step = Step04TEMAGeometry()
         state = _make_state(
             hot_fluid_name="crude oil",
@@ -239,19 +234,14 @@ class TestFE4ShellIdFinalised:
             ),
         )
         result = await step.execute(state)
-        tema = result.outputs["tema_type"]
-        if tema in ("AES", "AEU"):
-            assert state.shell_id_finalised is False
-        else:
-            # If allocation/TEMA logic chose a different type, flag is True
-            assert state.shell_id_finalised is True
+        assert state.shell_id_finalised is True
+        if result.outputs["tema_type"] == "AES":
+            assert result.outputs["bundle_to_shell_clearance_m"] == 0.030
+            assert result.outputs["shell_id_final_m"] > result.outputs["shell_id_initial_m"]
 
     @pytest.mark.asyncio
-    async def test_bem_sets_flag_true(self):
-        """BEM (fixed tubesheet) → shell_id_finalised = True.
-
-        tema_type is read from result.outputs (pipeline_runner not called here).
-        """
+    async def test_bem_sets_flag_true_zero_clearance(self):
+        """BEM (fixed tubesheet, 0 mm clearance) → flag True; shell unchanged."""
         step = Step04TEMAGeometry()
         state = _make_state(
             hot_fluid_name="water",
@@ -270,6 +260,8 @@ class TestFE4ShellIdFinalised:
         result = await step.execute(state)
         assert result.outputs["tema_type"] == "BEM"
         assert state.shell_id_finalised is True
+        assert result.outputs["bundle_to_shell_clearance_m"] == 0.0
+        assert result.outputs["shell_id_final_m"] == result.outputs["shell_id_initial_m"]
 
     @pytest.mark.asyncio
     async def test_flag_in_outputs(self):

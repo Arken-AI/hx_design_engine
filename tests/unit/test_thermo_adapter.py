@@ -11,8 +11,8 @@ Tests cover:
 import pytest
 
 from hx_engine.app.adapters.thermo_adapter import (
-    get_cp,
-    get_fluid_properties,
+    get_cp_sync as get_cp,
+    get_fluid_properties_sync as get_fluid_properties,
     _get_props_iapws,
     _get_props_thermo,
     _COOLPROP_MAP,

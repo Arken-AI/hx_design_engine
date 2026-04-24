@@ -116,6 +116,42 @@ def _rule_pct_sum(
 
 
 # ---------------------------------------------------------------------------
+# R7 — Tube diameters must be physically ordered (d_o > d_i > 0)
+# ---------------------------------------------------------------------------
+
+def _rule_tube_diameters_ordered(
+    step_id: int, result: StepResult,
+) -> tuple[bool, str | None]:
+    """Tube outer diameter must strictly exceed inner diameter; both > 0.
+
+    Guards ``R_wall = d_o * ln(d_o/d_i) / (2*k_w)`` against:
+      - d_i == d_o  -> ln(1) = 0  -> wall resistance silently dropped
+      - d_i  > d_o  -> ln(<1) < 0 -> negative wall resistance
+      - d_i <= 0 or d_o <= 0      -> math.log domain error / non-physical
+
+    correctable=False — this is an upstream geometry contract violation
+    (Step 4 BWG selection, Step 12 adjustment, or an applied correction).
+    """
+    d_o = result.outputs.get("tube_od_m")
+    d_i = result.outputs.get("tube_id_m")
+
+    if d_o is None or d_i is None:
+        # Precondition gate in execute() fires first; this is defence-in-depth.
+        return True, None
+    if d_o <= 0:
+        return False, f"Tube outer diameter must be > 0, got d_o={d_o:.6f} m"
+    if d_i <= 0:
+        return False, f"Tube inner diameter must be > 0, got d_i={d_i:.6f} m"
+    if d_i >= d_o:
+        return False, (
+            f"Tube inner diameter must be strictly less than outer diameter "
+            f"(got d_i={d_i:.6f} m >= d_o={d_o:.6f} m); "
+            f"wall conduction term ln(d_o/d_i) is non-physical"
+        )
+    return True, None
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -127,6 +163,7 @@ def register_step9_rules() -> None:
     register_rule(9, _rule_cleanliness_factor_bounds)
     register_rule(9, _rule_resistances_positive)
     register_rule(9, _rule_pct_sum)
+    register_rule(9, _rule_tube_diameters_ordered)  # R7
 
 
 # Auto-register on import

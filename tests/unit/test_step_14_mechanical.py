@@ -61,6 +61,9 @@ def _make_state(**overrides) -> DesignState:
             k_W_mK=0.62,
             Pr=5.4,
         ),
+        # P2-16: Step 4 always finalises the shell ID before Step 14 runs.
+        # Test fixtures bypass Step 4, so satisfy the precondition explicitly.
+        shell_id_finalised=True,
     )
     defaults.update(overrides)
     return DesignState(**defaults)

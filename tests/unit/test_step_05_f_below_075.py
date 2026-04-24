@@ -133,73 +133,76 @@ class TestFFactorDomainViolations:
 class TestStep05FBelow075Execute:
     """Integration tests for Step05LMTD.execute() with infeasible temperatures.
 
-    These cases now correctly raise CalculationError since
-    F=0.0 domain violations and infeasible F values (<0.75) must
-    not flow silently through the pipeline.
+    Contract change: execute() no longer raises CalculationError for
+    infeasible F. It returns a StepResult carrying the infeasible F so
+    the Layer 2 rule ``_rule_f_factor_minimum`` (correctable=False)
+    triggers a structured user escalation through
+    ``run_with_layer2_recovery``.
     """
 
     # --- Case 1: Ethanol/Water (F_1=0.0 domain, F_2=0.488) ---
 
     @pytest.mark.asyncio
-    async def test_ethanol_water_raises_calculation_error(self, step):
-        """Step must raise CalculationError for infeasible F-factor."""
+    async def test_ethanol_water_returns_infeasible_f(self, step):
+        """Step returns StepResult with F < 0.75 (no exception)."""
         state = _state(80, 50, 45, 65)
-        with pytest.raises(CalculationError, match="infeasible"):
-            await step.execute(state)
+        result = await step.execute(state)
+        assert result.outputs["F_factor"] < 0.75
+        assert result.outputs["auto_corrected"] is False
 
     @pytest.mark.asyncio
-    async def test_ethanol_water_error_message_has_r_and_p(self, step):
-        """Error message must contain R and P values for diagnostics."""
+    async def test_ethanol_water_warning_has_r_and_p(self, step):
+        """Warning trail must surface diagnostic info for the user."""
         state = _state(80, 50, 45, 65)
-        with pytest.raises(CalculationError) as exc_info:
-            await step.execute(state)
-        msg = str(exc_info.value)
-        assert "R=" in msg
-        assert "P=" in msg
+        result = await step.execute(state)
+        warnings = " ".join(result.warnings).lower()
+        assert "infeasible" in warnings
+        assert result.outputs["R"] is not None
+        assert result.outputs["P"] is not None
 
     @pytest.mark.asyncio
-    async def test_ethanol_water_error_mentions_domain_violation(self, step):
-        """Error message must indicate domain violation for F_1shell=0.0."""
+    async def test_ethanol_water_escalation_hints_populated(self, step):
+        """escalation_hints must be present so Layer 2 can build options."""
         state = _state(80, 50, 45, 65)
-        with pytest.raises(CalculationError) as exc_info:
-            await step.execute(state)
-        assert "domain violation" in str(exc_info.value).lower()
+        result = await step.execute(state)
+        hints = result.outputs.get("escalation_hints") or []
+        assert any(h.get("trigger") == "F_factor_infeasible" for h in hints)
 
     # --- Case 2: Glycol/Water (F_1=0, F_2=0 — both domain violations) ---
 
     @pytest.mark.asyncio
-    async def test_glycol_water_both_shells_raise(self, step):
-        """Glycol/water: both shell configs are domain violations → raises."""
+    async def test_glycol_water_both_shells_infeasible(self, step):
+        """Glycol/water: both shell configs are domain violations."""
         state = _state(60, 30, 25, 50)
-        with pytest.raises(CalculationError, match="infeasible"):
-            await step.execute(state)
+        result = await step.execute(state)
+        assert result.outputs["F_factor"] < 0.75
 
     # --- Case 3: Crude Oil/Water near-temperature-cross ---
 
     @pytest.mark.asyncio
-    async def test_crude_water_near_cross_raises(self, step):
-        """120→60°C crude, 55→90°C water: near temperature cross → raises."""
+    async def test_crude_water_near_cross_infeasible(self, step):
+        """120→60°C crude, 55→90°C water: near temperature cross."""
         state = _state(120, 60, 55, 90)
-        with pytest.raises(CalculationError, match="infeasible"):
-            await step.execute(state)
+        result = await step.execute(state)
+        assert result.outputs["F_factor"] < 0.75
 
     # --- Case 4: DEG/Water (common industrial coolant pair) ---
 
     @pytest.mark.asyncio
-    async def test_deg_water_tight_approach_raises(self, step):
-        """95→55°C DEG, 50→75°C water: F infeasible → raises."""
+    async def test_deg_water_tight_approach_infeasible(self, step):
+        """95→55°C DEG, 50→75°C water: F infeasible."""
         state = _state(95, 55, 50, 75)
-        with pytest.raises(CalculationError, match="infeasible"):
-            await step.execute(state)
+        result = await step.execute(state)
+        assert result.outputs["F_factor"] < 0.75
 
     # --- Case 5: Acetic Acid / Acetic Acid heat recovery ---
 
     @pytest.mark.asyncio
-    async def test_acetic_acid_heat_recovery_raises(self, step):
-        """120→80°C acetic acid, 75→100°C acetic acid: R=1.6, P=0.556 → raises."""
+    async def test_acetic_acid_heat_recovery_infeasible(self, step):
+        """120→80°C acetic acid, 75→100°C acetic acid: R=1.6, P=0.556."""
         state = _state(120, 80, 75, 100)
-        with pytest.raises(CalculationError, match="infeasible"):
-            await step.execute(state)
+        result = await step.execute(state)
+        assert result.outputs["F_factor"] < 0.75
 
 
 # ===========================================================================
@@ -288,8 +291,8 @@ class TestStep05FBelow075PhysicsInvariants:
         assert result.outputs["LMTD_K"] > 0
 
     @pytest.mark.asyncio
-    async def test_infeasible_cases_raise_calculation_error(self, step):
-        """All infeasible cases must raise CalculationError, not flow through."""
+    async def test_infeasible_cases_return_low_f(self, step):
+        """All infeasible cases must surface F<0.75 in outputs (Layer 2 will escalate)."""
         infeasible_cases = [
             (80, 50, 45, 65),   # ethanol/water
             (60, 30, 25, 50),   # glycol/water
@@ -299,8 +302,10 @@ class TestStep05FBelow075PhysicsInvariants:
         ]
         for temps in infeasible_cases:
             s = _state(*temps)
-            with pytest.raises(CalculationError):
-                await step.execute(s)
+            result = await step.execute(s)
+            assert result.outputs["F_factor"] < 0.75, (
+                f"Expected F<0.75 for {temps}, got {result.outputs['F_factor']:.4f}"
+            )
 
     @pytest.mark.asyncio
     async def test_f_factor_in_0_to_1_for_feasible(self, step):
@@ -312,10 +317,9 @@ class TestStep05FBelow075PhysicsInvariants:
 
     @pytest.mark.asyncio
     async def test_temperatures_unchanged_infeasible(self, step):
-        """Step 05 must never modify temps even when it raises."""
+        """Step 05 must never modify input temps on the infeasible path."""
         state = _state(80, 50, 45, 65)
-        with pytest.raises(CalculationError):
-            await step.execute(state)
+        await step.execute(state)
         assert state.T_hot_in_C == 80.0
         assert state.T_hot_out_C == 50.0
         assert state.T_cold_in_C == 45.0
@@ -323,10 +327,9 @@ class TestStep05FBelow075PhysicsInvariants:
 
     @pytest.mark.asyncio
     async def test_q_w_unchanged_infeasible(self, step):
-        """Step 05 must never modify Q_W even when it raises."""
+        """Step 05 must never modify Q_W on the infeasible path."""
         state = _state(80, 50, 45, 65, Q_W=2_500_000.0)
-        with pytest.raises(CalculationError):
-            await step.execute(state)
+        await step.execute(state)
         assert state.Q_W == 2_500_000.0
 
     @pytest.mark.asyncio

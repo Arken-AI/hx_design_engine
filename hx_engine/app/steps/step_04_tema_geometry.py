@@ -14,6 +14,7 @@ Pieces implemented here:
 from __future__ import annotations
 
 import math
+import re
 from typing import TYPE_CHECKING
 
 from hx_engine.app.core.exceptions import CalculationError
@@ -27,7 +28,11 @@ from hx_engine.app.data.fouling_factors import (
     is_location_dependent,
     resolve_fouling_factor,
 )
-from hx_engine.app.data.tema_tables import find_shell_diameter, get_tube_count
+from hx_engine.app.data.tema_tables import (
+    find_shell_diameter,
+    get_bundle_to_shell_clearance_m,
+    get_tube_count,
+)
 from hx_engine.app.data.u_assumptions import classify_fluid_type, get_U_assumption
 from hx_engine.app.models.design_state import FluidProperties, GeometrySpec
 from hx_engine.app.models.step_result import AIModeEnum, StepResult
@@ -41,14 +46,20 @@ if TYPE_CHECKING:
 # Valid TEMA types (Phase 1)
 # ---------------------------------------------------------------------------
 
-VALID_TEMA_TYPES = {"BEM", "AES", "AEP", "AEU", "AEL", "AEW"}
+# AEL (lantern-ring floating head, low-fin tubes) intentionally excluded:
+# no selection path produces it and no downstream geometry support exists
+# (low-fin tubes / fin efficiency). Deferred to Phase 2 alongside P3-30.
+VALID_TEMA_TYPES = frozenset({"BEM", "AES", "AEP", "AEU", "AEW"})
 
 # Pressure threshold for high-pressure rule (Pa)
 _HIGH_PRESSURE_PA = 30e5  # 30 bar
 _VERY_HIGH_PRESSURE_PA = 70e5  # 70 bar
 
-# Temperature difference threshold for thermal expansion
-_DT_EXPANSION_THRESHOLD = 50.0  # °C
+# P2-14 — thermal-expansion threshold is interpreted as the **tubesheet
+# differential** (|T_shell_mean − T_tube_mean|), not the four-temperature
+# stream span. 50 K matches Serth §3 / TEMA Table RGP-G-7 fixed-tubesheet
+# practice (no expansion joint required up to ~50–60 K differential).
+_DT_EXPANSION_THRESHOLD = 50.0  # K, tubesheet differential
 
 # Fluids that should go shell-side with floating-head (AES/AEU) geometry
 # for mechanical cleaning access — standard refinery practice
@@ -57,6 +68,151 @@ _SHELL_SIDE_CRUDE_OILS = {"crude oil", "crude", "heavy hydrocarbon", "heavy hydr
 # Duty thresholds for warnings
 _SMALL_DUTY_W = 50_000       # 50 kW
 _LARGE_DUTY_W = 50_000_000   # 50 MW
+
+# P2-15 — Length-to-shell-diameter ratio bands.
+# Inside [5, 10] is the engineering sweet spot for shell-and-tube units.
+# WARN bands flag economically suboptimal proportions; the ESCALATE
+# extremes (3, 15) are enforced via Layer 2 rule
+# `_rule_ld_ratio_within_extremes` and surface as user decisions.
+LD_RATIO_LOW_WARN: float = 5.0
+LD_RATIO_HIGH_WARN: float = 10.0
+LD_RATIO_LOW_ESCALATE: float = 3.0
+LD_RATIO_HIGH_ESCALATE: float = 15.0
+
+
+# ---------------------------------------------------------------------------
+# P2-12 — Toxic-fluid keyword sets and helpers
+# ---------------------------------------------------------------------------
+# Tube-side allocation for toxic streams keeps any leak inside the tube
+# bundle (easier to isolate and replace than a leaking shell).
+# Sources: API 660 §6.4, NACE MR0175, Perry §10.
+_TOXIC_KEYWORDS = frozenset({
+    "h2s", "hydrogen sulfide", "sour",
+    "chlorine", "cl2",
+    "ammonia", "nh3",
+    "phosgene",
+    "hcn", "hydrogen cyanide", "cyanide",
+    "hf", "hydrogen fluoride",
+    "benzene",
+    "co", "carbon monoxide",
+})
+
+# Subset that triggers double-tubesheet evaluation in Step 14.
+_HIGHLY_TOXIC_KEYWORDS = frozenset({
+    "phosgene",
+    "hcn", "hydrogen cyanide", "cyanide",
+    "hf", "hydrogen fluoride",
+    "chlorine", "cl2",
+})
+
+
+def _keyword_matches(name: str | None, keywords) -> bool:
+    """Word-boundary keyword match against a fluid name.
+
+    Uses ``\\b`` so short tokens (``co``, ``hf``, ``h2s``) don't trigger
+    false positives on substrings like ``carbon dioxide``, ``H2SO4``, or
+    ``ethylene glycol``.  Multi-word keywords still match because ``\\b``
+    surrounds the whole phrase.
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    for kw in keywords:
+        if re.search(rf"\b{re.escape(kw)}\b", lowered):
+            return True
+    return False
+
+
+def _is_toxic(name: str | None) -> bool:
+    return _keyword_matches(name, _TOXIC_KEYWORDS)
+
+
+def _is_highly_toxic(name: str | None) -> bool:
+    return _keyword_matches(name, _HIGHLY_TOXIC_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# P2-11 — Corrosive-fluid keyword set, severity ranking, and helpers
+# ---------------------------------------------------------------------------
+# Corrosive streams go tube-side so the (typically more expensive)
+# corrosion-resistant alloy is required only for tubes, not the shell.
+# Sources: TEMA RGP-RCB, Serth §3, NACE MR0175.
+_CORROSIVE_KEYWORDS = frozenset({
+    "acid", "caustic", "corrosive",
+    "hf", "hydrogen fluoride", "phosgene",
+    "hcl", "hydrochloric",
+    "h2so4", "sulfuric",
+    "hno3", "nitric",
+    "chloride",
+})
+
+# Ordered most → least aggressive (used to pick which side goes tube
+# when both streams are corrosive). Lower index = more aggressive.
+# Each inner frozenset is a synonym group — all members share the same rank
+# so "hf" and "hydrogen fluoride" are treated identically.
+# Sources: NACE MR0175, Perry §23, ASTM G31.
+_CORROSIVE_SEVERITY_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"hf", "hydrogen fluoride"}),   # extreme — SCC + tube failure risk
+    frozenset({"phosgene"}),                  # extreme + toxic
+    frozenset({"hcl", "hydrochloric"}),       # halide acid
+    frozenset({"h2so4", "sulfuric"}),         # strong acid
+    frozenset({"hno3", "nitric"}),            # oxidising acid
+    frozenset({"chloride"}),                  # SCC risk for SS
+    frozenset({"caustic"}),                   # NaOH / KOH
+    frozenset({"acid"}),                      # generic acid catch-all
+    frozenset({"corrosive"}),                 # generic catch-all
+)
+
+
+def _is_corrosive(name: str | None) -> bool:
+    return _keyword_matches(name, _CORROSIVE_KEYWORDS)
+
+
+def _corrosive_severity_rank(name: str | None) -> int:
+    """Return severity group index (lower = more aggressive).
+
+    Returns ``len(_CORROSIVE_SEVERITY_GROUPS)`` when no keyword matches.
+    All synonyms within a group share the same rank.
+    """
+    if not name:
+        return len(_CORROSIVE_SEVERITY_GROUPS)
+    lowered = name.lower()
+    for idx, group in enumerate(_CORROSIVE_SEVERITY_GROUPS):
+        for keyword in group:
+            if re.search(rf"\b{re.escape(keyword)}\b", lowered):
+                return idx
+    return len(_CORROSIVE_SEVERITY_GROUPS)
+
+
+def _compute_tubesheet_differential(
+    state: "DesignState", shell_side: str,
+) -> tuple[float, float, str]:
+    """Return ``(delta_T_tubesheet_K, stream_span_K, basis)`` (P2-14).
+
+    The tubesheet differential ``|T_shell_mean − T_tube_mean|`` drives
+    the thermal-expansion / floating-head decision. The four-temperature
+    stream span is retained for informational display only.
+    Falls back to the span when temperatures are incomplete.
+    """
+    temps = [
+        state.T_hot_in_C, state.T_hot_out_C,
+        state.T_cold_in_C, state.T_cold_out_C,
+    ]
+    temps = [t for t in temps if t is not None]
+    span = max(temps) - min(temps) if len(temps) >= 2 else 0.0
+
+    if (
+        state.T_hot_in_C is not None and state.T_hot_out_C is not None
+        and state.T_cold_in_C is not None and state.T_cold_out_C is not None
+    ):
+        T_hot_mean = 0.5 * (state.T_hot_in_C + state.T_hot_out_C)
+        T_cold_mean = 0.5 * (state.T_cold_in_C + state.T_cold_out_C)
+        if shell_side == "hot":
+            T_shell_mean, T_tube_mean = T_hot_mean, T_cold_mean
+        else:
+            T_shell_mean, T_tube_mean = T_cold_mean, T_hot_mean
+        return abs(T_shell_mean - T_tube_mean), span, "tubesheet_differential"
+    return span, span, "stream_span_fallback"
 
 
 # ===================================================================
@@ -85,6 +241,101 @@ def _allocate_fluids(state: "DesignState") -> tuple[str, list[str]]:
             return "cold", warnings  # hot on tube → cold on shell
         if "cold" in state.tema_preference.lower():
             return "hot", warnings  # cold on tube → hot on shell
+
+    # --- Rules 1a / 1b: Safety-driven allocation (toxic > corrosive) ---
+    # Documented precedence (highest → lowest):
+    #   toxic > corrosive > high-pressure > crude/floating > fouling > viscous > default
+    # Toxic and corrosive both override high pressure because containment /
+    # alloy cost dominates the design once safety boundaries are crossed.
+    hot_toxic = _is_toxic(state.hot_fluid_name)
+    cold_toxic = _is_toxic(state.cold_fluid_name)
+    hot_corrosive = _is_corrosive(state.hot_fluid_name)
+    cold_corrosive = _is_corrosive(state.cold_fluid_name)
+
+    if hot_toxic or cold_toxic:
+        if hot_toxic and not cold_toxic:
+            tube_side = "hot"
+            reason = f"toxic hot fluid '{state.hot_fluid_name}' \u2192 tube-side (containment)"
+        elif cold_toxic and not hot_toxic:
+            tube_side = "cold"
+            reason = f"toxic cold fluid '{state.cold_fluid_name}' \u2192 tube-side (containment)"
+        else:
+            # Both toxic — prefer the more hazardous stream (highly toxic) to tubes.
+            # If both or neither qualify as highly toxic, fall back to higher pressure.
+            hot_highly = _is_highly_toxic(state.hot_fluid_name)
+            cold_highly = _is_highly_toxic(state.cold_fluid_name)
+            if hot_highly and not cold_highly:
+                tube_side = "hot"
+                reason = (
+                    f"both streams toxic; '{state.hot_fluid_name}' is highly toxic "
+                    f"\u2192 tube-side (stricter containment)"
+                )
+            elif cold_highly and not hot_highly:
+                tube_side = "cold"
+                reason = (
+                    f"both streams toxic; '{state.cold_fluid_name}' is highly toxic "
+                    f"\u2192 tube-side (stricter containment)"
+                )
+            else:
+                tube_side = "hot" if (state.P_hot_Pa or 0) >= (state.P_cold_Pa or 0) else "cold"
+                reason = "both streams equally toxic; higher-pressure side \u2192 tube-side"
+            warnings.append(
+                "Both streams flagged toxic \u2014 review allocation manually; "
+                "consider exotic alloy on both sides."
+            )
+        # Highly toxic service \u2192 flag double-tubesheet review for Step 14.
+        if _is_highly_toxic(state.hot_fluid_name) or _is_highly_toxic(state.cold_fluid_name):
+            state.requires_double_tubesheet_review = True
+            warnings.append(
+                "Highly toxic service \u2014 Step 14 will recommend double-tubesheet "
+                "construction for leak isolation."
+            )
+        shell_side = "cold" if tube_side == "hot" else "hot"
+        warnings.insert(0, f"Fluid allocation: {tube_side} fluid \u2192 tube-side ({reason})")
+        return shell_side, warnings
+
+    if hot_corrosive or cold_corrosive:
+        if hot_corrosive and not cold_corrosive:
+            tube_side = "hot"
+            reason = (
+                f"corrosive hot fluid '{state.hot_fluid_name}' \u2192 tube-side "
+                f"(corrosion-resistant alloy on tubes only)"
+            )
+        elif cold_corrosive and not hot_corrosive:
+            tube_side = "cold"
+            reason = (
+                f"corrosive cold fluid '{state.cold_fluid_name}' \u2192 tube-side "
+                f"(corrosion-resistant alloy on tubes only)"
+            )
+        else:
+            # Both corrosive — route the more aggressive stream to tubes.
+            hot_rank = _corrosive_severity_rank(state.hot_fluid_name)
+            cold_rank = _corrosive_severity_rank(state.cold_fluid_name)
+            if hot_rank == cold_rank:
+                tube_side = "hot" if (state.P_hot_Pa or 0) >= (state.P_cold_Pa or 0) else "cold"
+                reason = (
+                    "both streams corrosive with equal severity rank; "
+                    "higher-pressure side \u2192 tube-side"
+                )
+                warnings.append(
+                    "Both streams corrosive at the same severity rank \u2014 "
+                    "consider exotic alloy on both sides."
+                )
+            elif hot_rank < cold_rank:
+                tube_side = "hot"
+                reason = (
+                    f"both streams corrosive; '{state.hot_fluid_name}' is more "
+                    f"aggressive \u2192 tube-side"
+                )
+            else:
+                tube_side = "cold"
+                reason = (
+                    f"both streams corrosive; '{state.cold_fluid_name}' is more "
+                    f"aggressive \u2192 tube-side"
+                )
+        shell_side = "cold" if tube_side == "hot" else "hot"
+        warnings.insert(0, f"Fluid allocation: {tube_side} fluid \u2192 tube-side ({reason})")
+        return shell_side, warnings
 
     # Gather data
     P_hot = state.P_hot_Pa or 101325
@@ -229,13 +480,17 @@ def _select_tema_type(
     """
     warnings: list[str] = []
 
-    # Compute max ΔT between streams
-    temps = [
-        state.T_hot_in_C, state.T_hot_out_C,
-        state.T_cold_in_C, state.T_cold_out_C,
-    ]
-    temps = [t for t in temps if t is not None]
-    delta_T_max = max(temps) - min(temps) if len(temps) >= 2 else 0.0
+    # P2-14 — tubesheet differential drives the expansion / floating-head decision.
+    delta_T_tubesheet_K, _, expansion_decision_basis = _compute_tubesheet_differential(
+        state, shell_side,
+    )
+    if expansion_decision_basis == "stream_span_fallback":
+        warnings.append(
+            "Tubesheet differential could not be computed (incomplete "
+            "temperatures) \u2014 falling back to stream temperature span "
+            "for the expansion decision."
+        )
+    delta_T_for_expansion = delta_T_tubesheet_K
 
     Q_W = state.Q_W or 0.0
 
@@ -282,9 +537,9 @@ def _select_tema_type(
         if pref_upper in VALID_TEMA_TYPES:
             user_override = True
             # Warn if it conflicts with physics
-            if pref_upper == "BEM" and delta_T_max > _DT_EXPANSION_THRESHOLD:
+            if pref_upper == "BEM" and delta_T_for_expansion > _DT_EXPANSION_THRESHOLD:
                 warnings.append(
-                    f"User requested BEM but ΔT={delta_T_max:.0f}°C > "
+                    f"User requested BEM but tubesheet ΔT={delta_T_for_expansion:.0f}°C > "
                     f"{_DT_EXPANSION_THRESHOLD}°C. Fixed tubesheet risks "
                     f"thermal stress damage. Consider AES or AEU instead."
                 )
@@ -297,13 +552,13 @@ def _select_tema_type(
 
     if not user_override:
         # Decision tree
-        needs_expansion = delta_T_max > _DT_EXPANSION_THRESHOLD
+        needs_expansion = delta_T_for_expansion > _DT_EXPANSION_THRESHOLD
 
         if needs_expansion:
             if max_pressure > _VERY_HIGH_PRESSURE_PA:
                 tema_type = "AEW"
                 reasoning = (
-                    f"ΔT={delta_T_max:.0f}°C requires expansion compensation; "
+                    f"tubesheet ΔT={delta_T_for_expansion:.0f}°C requires expansion compensation; "
                     f"P={max_pressure/1e5:.0f} bar requires externally sealed "
                     f"floating head → AEW"
                 )
@@ -315,14 +570,14 @@ def _select_tema_type(
                 # Both sides genuinely clean and no crude/heavy oil — U-tube cheapest
                 tema_type = "AEU"
                 reasoning = (
-                    f"ΔT={delta_T_max:.0f}°C requires expansion compensation; "
+                    f"tubesheet ΔT={delta_T_for_expansion:.0f}°C requires expansion compensation; "
                     f"both fluids clean/moderate → U-tube (AEU) cheapest option"
                 )
             else:
                 # Shell fouls, or shell-side is crude/heavy oil (industry standard = AES)
                 tema_type = "AES"
                 reasoning = (
-                    f"ΔT={delta_T_max:.0f}°C requires expansion compensation; "
+                    f"tubesheet ΔT={delta_T_for_expansion:.0f}°C requires expansion compensation; "
                     f"shell-side fluid '{shell_fluid}' ({shell_fouling}) → "
                     f"floating head AES for bundle removal and mechanical cleaning"
                 )
@@ -335,7 +590,7 @@ def _select_tema_type(
             if both_clean:
                 tema_type = "BEM"
                 reasoning = (
-                    f"ΔT={delta_T_max:.0f}°C ≤ {_DT_EXPANSION_THRESHOLD}°C "
+                    f"tubesheet ΔT={delta_T_for_expansion:.0f}°C ≤ {_DT_EXPANSION_THRESHOLD}°C "
                     f"and both fluids clean → fixed tubesheet BEM (cheapest)"
                 )
             else:
@@ -347,14 +602,14 @@ def _select_tema_type(
                 if heavy_fouling:
                     tema_type = "AES"
                     reasoning = (
-                        f"ΔT={delta_T_max:.0f}°C allows fixed tubesheet but "
+                        f"tubesheet ΔT={delta_T_for_expansion:.0f}°C allows fixed tubesheet but "
                         f"fouling ({tube_fouling}/{shell_fouling}) requires "
                         f"full tube access → AES floating head"
                     )
                 else:
                     tema_type = "AEP"
                     reasoning = (
-                        f"ΔT={delta_T_max:.0f}°C ≤ {_DT_EXPANSION_THRESHOLD}°C; "
+                        f"tubesheet ΔT={delta_T_for_expansion:.0f}°C ≤ {_DT_EXPANSION_THRESHOLD}°C; "
                         f"moderate fouling ({tube_fouling}/{shell_fouling}) → "
                         f"outside packed floating head AEP for easier maintenance"
                     )
@@ -393,10 +648,9 @@ def _select_tema_type(
             "cleaning access on shell-side."
         )
 
-    # Corrosive fluid note
+    # Corrosive fluid note (shares _is_corrosive — single source of truth per P2-11)
     for fluid_name in (state.hot_fluid_name, state.cold_fluid_name):
-        name_lower = (fluid_name or "").lower()
-        if any(kw in name_lower for kw in ("acid", "caustic", "corrosive")):
+        if _is_corrosive(fluid_name):
             warnings.append(
                 f"Fluid '{fluid_name}' may be corrosive — verify tube/shell "
                 f"material selection (exotic alloy may be needed for tubes)."
@@ -831,12 +1085,24 @@ class Step04TEMAGeometry(BaseStep):
         shell_side, alloc_warnings = _allocate_fluids(state)
         all_warnings.extend(alloc_warnings)
 
+        # --- P2-14: tubesheet differential (post-allocation, exposed to UI) ---
+        delta_T_tubesheet_K, stream_temperature_span_K, expansion_decision_basis = (
+            _compute_tubesheet_differential(state, shell_side)
+        )
+
         # --- TEMA type selection (Piece 5) ---
         # If the correction loop has already applied an AI override for tema_type,
         # skip the deterministic decision tree — using it would re-select the
         # original type and undo the correction, causing an infinite loop.
         if "tema_type" in state.applied_corrections:
-            tema_type = state.applied_corrections["tema_type"]
+            corrected = state.applied_corrections["tema_type"]
+            if corrected not in VALID_TEMA_TYPES:
+                raise CalculationError(
+                    4,
+                    f"Invalid tema_type correction '{corrected}'; "
+                    f"supported types: {sorted(VALID_TEMA_TYPES)}",
+                )
+            tema_type = corrected
             reasoning = f"AI correction override: {tema_type}"
             type_warnings = []
         else:
@@ -913,10 +1179,48 @@ class Step04TEMAGeometry(BaseStep):
             else:
                 fouling_metadata[side_label] = table_info
 
-        # --- FE-4: shell_id_finalised flag ---
-        # Floating-head types (AES/AEU) need a +50-75mm clearance applied in
-        # Step 15 before the shell ID is final. Fixed-tubesheet types are fine.
-        state.shell_id_finalised = tema_type not in ("AES", "AEU")
+        # --- P2-16: finalise shell ID by adding bundle-to-shell clearance ---
+        # The initial shell diameter from `_select_initial_geometry` is the
+        # bundle envelope from TEMA tube-count tables.  Adding the per-TEMA
+        # diametral clearance produces the final shell ID used by every
+        # downstream step (Bell-Delaware crossflow area, ΔP, mechanical
+        # sizing, cost).  Always set the flag so Step 14 can assert it.
+        shell_id_initial_m = geometry.shell_diameter_m
+        bundle_to_shell_clearance_m = get_bundle_to_shell_clearance_m(tema_type)
+        if shell_id_initial_m is not None:
+            geometry.shell_diameter_m = (
+                shell_id_initial_m + bundle_to_shell_clearance_m
+            )
+        shell_id_final_m = geometry.shell_diameter_m
+        state.shell_id_finalised = True
+        if bundle_to_shell_clearance_m > 0 and shell_id_initial_m is not None:
+            all_warnings.append(
+                f"Shell ID finalised: {shell_id_initial_m * 1000:.0f} mm "
+                f"+ {bundle_to_shell_clearance_m * 1000:.0f} mm "
+                f"bundle-to-shell clearance ({tema_type}) "
+                f"\u2192 {shell_id_final_m * 1000:.0f} mm"
+            )
+
+        # --- P2-15: length / shell-diameter ratio + WARN bands ---
+        LD_ratio: float | None = None
+        if (
+            geometry.tube_length_m is not None
+            and geometry.shell_diameter_m
+            and geometry.shell_diameter_m > 0
+        ):
+            LD_ratio = geometry.tube_length_m / geometry.shell_diameter_m
+            if LD_ratio < LD_RATIO_LOW_WARN:
+                all_warnings.append(
+                    f"L/D={LD_ratio:.2f} below {LD_RATIO_LOW_WARN} "
+                    f"\u2014 short, wide bundle is economically suboptimal; "
+                    f"consider lengthening tubes or fewer parallel passes."
+                )
+            elif LD_ratio > LD_RATIO_HIGH_WARN:
+                all_warnings.append(
+                    f"L/D={LD_ratio:.2f} above {LD_RATIO_HIGH_WARN} "
+                    f"\u2014 long, slender bundle increases vibration risk and "
+                    f"plot-plan footprint; consider larger shell or shorter tubes."
+                )
 
         # --- FE-2: Rf lower-bound warning ---
         # When tube-side Rf equals the TEMA lower bound AND tube-side fluid
@@ -987,6 +1291,16 @@ class Step04TEMAGeometry(BaseStep):
             "R_f_hot_m2KW": fouling_metadata.get("hot", {}).get("rf"),
             "R_f_cold_m2KW": fouling_metadata.get("cold", {}).get("rf"),
             "shell_id_finalised": state.shell_id_finalised,
+            "shell_id_initial_m": shell_id_initial_m,
+            "bundle_to_shell_clearance_m": bundle_to_shell_clearance_m,
+            "shell_id_final_m": shell_id_final_m,
+            "LD_ratio": LD_ratio,
+            "delta_T_tubesheet_K": delta_T_tubesheet_K,
+            "stream_temperature_span_K": stream_temperature_span_K,
+            "expansion_decision_basis": expansion_decision_basis,
+            "requires_double_tubesheet_review": getattr(
+                state, "requires_double_tubesheet_review", False,
+            ),
         }
 
         return StepResult(

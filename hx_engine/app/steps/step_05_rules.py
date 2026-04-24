@@ -69,10 +69,21 @@ def _rule_f_factor_maximum(
 # R4 — R must be positive
 # ---------------------------------------------------------------------------
 
+def _is_isothermal_bypass(result: StepResult) -> bool:
+    """True when Step 5 short-circuited due to isothermal phase change.
+
+    Isothermal sides produce R=0 or P=1 by construction; the R/P rules
+    must not treat those values as physics violations.
+    """
+    return result.outputs.get("f_factor_basis") == "isothermal_phase_change"
+
+
 def _rule_R_positive(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """R must be > 0 for valid heat exchange."""
+    """R must be > 0 for valid heat exchange (skipped for isothermal service)."""
+    if _is_isothermal_bypass(result):
+        return True, None
     val = result.outputs.get("R")
     if val is not None and val <= 0:
         return False, (
@@ -88,7 +99,9 @@ def _rule_R_positive(
 def _rule_P_in_range(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
-    """P must be in (0, 1) — P >= 1 violates the second law."""
+    """P must be in (0, 1) — skipped for isothermal phase-change service."""
+    if _is_isothermal_bypass(result):
+        return True, None
     val = result.outputs.get("P")
     if val is not None:
         if val <= 0 or val >= 1:
@@ -105,7 +118,9 @@ def _rule_P_in_range(
 def register_step5_rules() -> None:
     """Register all Layer 2 rules for step_id=5."""
     register_rule(5, _rule_lmtd_positive)
-    register_rule(5, _rule_f_factor_minimum)
+    # F below 0.75 is a thermodynamic infeasibility, not a correctable
+    # AI geometry error — route straight to the user via ESCALATE.
+    register_rule(5, _rule_f_factor_minimum, correctable=False)
     register_rule(5, _rule_f_factor_maximum)
     register_rule(5, _rule_R_positive)
     register_rule(5, _rule_P_in_range)

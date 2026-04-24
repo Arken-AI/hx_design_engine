@@ -1,171 +1,179 @@
-# HX Design Engine
+# ARKEN AI — HX Design Engine
 
-ARKEN AI — a computational engineering platform for designing industrial shell-and-tube heat exchangers. Users describe their problem in natural language; the engine performs all engineering calculations, validates every result with AI engineering judgment, and returns a complete, fabrication-ready design with full reasoning transparency at every step.
+FastAPI microservice implementing the 16-step shell-and-tube heat exchanger design pipeline. Combines deterministic engineering calculations (Bell-Delaware, Gnielinski, TEMA standards) with bounded AI review (Claude Sonnet 4.6) to produce fully audited designs with real-time SSE streaming.
 
-> Deterministic calculation + bounded AI judgment + hard rule safety net + user escalation.
+**Port:** `8100`  
+**Current status:** Steps 1–9 live; Steps 10–16 in development (required to complete MVP)
 
-## What It Does
+---
 
-**Design Mode (Sizing):** User knows process conditions; system determines geometry.
-**Rating Mode (Performance Check):** User knows conditions and geometry; system checks if it works.
+## Overview
 
-**Inputs:** Fluid identities, flow rates (kg/s), inlet/outlet temperatures, pressures, material preferences, TEMA class, constraints.
+The HX Engine is the engineering core of ARKEN. It:
 
-**Outputs:** Complete geometry, thermal performance (U, Q, LMTD, overdesign %), pressure drops, vibration safety, mechanical design, cost estimate, confidence score (0.0–1.0), step-by-step reasoning.
+1. Receives validated process conditions from the Backend via `POST /api/v1/hx/design`
+2. Runs a sequential 16-step pipeline — each step follows the same 4-layer pattern:
+   - **Layer 1** — Deterministic calculation (pure Python, no AI)
+   - **Layer 2** — Hard-rule validation (TEMA/ASME limits; AI cannot override)
+   - **Layer 3** — AI Senior Engineer review (single Claude call: PROCEED / CORRECT / WARN / ESCALATE)
+   - **Layer 4** — DesignState accumulation
+3. Streams 8 SSE event types live to the browser as each step executes
+4. Persists session state in Redis (24-hour TTL) with an in-memory fallback
 
-## Phase Support
+---
 
-**Phase 1 scope: single-phase liquids only.**
+## Pipeline Steps
 
-| Phase | Supported | Notes |
+| Step | Name | Status |
 |---|---|---|
-| Liquid | Yes | Density 50–2000 kg/m³ — full pipeline |
-| Vapour / Gas | No | Density < 50 kg/m³ rejected at Step 3 validation |
-| Two-phase | No | Escalated at Step 1; deferred to Phase 2 |
+| 1 | Parse & Validate Requirements | ✅ Live |
+| 2 | Calculate Heat Duty | ✅ Live |
+| 3 | Fluid Properties (5-backend priority chain) | ✅ Live |
+| 4 | TEMA Type & Geometry Selection | ✅ Live |
+| 5 | LMTD & F-Factor | ✅ Live |
+| 6 | Initial U Estimate (table lookup) | ✅ Live |
+| 7 | Tube-Side Heat Transfer (Gnielinski) | ✅ Live |
+| 8 | Shell-Side Heat Transfer (Bell-Delaware) | ✅ Live |
+| 9 | Overall Heat Transfer Coefficient + Kern cross-check | ✅ Live |
+| 10 | Pressure Drops (tube-side + shell-side) | ⬜ Planned |
+| 11 | Area + Overdesign % | ⬜ Planned |
+| 12 | Convergence Loop (Steps 7–11, ΔU < 1%) | ⬜ Planned |
+| 13 | Vibration Safety (5 mechanisms) | ⬜ Planned |
+| 14 | Mechanical Design (ASME VIII) | ⬜ Planned |
+| 15 | Cost Estimate (Turton + CEPCI 2026) | ⬜ Planned |
+| 16 | Final Validation + Confidence Score | ⬜ Planned |
 
-## Architecture
+---
 
-The engine follows a **fat skill, thin harness** design:
-
-- **Thin harness** — FastAPI routers (~500 LOC) accept HTTP requests, create a session, and delegate to the pipeline runner. Zero calculation logic.
-- **Fat skill** — The pipeline (~20,000 LOC) runs a 16-step deterministic calculation engine, hard validation rules, and bounded Claude AI review per step.
-
-Every step passes through four layers:
-
-1. **Deterministic calculation** — pure Python engineering math (Bell-Delaware, Gnielinski, ASME, etc.)
-2. **Hard rule validation** — engineering limits checked before AI review; AI cannot override
-3. **Bounded AI review** — single Claude API call per step; can only proceed / correct / warn / escalate
-4. **Design state** — Pydantic model accumulates outputs, corrections, warnings, and confidence across all steps
-
-```
-hx_engine/app/
-├── routers/          # Thin harness — HTTP routes only
-├── core/             # Pipeline runner, AI engineer, validation rules
-├── steps/            # 16 step implementations (pure calculation functions)
-├── correlations/     # Bell-Delaware, TEMA vibration, ASME thickness, etc.
-├── data/             # TEMA tables, fouling factors, material properties
-├── adapters/         # CoolProp / IAPWS wrapper, unit conversions
-└── models/           # DesignState, StepResult, AIReview
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Web framework | FastAPI + Uvicorn |
-| Data validation | Pydantic v2 |
-| AI review | Anthropic Claude (via `anthropic` SDK) |
-| Session state | Redis |
-| Fouling cache | MongoDB (optional) |
-| Streaming | Server-Sent Events (sse-starlette) |
-| Thermo properties | CoolProp, IAPWS, thermo (optional) |
-| Python | ≥ 3.11 |
-
-## Installation
-
-### Prerequisites
+## Prerequisites
 
 - Python 3.11+
-- Redis
-- MongoDB (optional — fouling factor cache)
-- Anthropic API key
+- Redis 7 (session state)
+- MongoDB 7 (optional — fouling factor cache)
+- Anthropic API key (Claude Sonnet 4.6)
 
-### Setup
+---
+
+## Quick Start
 
 ```bash
-# Create and activate virtual environment
+cd hx_design_engine
 python3.11 -m venv venv
 source venv/bin/activate
-
-# Install with thermo libraries (recommended)
-pip install ".[thermo]"
-
-# Or core only
-pip install .
-
-# Dev / testing extras
-pip install ".[dev]"
-```
-
-### Environment Variables
-
-```bash
+pip install ".[thermo,dev]"   # includes CoolProp, IAPWS, thermo
 cp .env.example .env
-```
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `HX_ANTHROPIC_API_KEY` | Yes | — | Anthropic API key for Claude |
-| `HX_REDIS_URL` | Yes | `redis://localhost:6379/0` | Redis connection URL |
-| `HX_MONGODB_URI` | No | — | MongoDB connection string |
-| `HX_MONGODB_DB_NAME` | No | `arken_process_db` | MongoDB database name |
-| `HX_HOST` | No | `0.0.0.0` | Bind address |
-| `HX_PORT` | No | `8100` | Port |
-| `HX_DEBUG` | No | `false` | Debug mode |
-| `HX_LOG_LEVEL` | No | `INFO` | Logging level |
-
-### Start Redis
-
-```bash
-# macOS
-brew services start redis
-
-# Linux
-sudo systemctl start redis
-
-# Docker
-docker run -d --name redis -p 6379:6379 redis:7-alpine
-```
-
-### Start MongoDB (optional)
-
-```bash
-docker run -d --name mongo \
-  -p 27017:27017 \
-  -e MONGO_INITDB_ROOT_USERNAME=admin \
-  -e MONGO_INITDB_ROOT_PASSWORD=admin \
-  mongo:7
-```
-
-## Running
-
-```bash
+# Edit .env — set HX_ANTHROPIC_API_KEY and HX_REDIS_URL
 uvicorn hx_engine.app.main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
-### Docker
+API available at **http://localhost:8100**  
+Swagger UI: **http://localhost:8100/docs**  
+Health check: `GET /health`
 
-```bash
-docker build -t hx-design-engine .
-docker run -d --name hx-engine \
-  -p 8100:8100 \
-  --env-file .env \
-  hx-design-engine
-```
+---
 
-## API
+## Environment Variables
 
-Base URL: `http://localhost:8100`
-
-| Endpoint | Method | Description |
+| Variable | Required | Description |
 |---|---|---|
-| `/health` | GET | Health check |
-| `/docs` | GET | Swagger UI |
-| `/api/v1/hx/validate` | POST | Validate requirements before design |
-| `/api/v1/hx/design` | POST | Start a design session |
-| `/api/v1/hx/design/{session_id}/status` | GET | Poll session status |
-| `/api/v1/hx/design/{session_id}/respond` | POST | Respond to an AI escalation |
-| `/api/v1/hx/stream/{session_id}` | GET | SSE stream of step-by-step results |
+| `HX_ANTHROPIC_API_KEY` | Yes | Claude Sonnet 4.6 API key |
+| `HX_REDIS_URL` | Yes | Redis URL (default: `redis://localhost:6379/0`) |
+| `HX_MONGODB_URI` | No | MongoDB connection string |
+| `HX_MONGODB_DB_NAME` | No | Database name (default: `arken_process_db`) |
+| `HX_INTERNAL_SECRET` | Yes | Shared secret for Backend → HX Engine auth |
+| `HX_AI_MODEL` | No | Claude model name (default: `claude-sonnet-4-6`) |
+| `HX_HOST` | No | Bind address (default: `0.0.0.0`) |
+| `HX_PORT` | No | Port (default: `8100`) |
+| `HX_DEBUG` | No | Debug mode (default: `false`) |
+| `HX_LOG_LEVEL` | No | Log level (default: `INFO`) |
 
-## Tests
+---
 
-```bash
-pytest
+## Project Structure
+
+```
+hx_engine/app/
+├── main.py                   # FastAPI app, lifespan, middleware
+├── config.py                 # Pydantic settings
+├── api/
+│   └── hx_routes.py          # POST /requirements, POST /design,
+│                             #   GET /design/{id}/stream, GET /design/{id}/status,
+│                             #   POST /design/{id}/respond
+├── core/
+│   ├── pipeline_runner.py    # Outer loop: step execution, SSE emission, ESCALATE handling
+│   ├── ai_engineer.py        # Claude API client — single call per step, 3 retries
+│   └── session_store.py      # Redis-backed DesignState persistence (+ in-memory fallback)
+├── steps/
+│   ├── base.py               # BaseStep: run_with_review_loop() — 4-layer pattern
+│   ├── step_01_*.py … step_09_*.py   # One file per implemented step
+│   └── registry.py           # Step registry: maps step_id → class
+├── models/
+│   ├── design_state.py       # DesignState Pydantic model (~457 fields)
+│   └── events.py             # SSE event models (8 types)
+├── correlations/
+│   ├── bell_delaware.py      # Shell-side h (Taborek 1983)
+│   └── gnielinski.py         # Tube-side h (turbulent + laminar)
+├── adapters/
+│   ├── thermo_adapter.py     # Fluid property dispatcher (5-backend chain)
+│   └── petroleum_correlations.py  # API gravity-based mixture correlations
+├── data/
+│   ├── u_assumptions.py      # Initial U lookup (Perry's / Serth)
+│   ├── fouling_factors.py    # TEMA fouling factors
+│   ├── tema_tables.py        # TEMA tube count tables
+│   └── bwg_gauge.py          # BWG tube gauge data
+└── prompts/
+    └── ai_prompts.py         # Base prompt + 16 step-specific prompts
 ```
 
-## Design Constraints
+---
 
-- Calculation accuracy target: match HTRI/textbook benchmarks (Serth Example 5.1 ±5% on U, ±10% on dP)
-- AI is bounded — deterministic calculation and hard rule validation always run before AI review
-- AI cannot override hard engineering limits
-- Phase 1 scope: single-phase liquids only (ρ = 50–2000 kg/m³)
+## Key Engineering Decisions
+
+**Bell-Delaware is always primary.** Kern is a cross-check only. Deviation ≤15% → PROCEED; 15–30% → WARN; >30% → ESCALATE. The lower U is never auto-selected.
+
+**Fluid property priority chain:**  
+`iapws` → `CoolProp` → `Petroleum correlations` → `Specialty fits` → `thermo`  
+Petroleum correlations (API gravity-based) precede `thermo` because `thermo`'s `Chemical` class returns silently wrong values for multi-component mixtures like crude oil.
+
+**AI review is a single bounded call per step.** 4 decisions only: PROCEED, CORRECT, WARN, ESCALATE. Temperature 0.1, max tokens 2048. Confidence < 0.70 → forced ESCALATE. On total AI failure (3 retries exhausted), the design continues with hard-rule validation only.
+
+**Hard validation rules (Layer 2) cannot be overridden by AI:**  
+F-factor ≥ 0.75 · Shell ΔP < 1.4 bar · Tube ΔP < 0.7 bar · Tube velocity > 0.5 m/s · J_l > 0.40 · Connors ratio < 0.5
+
+---
+
+## SSE Events
+
+| Event | When |
+|---|---|
+| `step_started` | Step begins |
+| `step_approved` | AI: PROCEED |
+| `step_corrected` | AI: CORRECT (after successful fix) |
+| `step_warning` | AI: WARN |
+| `step_escalated` | AI: ESCALATE — pipeline pauses for user input |
+| `step_error` | Layer 2 failure, exception, or max escalations |
+| `iteration_progress` | Step 12 convergence loop iterations |
+| `design_complete` | All steps finished |
+
+---
+
+## Running Tests
+
+```bash
+cd hx_design_engine
+pytest tests/ -v
+pytest tests/ -v --cov=hx_engine   # with coverage
+```
+
+Validated against Serth Example 5.1: ±5% on overall U, ±10% on pressure drops and J-factors.
+
+---
+
+## Docker
+
+The HX Engine runs as the `hx-engine` service in `docker/docker-compose.yml`. See `docker/README.md` for the full stack setup.
+
+```bash
+cd docker
+docker compose up -d
+```
