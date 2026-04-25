@@ -7,7 +7,7 @@ Architecture: Base prompt (identity, security, response format) is shared
 across all steps. Each step has a dedicated step prompt with domain-specific
 rules, validation focus, and do-not-do directives. At review time:
 
-    system = _BASE_PROMPT + "\\n\\n" + _STEP_PROMPTS[step.step_id]
+    system = _build_system_prompt(step.step_id, step.step_name)
 
 See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 """
@@ -103,9 +103,12 @@ Do NOT include any text outside the JSON object.\
 """
 
 # ===================================================================
-# Step-specific Prompts
+# Step-specific Prompts — REMOVED
+# All step prompts now live in hx_engine/app/skills/step_XX_*.md files.
+# See _build_system_prompt() and SKILLS_DIR.
 # ===================================================================
 
+# NOTE: _STEP_1_PROMPT ... _STEP_16_PROMPT removed. .md files are sole source.
 _STEP_1_PROMPT = """\
 ## Step 1: Process Requirements — Review Focus
 
@@ -852,25 +855,6 @@ DO NOT: Modify the confidence score. DO NOT suggest geometry changes (design is 
 finalized). DO NOT produce vague summaries like "the design looks good."\
 """
 
-# Step prompt registry — add an entry here before wiring any new step
-_STEP_PROMPTS: dict[int, str] = {
-    1: _STEP_1_PROMPT,
-    2: _STEP_2_PROMPT,
-    3: _STEP_3_PROMPT,
-    4: _STEP_4_PROMPT,
-    5: _STEP_5_PROMPT,
-    6: _STEP_6_PROMPT,
-    7: _STEP_7_PROMPT,
-    8: _STEP_8_PROMPT,
-    9: _STEP_9_PROMPT,
-    10: _STEP_10_PROMPT,
-    11: _STEP_11_PROMPT,
-    12: _STEP_12_PROMPT,
-    13: _STEP_13_PROMPT,
-    14: _STEP_14_PROMPT,
-    15: _STEP_15_PROMPT,
-    16: _STEP_16_PROMPT,
-}
 
 
 # ===================================================================
@@ -921,16 +905,12 @@ def _load_skill(filename: str) -> str:
 def _build_system_prompt(step_id: int, step_name: str) -> str:
     """Assemble Base + Step prompt for a given step.
 
-    Loads from .md skill files (cached after first read).
-    Falls back to inline _STEP_PROMPTS dict if .md file is missing.
+    Loads from .md skill files (cached after first read). .md files are the
+    sole source of truth — no inline fallback dict.
     """
     base = _load_skill("base.md") or _BASE_PROMPT
     step_file = _STEP_FILE_NAMES.get(step_id)
     step_prompt = _load_skill(step_file) if step_file else ""
-
-    # Fallback to inline dict if .md file was empty/missing
-    if not step_prompt:
-        step_prompt = _STEP_PROMPTS.get(step_id, "")
 
     if not step_prompt:
         logger.warning(

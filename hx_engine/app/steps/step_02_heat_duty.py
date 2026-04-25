@@ -9,13 +9,17 @@ ai_mode = CONDITIONAL — AI is only called when anomalies are detected.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+import re
+from typing import TYPE_CHECKING, Optional
 
 from hx_engine.app.models.step_result import AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
 
 if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
+
+logger = logging.getLogger(__name__)
 
 
 class Step02HeatDuty(BaseStep):
@@ -566,3 +570,63 @@ class Step02HeatDuty(BaseStep):
         if hot_latent is not None:
             return "latent_condensing"
         return "latent_evaporating"
+
+    async def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str,
+    ) -> Optional[int]:
+        # Index-based dispatch for button clicks
+        if option_index >= 0:
+            if option_index == 0:
+                logger.info("[Step2-OptionA] User chose to revise — re-run Step 2 with current state")
+                return None
+            if option_index == 1:
+                state.notes.append(
+                    "Step 2: User accepted energy-balance anomaly / "
+                    "single-phase approximation — proceeding with current Q."
+                )
+                logger.info("[Step2-OptionB] User chose to proceed with current values")
+                return None
+            # option_index >= 2: terminate / out-of-scope
+            logger.info("[Step2-OptionC] User chose termination / out-of-scope")
+            state.notes.append("Step 2: User confirmed design is outside single-phase scope.")
+            return None
+
+        # Regex fallback for free-text
+        temp_match = re.search(
+            r"(?:T_?(hot|cold)_?(in|out))\s*[=:]\s*([0-9]+\.?[0-9]*)",
+            text, re.IGNORECASE,
+        )
+        if temp_match:
+            side = temp_match.group(1).lower()
+            direction = temp_match.group(2).lower()
+            value = float(temp_match.group(3))
+            field = f"T_{side}_{direction}_C"
+            if hasattr(state, field):
+                old_val = getattr(state, field)
+                setattr(state, field, value)
+                logger.info("[Step2-Override] %s: %r → %r", field, old_val, value)
+            return None
+
+        flow_match = re.search(
+            r"(?:m_?dot_?(hot|cold)|mass\s*flow\s*(hot|cold))\s*[=:]\s*([0-9]+\.?[0-9]*)",
+            text, re.IGNORECASE,
+        )
+        if flow_match:
+            side = (flow_match.group(1) or flow_match.group(2)).lower()
+            value = float(flow_match.group(3))
+            field = f"m_dot_{side}_kg_s"
+            if hasattr(state, field):
+                old_val = getattr(state, field)
+                setattr(state, field, value)
+                logger.info("[Step2-Override] %s: %r → %r", field, old_val, value)
+            return None
+
+        if re.search(r"\bproceed\b|\bcontinue\b|\baccept\b|\bgo ahead\b", text, re.IGNORECASE):
+            state.notes.append("Step 2: User chose to proceed despite energy-balance anomaly.")
+            logger.info("[Step2-Override] User chose to proceed with current values")
+            return None
+
+        return None

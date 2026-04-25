@@ -13,8 +13,9 @@ ai_mode = CONDITIONAL — AI is only called when:
 
 from __future__ import annotations
 
+import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.correlations.gnielinski import tube_side_h
@@ -27,6 +28,8 @@ import hx_engine.app.steps.step_07_rules  # noqa: F401
 
 if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
+
+logger = logging.getLogger(__name__)
 
 
 # ── Transition-zone boundaries (P2-22) ──────────────────────────────
@@ -370,3 +373,68 @@ class Step07TubeSideH(BaseStep):
             return True
 
         return False
+
+    async def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str,
+    ) -> Optional[int]:
+        # Index-based dispatch
+        if option_index >= 0:
+            if option_index == 0:
+                # Swap fluid allocation — restart from Step 3
+                old_val = state.shell_side_fluid
+                new_val = "cold" if old_val == "hot" else "hot"
+                state.shell_side_fluid = new_val
+                logger.info(
+                    "[Step7-OptionA] shell_side_fluid swapped %r → %r — restart from Step 3",
+                    old_val, new_val,
+                )
+                return 3
+            if option_index == 1:
+                # Reduce n_tubes / increase n_passes to raise velocity
+                if state.geometry is not None:
+                    old_n_tubes = state.geometry.n_tubes
+                    old_n_passes = state.geometry.n_passes
+                    new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
+                    new_n_passes = min(8, (old_n_passes or 1) * 2)
+                    state.geometry.n_tubes = new_n_tubes
+                    state.geometry.n_passes = new_n_passes
+                    logger.info(
+                        "[Step7-OptionB] Geometry adjusted: n_tubes %r → %r, n_passes %r → %r",
+                        old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
+                    )
+                else:
+                    logger.warning("[Step7-OptionB] No geometry to adjust — cannot increase velocity")
+                return None
+
+        # Regex fallback for typed free text
+        import re
+        if re.search(
+            r"reduce.*n_?tubes|fewer.*tubes|increase.*n_?passes|more.*passes|increase.*velocity",
+            text, re.IGNORECASE,
+        ):
+            if state.geometry is not None:
+                old_n_tubes = state.geometry.n_tubes
+                old_n_passes = state.geometry.n_passes
+                new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
+                new_n_passes = min(8, (old_n_passes or 1) * 2)
+                state.geometry.n_tubes = new_n_tubes
+                state.geometry.n_passes = new_n_passes
+                logger.info(
+                    "User override (velocity): n_tubes %r → %r, n_passes %r → %r",
+                    old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
+                )
+            return None
+
+        if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
+            old_val = state.shell_side_fluid
+            state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+            logger.info(
+                "User override: shell_side_fluid swapped from %r to %r — restart from Step 3",
+                old_val, state.shell_side_fluid,
+            )
+            return 3
+
+        return None

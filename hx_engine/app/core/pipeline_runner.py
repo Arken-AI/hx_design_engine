@@ -103,49 +103,6 @@ def _is_termination_intent(text: str) -> bool:
     return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
 
 
-async def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
-    """Re-fetch fluid properties for the shell-side fluid at the mean shell temperature.
-
-    This ensures that after a fluid-swap or viscosity-verification escalation,
-    Step 8 re-runs with the correct (fresh) thermophysical properties rather
-    than the stale values cached by Step 3.
-    """
-    from hx_engine.app.models.design_state import FluidProperties
-
-    shell_side = state.shell_side_fluid  # "hot" or "cold"
-    if shell_side == "hot":
-        fluid_name = state.hot_fluid_name
-        T_in = state.T_hot_in_C
-        T_out = state.T_hot_out_C
-        pressure = state.P_hot_Pa
-    else:
-        fluid_name = state.cold_fluid_name
-        T_in = state.T_cold_in_C
-        T_out = state.T_cold_out_C
-        pressure = state.P_cold_Pa
-
-    if fluid_name is None or T_in is None or T_out is None:
-        logger.warning("Cannot refresh shell-side fluid props — missing fluid name or temps")
-        return
-
-    T_mean = (T_in + T_out) / 2.0
-    effective_pressure = pressure if pressure is not None else 101325.0  # fallback: atmospheric
-    try:
-        new_props = await get_fluid_properties(fluid_name, T_mean, effective_pressure)
-        if shell_side == "hot":
-            state.hot_fluid_props = new_props
-        else:
-            state.cold_fluid_props = new_props
-        logger.info(
-            "Refreshed %s-side (shell) fluid props for %s at T_mean=%.1f°C: "
-            "mu=%.6f Pa·s, rho=%.1f kg/m³",
-            shell_side, fluid_name, T_mean,
-            new_props.viscosity_Pa_s, new_props.density_kg_m3,
-        )
-    except Exception:
-        logger.exception("Failed to refresh shell-side fluid properties for %s", fluid_name)
-
-
 class PipelineRunner:
     """Runs the 5-step HX design pipeline for a single session."""
 
@@ -1053,20 +1010,18 @@ class PipelineRunner:
                                     correction.field,
                                     correction.new_value,
                                 )
-                    # Apply recommendation hint only when corrections didn't
-                    # already cover tema_preference to avoid overwriting the
-                    # user's explicit choice with a hint from the AI's text.
-                    if review and review.recommendation:
-                        correction_fields = {c.field for c in (review.corrections or [])}
-                        if "tema_preference" not in correction_fields:
-                            self._apply_recommendation_hint(state, review.recommendation)
+                    # Let the step apply any review-acceptance side effects
+                    # (e.g. Step 4 extracts TEMA hints from recommendation text).
+                    await step.on_review_accepted(
+                        state,
+                        corrections=list(review.corrections) if review and review.corrections else [],
+                        recommendation=(review.recommendation or "") if review else "",
+                    )
 
                 elif response_type == "override":
                     # User typed a specific value or clicked an option button.
-                    restart_from = await self._apply_user_text_override(
-                        state, user_input,
-                        step_id=step.step_id,
-                        option_index=option_index,
+                    restart_from = await step.apply_user_override(
+                        state, option_index, user_input,
                     )
 
                 # "skip" — don't touch state; re-run will see unchanged inputs
@@ -1125,22 +1080,6 @@ class PipelineRunner:
         return any(phrase in text for phrase in accept_phrases)
 
     @staticmethod
-    def _apply_recommendation_hint(state: DesignState, recommendation: str) -> None:
-        """Extract TEMA type hints from the AI's recommendation text."""
-        # Match patterns like "Use AES" / "recommend AEP" / "switch to AEU"
-        match = re.search(
-            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
-            recommendation,
-            re.IGNORECASE,
-        )
-        if match:
-            suggested = match.group(1).upper()
-            logger.info(
-                "Applying recommendation hint: tema_preference = %r", suggested
-            )
-            state.tema_preference = suggested
-
-    @staticmethod
     async def _apply_user_text_override(
         state: DesignState,
         text: str,
@@ -1148,184 +1087,13 @@ class PipelineRunner:
         step_id: int = 0,
         option_index: int = -1,
     ) -> Optional[int]:
-        """Parse free-text override for known field names.
+        """Fallback override handler for generic (non-step-specific) free-text.
 
-        Returns the step number to restart from, or None if no restart is needed
-        (re-run current step only).
-
-        option_index is the 0-based index of the button the user clicked (-1 = typed free text).
-        When option_index >= 0 and step_id matches, use deterministic index dispatch instead of
-        regex so the action is reliable regardless of how the AI phrases the option.
+        Step-specific logic lives in each step's apply_user_override(). This
+        method handles only pipeline-wide patterns that apply to any step:
+        multi-shell arrangement and TEMA type from typed free text.
         """
-        # --- Step 2: index-based dispatch for heat duty escalation ---
-        # Step 2 escalates for energy balance issues, phase-change detection,
-        # or data inconsistencies.  Typical options:
-        #   Option A (index 0): Revise temperatures or flow rates
-        #   Option B (index 1): Proceed with current values (accept imbalance / single-phase assumption)
-        #   Option C (index 2): Terminate — design is outside single-phase scope
-        if step_id == 2 and option_index >= 0:
-            if option_index == 0:
-                # Option A: user wants to revise input data.
-                # The AI's corrections (if any) were already applied in the
-                # "accept" path.  If the user clicked this button the intent
-                # is "re-run with whatever corrections you suggested".
-                # Apply any corrections from the AI review that may be
-                # present in escalation_history or review notes.
-                logger.info("[Step2-OptionA] User chose to revise — re-run Step 2 with current state")
-                return None  # re-run current step
-            if option_index == 1:
-                # Option B: proceed with current values despite the anomaly.
-                # Add an advisory note so downstream steps are aware.
-                state.notes.append(
-                    "Step 2: User accepted energy-balance anomaly / "
-                    "single-phase approximation — proceeding with current Q."
-                )
-                logger.info("[Step2-OptionB] User chose to proceed with current values")
-                # Mark the step as no longer needing escalation by returning
-                # a sentinel that tells the caller to skip the re-run and
-                # accept the current result as-is.
-                return None  # re-run will now PROCEED because state.notes signals acceptance
-            if option_index >= 2:
-                # Option C (or higher): terminate / out-of-scope
-                logger.info("[Step2-OptionC] User chose termination / out-of-scope")
-                state.notes.append(
-                    "Step 2: User confirmed design is outside single-phase scope."
-                )
-                return None
-
-        # --- Step 2: regex fallback for typed free text ---
-        if step_id == 2:
-            # Temperature override: e.g. "use T_cold_out = 45" or "set T_hot_out to 60"
-            temp_match = re.search(
-                r"(?:T_?(hot|cold)_?(in|out))\s*[=:]\s*([0-9]+\.?[0-9]*)",
-                text, re.IGNORECASE,
-            )
-            if temp_match:
-                side = temp_match.group(1).lower()
-                direction = temp_match.group(2).lower()
-                value = float(temp_match.group(3))
-                field = f"T_{side}_{direction}_C"
-                if hasattr(state, field):
-                    old_val = getattr(state, field)
-                    setattr(state, field, value)
-                    logger.info(
-                        "[Step2-Override] %s: %r → %r", field, old_val, value,
-                    )
-                return None
-
-            # Flow rate override: e.g. "m_dot_hot = 2.5" or "mass flow cold = 10"
-            flow_match = re.search(
-                r"(?:m_?dot_?(hot|cold)|mass\s*flow\s*(hot|cold))\s*[=:]\s*([0-9]+\.?[0-9]*)",
-                text, re.IGNORECASE,
-            )
-            if flow_match:
-                side = (flow_match.group(1) or flow_match.group(2)).lower()
-                value = float(flow_match.group(3))
-                field = f"m_dot_{side}_kg_s"
-                if hasattr(state, field):
-                    old_val = getattr(state, field)
-                    setattr(state, field, value)
-                    logger.info(
-                        "[Step2-Override] %s: %r → %r", field, old_val, value,
-                    )
-                return None
-
-            # "proceed" / "continue" / "accept" — user wants to move on despite anomaly
-            if re.search(r"\bproceed\b|\bcontinue\b|\baccept\b|\bgo ahead\b", text, re.IGNORECASE):
-                state.notes.append(
-                    "Step 2: User chose to proceed despite energy-balance anomaly."
-                )
-                logger.info("[Step2-Override] User chose to proceed with current values")
-                return None
-
-        # --- Step 7: index-based dispatch for velocity escalation ---
-        # Step 7 escalates when tube-side velocity is too low (< 0.5 m/s).
-        # The AI typically offers two options:
-        #   Option A (index 0): Swap fluid allocation (move viscous fluid to shell-side)
-        #   Option B (index 1): Reduce n_tubes and/or increase n_passes to increase velocity
-        if step_id == 7 and option_index >= 0:
-            if option_index == 0:
-                # Option A: Swap fluid allocation — put the higher-viscosity fluid on shell-side.
-                # Requires restart from Step 3 so fluid properties, geometry, LMTD, and
-                # initial U are recomputed for the new allocation.
-                old_val = state.shell_side_fluid
-                new_val = "cold" if old_val == "hot" else "hot"
-                state.shell_side_fluid = new_val
-                logger.info(
-                    "[Step7-OptionA] shell_side_fluid swapped %r → %r — restart from Step 3",
-                    old_val, new_val,
-                )
-                return 3  # restart from Step 3 (Fluid Properties)
-            if option_index == 1:
-                # Option B: Reduce n_tubes and increase n_passes to increase velocity.
-                # No restart needed — re-run current step only.
-                if state.geometry is not None:
-                    old_n_tubes = state.geometry.n_tubes
-                    old_n_passes = state.geometry.n_passes
-                    new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
-                    new_n_passes = min(8, (old_n_passes or 1) * 2)
-                    state.geometry.n_tubes = new_n_tubes
-                    state.geometry.n_passes = new_n_passes
-                    logger.info(
-                        "[Step7-OptionB] Geometry adjusted: n_tubes %r → %r, n_passes %r → %r",
-                        old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
-                    )
-                else:
-                    logger.warning("[Step7-OptionB] No geometry to adjust — cannot increase velocity")
-                return None  # re-run current step only
-
-        # --- Step 8: index-based dispatch (deterministic, regex-independent) ---
-        if step_id == 8 and option_index >= 0:
-            if option_index == 0:
-                # Option A: verify/re-fetch viscosity for the current shell-side fluid
-                logger.info("[Step8-OptionA] Refreshing shell-side fluid properties")
-                await _refresh_fluid_props_for_shell_side(state)
-                return None  # re-run current step only
-            if option_index == 1:
-                # Option B: swap fluid-side assignments — requires restart from Step 3
-                old_val = state.shell_side_fluid
-                state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
-                logger.info(
-                    "[Step8-OptionB] shell_side_fluid swapped %r → %r — restart from Step 3",
-                    old_val, state.shell_side_fluid,
-                )
-                return 3  # restart from Step 3 (Fluid Properties)
-
-        # --- Regex fallback for typed free text and non-indexed steps ---
-
-        # --- Step 7 velocity: reduce n_tubes or increase n_passes ---
-        if re.search(r"reduce.*n_?tubes|fewer.*tubes|increase.*n_?passes|more.*passes|increase.*velocity", text, re.IGNORECASE):
-            if state.geometry is not None:
-                old_n_tubes = state.geometry.n_tubes
-                old_n_passes = state.geometry.n_passes
-                new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
-                new_n_passes = min(8, (old_n_passes or 1) * 2)
-                state.geometry.n_tubes = new_n_tubes
-                state.geometry.n_passes = new_n_passes
-                logger.info(
-                    "User override (velocity): n_tubes %r → %r, n_passes %r → %r",
-                    old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
-                )
-            return None
-
-        # --- Fluid-side swap (typed free text) — requires restart from Step 3 ---
-        if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
-            old_val = state.shell_side_fluid
-            state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
-            logger.info(
-                "User override: shell_side_fluid swapped from %r to %r — restart from Step 3",
-                old_val, state.shell_side_fluid,
-            )
-            return 3  # restart from Step 3 (Fluid Properties)
-
-        # --- Viscosity verification (Step 8 escalation: re-fetch fluid props) ---
-        if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
-            logger.info("User override: refreshing shell-side fluid properties")
-            await _refresh_fluid_props_for_shell_side(state)
-            return None
-
-        # Multi-shell arrangement — check this first so "series"/"parallel"
-        # in the text is acted on before looking for TEMA type codes.
+        # Multi-shell arrangement
         if re.search(r"\bseries\b", text, re.IGNORECASE):
             state.multi_shell_arrangement = "series"
             logger.info("User override: multi_shell_arrangement = 'series'")
@@ -1341,9 +1109,7 @@ class PipelineRunner:
         )
         if match:
             state.tema_preference = match.group(1).upper()
-            logger.info(
-                "User override: tema_preference = %r", state.tema_preference
-            )
+            logger.info("User override: tema_preference = %r", state.tema_preference)
         return None
 
     @staticmethod

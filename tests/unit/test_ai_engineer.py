@@ -7,7 +7,6 @@ import pytest
 from hx_engine.app.core.ai_engineer import (
     AIEngineer,
     _BASE_PROMPT,
-    _STEP_PROMPTS,
     _STEP_FILE_NAMES,
     _load_skill,
     SKILLS_DIR,
@@ -120,9 +119,13 @@ class TestBuildSystemPrompt:
         for sid in range(1, 17):
             assert sid in _STEP_FILE_NAMES, f"Step {sid} missing from _STEP_FILE_NAMES"
 
-    def test_all_5_steps_registered(self):
-        for sid in (1, 2, 3, 4, 5):
-            assert sid in _STEP_PROMPTS, f"Step {sid} missing from _STEP_PROMPTS"
+    def test_all_16_steps_have_md_skill_files(self):
+        """All 16 steps must have a corresponding .md skill file on disk."""
+        for sid in range(1, 17):
+            filename = _STEP_FILE_NAMES.get(sid)
+            assert filename, f"Step {sid} missing from _STEP_FILE_NAMES"
+            skill_path = SKILLS_DIR / filename
+            assert skill_path.exists(), f"Skill file missing: {skill_path}"
 
 
 # -----------------------------------------------------------------------

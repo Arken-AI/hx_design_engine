@@ -176,76 +176,62 @@ class TestClearStateFromStep:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _apply_user_text_override return values
+# Tests: step.apply_user_override() return values
 # ---------------------------------------------------------------------------
 
-class TestApplyUserTextOverrideRestart:
+class TestApplyUserOverrideRestart:
     @pytest.mark.asyncio
     async def test_step7_option_a_returns_restart_3(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         state = _populated_state()
         state.shell_side_fluid = "hot"
-        result = await PipelineRunner._apply_user_text_override(
-            state, "", step_id=7, option_index=0,
-        )
+        result = await Step07TubeSideH().apply_user_override(state, option_index=0, text="")
         assert result == 3
         assert state.shell_side_fluid == "cold"
 
     @pytest.mark.asyncio
     async def test_step7_option_b_returns_none(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         state = _populated_state()
-        result = await PipelineRunner._apply_user_text_override(
-            state, "", step_id=7, option_index=1,
-        )
+        result = await Step07TubeSideH().apply_user_override(state, option_index=1, text="")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_step8_option_a_returns_none(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+        from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
         state = _populated_state()
-        result = await PipelineRunner._apply_user_text_override(
-            state, "", step_id=8, option_index=0,
-        )
+        result = await Step08ShellSideH().apply_user_override(state, option_index=0, text="")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_step8_option_b_returns_restart_3(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+        from hx_engine.app.steps.step_08_shell_side_h import Step08ShellSideH
         state = _populated_state()
         state.shell_side_fluid = "hot"
-        result = await PipelineRunner._apply_user_text_override(
-            state, "", step_id=8, option_index=1,
-        )
+        result = await Step08ShellSideH().apply_user_override(state, option_index=1, text="")
         assert result == 3
 
     @pytest.mark.asyncio
-    async def test_regex_fluid_swap_returns_restart_3(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+    async def test_step7_regex_fluid_swap_returns_restart_3(self):
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         state = _populated_state()
         state.shell_side_fluid = "hot"
-        result = await PipelineRunner._apply_user_text_override(
-            state, "swap fluid allocation",
-        )
+        result = await Step07TubeSideH().apply_user_override(state, option_index=-1, text="swap fluid allocation")
         assert result == 3
         assert state.shell_side_fluid == "cold"
 
     @pytest.mark.asyncio
-    async def test_regex_velocity_adjustment_returns_none(self):
-        from hx_engine.app.core.pipeline_runner import PipelineRunner
+    async def test_step7_regex_velocity_adjustment_returns_none(self):
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         state = _populated_state()
-        result = await PipelineRunner._apply_user_text_override(
-            state, "reduce n_tubes",
-        )
+        result = await Step07TubeSideH().apply_user_override(state, option_index=-1, text="reduce n_tubes")
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_tema_preference_returns_none(self):
+    async def test_pipeline_runner_tema_preference_returns_none(self):
         from hx_engine.app.core.pipeline_runner import PipelineRunner
         state = _populated_state()
-        result = await PipelineRunner._apply_user_text_override(
-            state, "use BEM type",
-        )
+        result = await PipelineRunner._apply_user_text_override(state, "use BEM type")
         assert result is None
         assert state.tema_preference == "BEM"
 
@@ -379,6 +365,11 @@ class TestRestartFromStepFlow:
                     )
                 # Subsequent calls (after restart): proceed
                 return _proceed_result(7, "Tube-Side H", {"tube_velocity_m_s": 1.4})
+            async def apply_user_override(self, state, option_index, text):
+                if option_index == 0:
+                    state.shell_side_fluid = "cold" if state.shell_side_fluid == "hot" else "hot"
+                    return 3
+                return None
 
         # Pre-populate state as if Steps 3-7 ran once (stale)
         base_state.hot_fluid_props = FluidProperties(density_kg_m3=1.2)
@@ -458,6 +449,10 @@ class TestRestartFromStepFlow:
                         ),
                     )
                 return _proceed_result(7, "Tube-Side H")
+            async def apply_user_override(self, state, option_index, text):
+                if option_index == 0:
+                    return 3
+                return None
 
         base_state.shell_side_fluid = "hot"
 

@@ -13,9 +13,12 @@ Pieces implemented here:
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.data.bwg_gauge import get_tube_id, get_wall_thickness
@@ -1309,3 +1312,29 @@ class Step04TEMAGeometry(BaseStep):
             outputs=outputs,
             warnings=all_warnings,
         )
+
+    async def on_review_accepted(
+        self,
+        state: "DesignState",
+        corrections: list,
+        recommendation: str,
+    ) -> None:
+        """Extract TEMA type hints from the AI's recommendation text.
+
+        Called after the user accepts the AI review. Skipped if the accepted
+        corrections already set tema_preference directly.
+        """
+        if not recommendation:
+            return
+        correction_fields = {c.field for c in corrections} if corrections else set()
+        if "tema_preference" in correction_fields:
+            return  # explicit correction takes priority over the hint
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
+            recommendation,
+            re.IGNORECASE,
+        )
+        if match:
+            suggested = match.group(1).upper()
+            logger.info("Applying recommendation hint: tema_preference = %r", suggested)
+            state.tema_preference = suggested

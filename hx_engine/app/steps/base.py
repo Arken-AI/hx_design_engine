@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, runtime_checkable, Protocol
+from typing import TYPE_CHECKING, Optional, runtime_checkable, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +420,43 @@ class BaseStep(ABC):
                 rec.ai_confidence or 0.0,
                 rec.duration_s,
             )
+
+    # ------------------------------------------------------------------
+    # Extensibility hooks — override in steps that need them
+    # ------------------------------------------------------------------
+
+    def build_ai_context(self, state: "DesignState", result: StepResult) -> str:
+        """Return step-specific derived context to append to the AI prompt.
+
+        Read-only: must not mutate state. Default returns empty string.
+        """
+        return ""
+
+    async def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str,
+    ) -> Optional[int]:
+        """Handle the user's escalation response for this step.
+
+        May mutate state. Returns restart_from_step (int) to restart from an
+        earlier step, or None to re-run the current step only.
+        """
+        return None
+
+    async def on_review_accepted(
+        self,
+        state: "DesignState",
+        corrections: list,
+        recommendation: str,
+    ) -> None:
+        """Called after the user accepts the AI review (response_type='accept').
+
+        May mutate state. Default is a no-op.
+        corrections is the list of AICorrection objects from the AI review.
+        recommendation is the raw recommendation text from the AI.
+        """
 
     # ------------------------------------------------------------------
     # Abstract execute

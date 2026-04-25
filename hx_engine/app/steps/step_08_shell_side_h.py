@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from hx_engine.app.adapters.thermo_adapter import (
     get_fluid_properties,
@@ -707,3 +707,76 @@ class Step08ShellSideH(BaseStep):
             outputs=outputs,
             warnings=warnings,
         )
+
+    async def _refresh_shell_side_fluid_props(self, state: "DesignState") -> None:
+        """Re-fetch fluid properties for the shell-side fluid at mean shell temperature.
+
+        Called from apply_user_override when the user requests viscosity verification
+        or after a fluid-swap so Step 8 re-runs with fresh thermophysical properties.
+        """
+        from hx_engine.app.models.design_state import FluidProperties
+
+        shell_side = state.shell_side_fluid
+        if shell_side == "hot":
+            fluid_name = state.hot_fluid_name
+            T_in = state.T_hot_in_C
+            T_out = state.T_hot_out_C
+            pressure = state.P_hot_Pa
+        else:
+            fluid_name = state.cold_fluid_name
+            T_in = state.T_cold_in_C
+            T_out = state.T_cold_out_C
+            pressure = state.P_cold_Pa
+
+        if fluid_name is None or T_in is None or T_out is None:
+            logger.warning("Cannot refresh shell-side fluid props — missing fluid name or temps")
+            return
+
+        T_mean = (T_in + T_out) / 2.0
+        effective_pressure = pressure if pressure is not None else 101325.0
+        try:
+            new_props = await get_fluid_properties(fluid_name, T_mean, effective_pressure)
+            if shell_side == "hot":
+                state.hot_fluid_props = FluidProperties(**new_props) if isinstance(new_props, dict) else new_props
+            else:
+                state.cold_fluid_props = FluidProperties(**new_props) if isinstance(new_props, dict) else new_props
+            logger.info("Refreshed shell-side fluid props for %r at T_mean=%.1f°C", fluid_name, T_mean)
+        except Exception as exc:
+            logger.warning("Failed to refresh shell-side fluid props: %s", exc)
+
+    async def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str,
+    ) -> Optional[int]:
+        if option_index >= 0:
+            if option_index == 0:
+                logger.info("[Step8-OptionA] Refreshing shell-side fluid properties")
+                await self._refresh_shell_side_fluid_props(state)
+                return None
+            if option_index == 1:
+                old_val = state.shell_side_fluid
+                state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+                logger.info(
+                    "[Step8-OptionB] shell_side_fluid swapped %r → %r — restart from Step 3",
+                    old_val, state.shell_side_fluid,
+                )
+                return 3
+
+        import re
+        if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
+            logger.info("User override: refreshing shell-side fluid properties")
+            await self._refresh_shell_side_fluid_props(state)
+            return None
+
+        if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
+            old_val = state.shell_side_fluid
+            state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+            logger.info(
+                "User override: shell_side_fluid swapped from %r to %r — restart from Step 3",
+                old_val, state.shell_side_fluid,
+            )
+            return 3
+
+        return None
