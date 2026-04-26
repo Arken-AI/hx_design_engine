@@ -936,3 +936,16 @@ class Step12Convergence:
                 best = snap
 
         return best
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        n_iter = result.outputs.get("convergence_iteration")
+        converged = result.outputs.get("convergence_converged")
+        restart = result.outputs.get("convergence_restart_count")
+        if n_iter is not None:
+            lines.append(f"Iterations: {n_iter}")
+        if converged is not None:
+            lines.append(f"Converged: {converged}")
+        if restart is not None:
+            lines.append(f"Geometry restarts: {restart}")
+        return "\n".join(lines)

@@ -11,11 +11,13 @@ from hx_engine.app.core.ai_engineer import (
     _load_skill,
     SKILLS_DIR,
     _build_system_prompt,
-    _build_step_context,
 )
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.step_result import AIDecisionEnum, AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
+from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
+from hx_engine.app.steps.step_04_tema_geometry import Step04TEMAGeometry
+from hx_engine.app.steps.step_05_lmtd import Step05LMTD
 
 
 class _DummyStep(BaseStep):
@@ -173,7 +175,10 @@ class TestSkillLoader:
 
 class TestBuildStepContext:
     def test_step1_returns_empty(self):
-        ctx = _build_step_context(1, DesignState(), StepResult(step_id=1, step_name="S1"))
+        # Step 1 has no build_ai_context override — base returns ""
+        from hx_engine.app.steps.step_01_requirements import Step01Requirements
+        step = Step01Requirements()
+        ctx = step.build_ai_context(DesignState(), StepResult(step_id=1, step_name="S1"))
         assert ctx == ""
 
     def test_step2_energy_balance(self):
@@ -186,7 +191,7 @@ class TestBuildStepContext:
                 "energy_imbalance_pct": 2.0,
             },
         )
-        ctx = _build_step_context(2, DesignState(), result)
+        ctx = Step02HeatDuty().build_ai_context(DesignState(), result)
         assert "Q_hot" in ctx
         assert "Q_cold" in ctx
         assert "Imbalance" in ctx
@@ -201,7 +206,7 @@ class TestBuildStepContext:
         )
         state = DesignState(T_hot_in_C=150, T_hot_out_C=90, T_cold_in_C=30, T_cold_out_C=60)
         result = StepResult(step_id=4, step_name="TEMA", outputs={"geometry": geom})
-        ctx = _build_step_context(4, state, result)
+        ctx = Step04TEMAGeometry().build_ai_context(state, result)
         assert "Tube ID < OD check" in ctx
         assert "Pitch ratio" in ctx
         assert "Baffle/shell ratio" in ctx
@@ -215,19 +220,50 @@ class TestBuildStepContext:
             step_id=5, step_name="LMTD",
             outputs={"R": 2.0, "P": 0.25, "F_factor": 0.92},
         )
-        ctx = _build_step_context(5, state, result)
+        ctx = Step05LMTD().build_ai_context(state, result)
         assert "ΔT₁" in ctx
         assert "ΔT₂" in ctx
         assert "R = 2.000" in ctx
         assert "F = 0.920" in ctx
 
     def test_context_survives_missing_data(self):
-        """_build_step_context must not crash on None fields."""
+        """build_ai_context must not crash on None fields."""
         state = DesignState()  # all None
         result = StepResult(step_id=4, step_name="TEMA", outputs={})
-        ctx = _build_step_context(4, state, result)
+        ctx = Step04TEMAGeometry().build_ai_context(state, result)
         # Should return empty string, not crash
         assert isinstance(ctx, str)
+
+
+# -----------------------------------------------------------------------
+# TestBuildAiContextScaffolding
+# -----------------------------------------------------------------------
+
+class TestBuildAiContextScaffolding:
+    def test_migrated_step_routes_to_hook(self):
+        """After Phase 1.17 _build_review_prompt always delegates to step.build_ai_context()."""
+        step = Step02HeatDuty()
+        state = DesignState()
+        result = StepResult(
+            step_id=2, step_name="Heat Duty",
+            outputs={"Q_hot_W": 1_000_000.0, "Q_cold_W": 980_000.0},
+        )
+        ai = AIEngineer(stub_mode=True)
+        prompt = ai._build_review_prompt(step, state, result)
+        assert "Q_hot" in prompt
+
+    def test_hook_exception_swallowed(self, caplog):
+        """If build_ai_context() raises, the exception is swallowed and logged at DEBUG."""
+        from unittest.mock import patch
+        step = Step02HeatDuty()
+        state = DesignState()
+        result = StepResult(step_id=2, step_name="Heat Duty", outputs={})
+        ai = AIEngineer(stub_mode=True)
+        with patch.object(step, "build_ai_context", side_effect=ValueError("boom")):
+            with caplog.at_level(logging.DEBUG):
+                prompt = ai._build_review_prompt(step, state, result)
+        assert "### Computed Context" not in prompt
+        assert "build_ai_context failed" in caplog.text
 
 
 # -----------------------------------------------------------------------

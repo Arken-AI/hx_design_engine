@@ -630,3 +630,19 @@ class Step02HeatDuty(BaseStep):
             return None
 
         return None
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        q_hot = result.outputs.get("Q_hot_W")
+        q_cold = result.outputs.get("Q_cold_W")
+        q_w = result.outputs.get("Q_W") or state.Q_W
+        imbalance = result.outputs.get("energy_imbalance_pct")
+        lines = []
+        if q_hot is not None:
+            lines.append(f"Q_hot  = {q_hot:.0f} W")
+        if q_cold is not None:
+            lines.append(f"Q_cold = {q_cold:.0f} W")
+        if q_w is not None:
+            lines.append(f"Q_used = {q_w:.0f} W")
+        if imbalance is not None:
+            lines.append(f"Imbalance = {imbalance:.1f}%")
+        return "\n".join(lines)

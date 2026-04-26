@@ -334,3 +334,68 @@ class Step16FinalValidation(BaseStep):
         if ai_risks:
             state.design_risks = list(ai_risks)
             result.outputs["design_risks"] = list(ai_risks)
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        bd = result.outputs.get("confidence_breakdown") or {}
+        score = result.outputs.get("confidence_score")
+
+        lines.append("CONFIDENCE BREAKDOWN (deterministic):")
+        for key in ("geometry_convergence", "ai_agreement_rate", "validation_passes"):
+            val = bd.get(key)
+            label = f"  {key}:"
+            if val is not None:
+                lines.append(f"{label} {val:.4f}")
+        if score is not None:
+            lines.append(f"  WEIGHTED SCORE: {score:.4f}")
+
+        lines.append("\nDESIGN PERFORMANCE:")
+        if state.Q_W is not None:
+            lines.append(f"  Q = {state.Q_W:.0f} W")
+        if state.LMTD_K is not None:
+            lines.append(f"  LMTD = {state.LMTD_K:.2f} K")
+        if state.F_factor is not None:
+            lines.append(f"  F = {state.F_factor:.3f}")
+        if state.U_overall_W_m2K is not None:
+            lines.append(f"  U_overall = {state.U_overall_W_m2K:.1f} W/m²K")
+        if state.overdesign_pct is not None:
+            lines.append(f"  Overdesign = {state.overdesign_pct:.1f}%")
+        if state.dP_tube_Pa is not None:
+            lines.append(f"  dP_tube = {state.dP_tube_Pa:.0f} Pa")
+        if state.dP_shell_Pa is not None:
+            lines.append(f"  dP_shell = {state.dP_shell_Pa:.0f} Pa")
+        if state.tube_velocity_m_s is not None:
+            lines.append(f"  Tube velocity = {state.tube_velocity_m_s:.3f} m/s")
+
+        lines.append("\nPOST-CONVERGENCE:")
+        lines.append(f"  Vibration: {state.vibration_safe}")
+        if state.tube_thickness_ok is not None or state.shell_thickness_ok is not None:
+            lines.append(
+                f"  Mechanical: tubes={state.tube_thickness_ok}, "
+                f"shell={state.shell_thickness_ok}"
+            )
+        if state.expansion_mm is not None:
+            lines.append(f"  Expansion: {state.expansion_mm:.2f} mm")
+        if state.cost_usd is not None:
+            lines.append(f"  Cost: ${state.cost_usd:,.0f}")
+            if state.area_provided_m2 and state.area_provided_m2 > 0:
+                cost_m2 = state.cost_usd / state.area_provided_m2
+                lines.append(f"  Cost/m²: ${cost_m2:,.0f}")
+
+        if state.convergence_converged is not None:
+            lines.append(
+                f"\nCONVERGENCE: {state.convergence_converged} "
+                f"in {state.convergence_iteration or '?'} iterations"
+            )
+
+        if state.warnings:
+            lines.append(f"\nPIPELINE WARNINGS ({len(state.warnings)} total):")
+            for w in state.warnings[-10:]:
+                lines.append(f"  - {w[:200]}")
+
+        if state.review_notes:
+            lines.append(f"\nAI REVIEW NOTES ({len(state.review_notes)} total):")
+            for n in state.review_notes[-10:]:
+                lines.append(f"  - {n[:200]}")
+
+        return "\n".join(lines)

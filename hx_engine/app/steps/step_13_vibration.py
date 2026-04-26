@@ -238,3 +238,20 @@ class Step13VibrationCheck(BaseStep):
             outputs=outputs,
             warnings=warnings,
         )
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        vib_safe = result.outputs.get("vibration_safe")
+        vib_details = result.outputs.get("vibration_details")
+        if vib_safe is not None:
+            lines.append(f"Vibration safe: {vib_safe}")
+        if isinstance(vib_details, dict):
+            for mechanism, detail in vib_details.items():
+                if isinstance(detail, dict):
+                    status = detail.get("safe", "?")
+                    ratio = detail.get("ratio")
+                    info = f"  {mechanism}: safe={status}"
+                    if ratio is not None:
+                        info += f", ratio={ratio:.3f}"
+                    lines.append(info)
+        return "\n".join(lines)

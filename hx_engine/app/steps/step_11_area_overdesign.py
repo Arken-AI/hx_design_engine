@@ -307,3 +307,19 @@ class Step11AreaOverdesign(BaseStep):
             outputs=outputs,
             warnings=warnings,
         )
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        overdesign = result.outputs.get("overdesign_pct")
+        a_req = result.outputs.get("area_required_m2")
+        a_prov = result.outputs.get("area_provided_m2")
+        u_est = state.U_W_m2K
+        u_calc = state.U_overall_W_m2K
+        if overdesign is not None:
+            lines.append(f"Overdesign = {overdesign:.1f}%")
+        if a_req is not None and a_prov is not None:
+            lines.append(f"A_required = {a_req:.2f} m², A_provided = {a_prov:.2f} m²")
+        if u_est is not None and u_calc is not None:
+            dev = (u_calc - u_est) / u_est * 100 if u_est else 0
+            lines.append(f"U_estimated = {u_est:.1f}, U_calculated = {u_calc:.1f} ({dev:+.1f}%)")
+        return "\n".join(lines)

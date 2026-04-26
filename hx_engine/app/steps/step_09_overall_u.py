@@ -467,3 +467,27 @@ class Step09OverallU(BaseStep):
             outputs=outputs,
             warnings=warnings,
         )
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        u_est = state.U_W_m2K
+        u_calc = result.outputs.get("U_dirty_W_m2K")
+        if u_est is not None and u_calc is not None:
+            dev = (u_calc - u_est) / u_est * 100
+            lines.append(f"Step 6 estimated U: {u_est:.1f} W/m²K")
+            lines.append(f"Calculated U (dirty): {u_calc:.1f} W/m²K")
+            lines.append(f"Deviation from estimate: {dev:+.1f}%")
+        cf = result.outputs.get("cleanliness_factor")
+        if cf is not None:
+            lines.append(f"Cleanliness factor: {cf:.3f}")
+        ctrl = result.outputs.get("controlling_resistance")
+        if ctrl:
+            lines.append(f"Controlling resistance: {ctrl}")
+        k_src = result.outputs.get("k_wall_source")
+        if k_src:
+            lines.append(f"Wall conductivity source: {k_src}")
+        k_w = result.outputs.get("k_wall_W_mK")
+        mat = result.outputs.get("tube_material")
+        if k_w is not None and mat:
+            lines.append(f"Tube material: {mat} (k_w = {k_w:.1f} W/m·K)")
+        return "\n".join(lines)

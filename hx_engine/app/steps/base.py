@@ -23,6 +23,7 @@ from hx_engine.app.models.step_result import (
 if TYPE_CHECKING:
     from hx_engine.app.core.ai_engineer import AIEngineer
     from hx_engine.app.models.design_state import DesignState
+    from hx_engine.app.models.step_result import AICorrection
 
 
 def _serialize_outputs(outputs: dict) -> dict:
@@ -448,7 +449,7 @@ class BaseStep(ABC):
     async def on_review_accepted(
         self,
         state: "DesignState",
-        corrections: list,
+        corrections: list["AICorrection"],
         recommendation: str,
     ) -> None:
         """Called after the user accepts the AI review (response_type='accept').

@@ -523,6 +523,25 @@ class Step10PressureDrops(BaseStep):
             warnings=warnings,
         )
 
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        dp_tube = result.outputs.get("dP_tube_Pa")
+        dp_shell = result.outputs.get("dP_shell_Pa")
+        rv2_tube = result.outputs.get("rho_v2_tube_nozzle")
+        rv2_shell = result.outputs.get("rho_v2_shell_nozzle")
+        velocity = state.tube_velocity_m_s
+        if dp_tube is not None:
+            lines.append(f"dP_tube = {dp_tube:.0f} Pa")
+        if dp_shell is not None:
+            lines.append(f"dP_shell = {dp_shell:.0f} Pa")
+        if rv2_tube is not None:
+            lines.append(f"Nozzle ρv² (tube) = {rv2_tube:.0f} kg/m·s²")
+        if rv2_shell is not None:
+            lines.append(f"Nozzle ρv² (shell) = {rv2_shell:.0f} kg/m·s²")
+        if velocity is not None:
+            lines.append(f"Tube velocity = {velocity:.3f} m/s")
+        return "\n".join(lines)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────
 

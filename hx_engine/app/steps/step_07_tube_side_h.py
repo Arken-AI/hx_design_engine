@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from typing import TYPE_CHECKING, Optional
 
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
@@ -374,67 +375,85 @@ class Step07TubeSideH(BaseStep):
 
         return False
 
+    @staticmethod
+    def _swap_shell_side_fluid(state: "DesignState") -> int:
+        """Swap shell/tube fluid allocation. Returns the restart-from-step (3)."""
+        old_val = state.shell_side_fluid
+        state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+        logger.info(
+            "Step7: shell_side_fluid swapped %r → %r — restart from Step 3",
+            old_val, state.shell_side_fluid,
+        )
+        return 3
+
+    @staticmethod
+    def _boost_velocity_via_geometry(state: "DesignState") -> None:
+        """Halve n_tubes and double n_passes (capped at TEMA limit 8) to raise velocity."""
+        if state.geometry is None:
+            logger.warning("Step7: no geometry to adjust — cannot increase velocity")
+            return
+        old_n_tubes = state.geometry.n_tubes
+        old_n_passes = state.geometry.n_passes
+        state.geometry.n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
+        state.geometry.n_passes = min(8, (old_n_passes or 1) * 2)
+        logger.info(
+            "Step7: geometry adjusted: n_tubes %r → %r, n_passes %r → %r",
+            old_n_tubes, state.geometry.n_tubes, old_n_passes, state.geometry.n_passes,
+        )
+
     async def apply_user_override(
         self,
         state: "DesignState",
         option_index: int,
         text: str,
     ) -> Optional[int]:
-        # Index-based dispatch
-        if option_index >= 0:
-            if option_index == 0:
-                # Swap fluid allocation — restart from Step 3
-                old_val = state.shell_side_fluid
-                new_val = "cold" if old_val == "hot" else "hot"
-                state.shell_side_fluid = new_val
-                logger.info(
-                    "[Step7-OptionA] shell_side_fluid swapped %r → %r — restart from Step 3",
-                    old_val, new_val,
-                )
-                return 3
-            if option_index == 1:
-                # Reduce n_tubes / increase n_passes to raise velocity
-                if state.geometry is not None:
-                    old_n_tubes = state.geometry.n_tubes
-                    old_n_passes = state.geometry.n_passes
-                    new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
-                    new_n_passes = min(8, (old_n_passes or 1) * 2)
-                    state.geometry.n_tubes = new_n_tubes
-                    state.geometry.n_passes = new_n_passes
-                    logger.info(
-                        "[Step7-OptionB] Geometry adjusted: n_tubes %r → %r, n_passes %r → %r",
-                        old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
-                    )
-                else:
-                    logger.warning("[Step7-OptionB] No geometry to adjust — cannot increase velocity")
-                return None
+        if option_index == 0:
+            return self._swap_shell_side_fluid(state)
+        if option_index == 1:
+            self._boost_velocity_via_geometry(state)
+            return None
 
         # Regex fallback for typed free text
-        import re
         if re.search(
             r"reduce.*n_?tubes|fewer.*tubes|increase.*n_?passes|more.*passes|increase.*velocity",
             text, re.IGNORECASE,
         ):
-            if state.geometry is not None:
-                old_n_tubes = state.geometry.n_tubes
-                old_n_passes = state.geometry.n_passes
-                new_n_tubes = max(10, int(old_n_tubes * 0.5)) if old_n_tubes else 50
-                new_n_passes = min(8, (old_n_passes or 1) * 2)
-                state.geometry.n_tubes = new_n_tubes
-                state.geometry.n_passes = new_n_passes
-                logger.info(
-                    "User override (velocity): n_tubes %r → %r, n_passes %r → %r",
-                    old_n_tubes, new_n_tubes, old_n_passes, new_n_passes,
-                )
+            self._boost_velocity_via_geometry(state)
             return None
-
         if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
-            old_val = state.shell_side_fluid
-            state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
-            logger.info(
-                "User override: shell_side_fluid swapped from %r to %r — restart from Step 3",
-                old_val, state.shell_side_fluid,
-            )
-            return 3
-
+            return self._swap_shell_side_fluid(state)
         return None
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        velocity = result.outputs.get("tube_velocity_m_s")
+        re = result.outputs.get("Re_tube")
+        pr = result.outputs.get("Pr_tube")
+        h_i = result.outputs.get("h_tube_W_m2K")
+        regime = result.outputs.get("flow_regime_tube")
+        method = result.outputs.get("method")
+        visc_corr = result.outputs.get("viscosity_correction")
+        db_div = result.outputs.get("dittus_boelter_divergence_pct")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+
+        tube_side = "cold" if state.shell_side_fluid == "hot" else "hot"
+        lines.append(f"Tube-side fluid: {tube_side} ({getattr(state, tube_side + '_fluid_name', '?')})")
+        if velocity is not None:
+            lines.append(f"Velocity = {velocity:.3f} m/s")
+        if re is not None:
+            lines.append(f"Re = {re:.0f}")
+        if pr is not None:
+            lines.append(f"Pr = {pr:.2f}")
+        if regime:
+            lines.append(f"Flow regime = {regime}")
+        if method:
+            lines.append(f"Correlation = {method}")
+        if h_i is not None:
+            lines.append(f"h_tube = {h_i:.1f} W/m²K")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction factor = {visc_corr:.4f}")
+        if db_div is not None:
+            lines.append(f"Dittus-Boelter divergence = {db_div:.1f}%")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        return "\n".join(lines)

@@ -1023,6 +1023,10 @@ class PipelineRunner:
                     restart_from = await step.apply_user_override(
                         state, option_index, user_input,
                     )
+                    # Fallback: pipeline-wide free-text patterns (TEMA, multi-shell)
+                    # only apply when the user typed text and the step didn't restart.
+                    if restart_from is None and option_index < 0 and user_input:
+                        restart_from = await self._apply_user_text_override(state, user_input)
 
                 # "skip" — don't touch state; re-run will see unchanged inputs
 
@@ -1083,9 +1087,6 @@ class PipelineRunner:
     async def _apply_user_text_override(
         state: DesignState,
         text: str,
-        *,
-        step_id: int = 0,
-        option_index: int = -1,
     ) -> Optional[int]:
         """Fallback override handler for generic (non-step-specific) free-text.
 

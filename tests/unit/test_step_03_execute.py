@@ -165,3 +165,29 @@ class TestExecute:
 
         # Properties should differ (different mean temperatures)
         assert hot.Pr != cold.Pr
+
+
+class TestStep03BuildAiContext:
+    def test_returns_property_source_key(self):
+        from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        from unittest.mock import MagicMock
+        props = MagicMock()
+        props.viscosity_Pa_s = 0.001
+        props.cp_J_kgK = 4182.0
+        props.k_W_mK = 0.6
+        props.Pr = 6.99
+        props.property_source = "thermo"
+        props.property_confidence = 0.9
+        result = StepResult(step_id=3, step_name="S", outputs={"hot_fluid_props": props})
+        ctx = Step03FluidProperties().build_ai_context(DesignState(), result)
+        assert "property_source" in ctx
+        assert "thermo" in ctx
+
+    def test_handles_missing_outputs(self):
+        from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        ctx = Step03FluidProperties().build_ai_context(DesignState(), StepResult(step_id=3, step_name="S", outputs={}))
+        assert ctx == ""

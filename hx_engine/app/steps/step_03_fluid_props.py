@@ -699,6 +699,30 @@ class Step03FluidProperties(BaseStep):
 
         return hot_phase, cold_phase, n_increments
 
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        for label, key in [("Hot", "hot_fluid_props"), ("Cold", "cold_fluid_props")]:
+            props = result.outputs.get(key)
+            if props is None:
+                continue
+            mu = getattr(props, "viscosity_Pa_s", None)
+            cp = getattr(props, "cp_J_kgK", None)
+            k = getattr(props, "k_W_mK", None)
+            pr = getattr(props, "Pr", None)
+            source = getattr(props, "property_source", None) or "unknown"
+            confidence = getattr(props, "property_confidence", None)
+            lines.append(f"{label} — property_source = {source}" + (
+                f", confidence = {confidence:.0%}" if confidence is not None else ""
+            ))
+            if all(v is not None and v > 0 for v in (mu, cp, k, pr)):
+                expected_pr = mu * cp / k
+                delta_pct = abs(pr - expected_pr) / expected_pr * 100
+                lines.append(
+                    f"{label} — Pr_computed = μ×Cp/k = {expected_pr:.2f}, "
+                    f"Pr_stored = {pr:.2f}, delta = {delta_pct:.1f}%"
+                )
+        return "\n".join(lines)
+
 
 def _detect_single_stream_phase(
     props: FluidProperties,
@@ -740,3 +764,5 @@ def _detect_single_stream_phase(
         return "vapor"
 
     return "liquid"
+
+

@@ -436,6 +436,34 @@ class Step14MechanicalCheck(BaseStep):
             warnings=warnings,
         )
 
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        tube_ok = result.outputs.get("tube_thickness_ok")
+        shell_ok = result.outputs.get("shell_thickness_ok")
+        expansion = result.outputs.get("expansion_mm")
+        mech = result.outputs.get("mechanical_details")
+        if tube_ok is not None:
+            lines.append(f"Tube thickness OK: {tube_ok}")
+        if shell_ok is not None:
+            lines.append(f"Shell thickness OK: {shell_ok}")
+        if expansion is not None:
+            lines.append(f"Thermal expansion: {expansion:.2f} mm")
+        if isinstance(mech, dict):
+            for comp in ("tube", "shell"):
+                info = mech.get(comp, {})
+                if isinstance(info, dict):
+                    t_act = info.get("actual_wall_mm")
+                    t_min = info.get("min_wall_mm")
+                    if t_act is not None and t_min is not None:
+                        margin = (t_act - t_min) / t_min * 100 if t_min else 0
+                        lines.append(
+                            f"  {comp}: t_actual={t_act:.2f}mm, "
+                            f"t_min={t_min:.2f}mm, margin={margin:.0f}%"
+                        )
+        if state.tema_type:
+            lines.append(f"TEMA type: {state.tema_type}")
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Helper

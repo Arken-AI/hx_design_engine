@@ -99,3 +99,27 @@ class TestComputeQ:
         assert Q_hot > 0
         assert Q_cold > 0
         assert Q_hot == pytest.approx(Q_cold, rel=1e-9)
+
+
+class TestStep02BuildAiContext:
+    def test_returns_expected_keys(self):
+        from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        step = Step02HeatDuty()
+        result = StepResult(step_id=2, step_name="Heat Duty", outputs={
+            "Q_hot_W": 1_000_000.0, "Q_cold_W": 980_000.0,
+            "Q_W": 990_000.0, "energy_imbalance_pct": 2.0,
+        })
+        ctx = step.build_ai_context(DesignState(), result)
+        assert "Q_hot" in ctx
+        assert "Q_cold" in ctx
+        assert "Q_used" in ctx
+        assert "Imbalance" in ctx
+
+    def test_handles_missing_outputs(self):
+        from hx_engine.app.steps.step_02_heat_duty import Step02HeatDuty
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        ctx = Step02HeatDuty().build_ai_context(DesignState(), StepResult(step_id=2, step_name="S", outputs={}))
+        assert ctx == ""
