@@ -19,6 +19,7 @@ from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
+from hx_engine.app.core.design_intent import is_termination_intent
 from hx_engine.app.core.state_utils import apply_outputs, clear_state_from_step
 from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
@@ -75,34 +76,6 @@ USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
 # How long (seconds) to wait for user response on actionable WARNING
 # (shorter than ESCALATE — auto-proceeds with current values on timeout)
 WARNING_PAUSE_TIMEOUT = 120
-
-# Phrases in escalation-option text or user free-text that signal the user
-# wants to abandon this design path entirely.  Matched case-insensitively
-# against the full option text that was selected (or the user's typed input).
-_TERMINATION_PHRASES = (
-    "terminate",
-    "flag design as impractical",
-    "flag as impractical",
-    "not viable",
-    "impractical",
-    "abort design",
-    "abandon",
-    "no further steps",
-    "cannot proceed",
-    "stop design",
-    "recommend plate",
-    "recommend double-pipe",
-    "recommend a plate",
-    "recommend a double-pipe",
-    "use a plate",
-    "use a double-pipe",
-)
-
-
-def _is_termination_intent(text: str) -> bool:
-    """Return True if *text* signals the user wants to terminate this design path."""
-    lowered = text.lower()
-    return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
 
 
 class PipelineRunner:
@@ -314,7 +287,7 @@ class PipelineRunner:
                         # should be abandoned (e.g. "flag as impractical",
                         # "terminate", "recommend plate exchanger"), halt
                         # the pipeline gracefully instead of re-running the step.
-                        if _is_termination_intent(user_response_text or ""):
+                        if is_termination_intent(user_response_text or ""):
                             termination_msg = (
                                 f"Design terminated at Step {step.step_id} "
                                 f"({step.step_name}) by user decision: "
@@ -405,7 +378,7 @@ class PipelineRunner:
                         state.waiting_for_user = False
 
                         # --- Check for user-initiated termination ---
-                        if _is_termination_intent(warn_response_text or ""):
+                        if is_termination_intent(warn_response_text or ""):
                             termination_msg = (
                                 f"Design terminated at Step {step.step_id} "
                                 f"({step.step_name}) by user decision: "

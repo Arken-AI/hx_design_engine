@@ -34,7 +34,7 @@ from hx_engine.app.models.step_result import (
     StepResult,
 )
 from hx_engine.app.steps.base import BaseStep
-from hx_engine.app.core.pipeline_runner import _is_termination_intent
+from hx_engine.app.core.design_intent import is_termination_intent
 
 
 # ===================================================================
@@ -619,59 +619,59 @@ class TestStep7EscalationOptionHandling:
 # ===================================================================
 
 class TestTerminationIntentDetection:
-    """Unit tests for _is_termination_intent — phrase matching logic."""
+    """Unit tests for is_termination_intent — phrase matching logic."""
 
     def test_flag_design_as_impractical(self):
         """Option text 'Flag design as impractical...' triggers termination."""
         text = "Flag design as impractical and recommend plate or double-pipe exchanger to the user"
-        assert _is_termination_intent(text) is True
+        assert is_termination_intent(text) is True
 
     def test_terminate_keyword(self):
         """Text containing 'terminate' triggers termination."""
-        assert _is_termination_intent("Terminate this shell-and-tube design path entirely") is True
+        assert is_termination_intent("Terminate this shell-and-tube design path entirely") is True
 
     def test_not_viable(self):
         """Text containing 'not viable' triggers termination."""
-        assert _is_termination_intent("This design is not viable for S&T") is True
+        assert is_termination_intent("This design is not viable for S&T") is True
 
     def test_recommend_plate(self):
         """Text containing 'recommend plate' triggers termination."""
-        assert _is_termination_intent("Recommend plate exchanger for this duty") is True
+        assert is_termination_intent("Recommend plate exchanger for this duty") is True
 
     def test_recommend_double_pipe(self):
         """Text containing 'recommend double-pipe' triggers termination."""
-        assert _is_termination_intent("recommend double-pipe exchanger instead") is True
+        assert is_termination_intent("recommend double-pipe exchanger instead") is True
 
     def test_abort_design(self):
         """Text containing 'abort design' triggers termination."""
-        assert _is_termination_intent("abort design and start over") is True
+        assert is_termination_intent("abort design and start over") is True
 
     def test_no_further_steps(self):
         """Text containing 'no further steps' triggers termination."""
         text = "no further steps possible"
-        assert _is_termination_intent(text) is True
+        assert is_termination_intent(text) is True
 
     def test_case_insensitive(self):
         """Termination detection is case-insensitive."""
-        assert _is_termination_intent("FLAG DESIGN AS IMPRACTICAL") is True
-        assert _is_termination_intent("Terminate This Design") is True
+        assert is_termination_intent("FLAG DESIGN AS IMPRACTICAL") is True
+        assert is_termination_intent("Terminate This Design") is True
 
     def test_normal_override_not_termination(self):
         """Normal override text like 'swap fluid' is NOT termination."""
-        assert _is_termination_intent("swap fluid allocation") is False
+        assert is_termination_intent("swap fluid allocation") is False
 
     def test_proceed_not_termination(self):
         """Text like 'proceed with minimum TEMA' is NOT termination."""
-        assert _is_termination_intent("proceed with minimum TEMA shell geometry") is False
+        assert is_termination_intent("proceed with minimum TEMA shell geometry") is False
 
     def test_empty_string_not_termination(self):
         """Empty string is NOT termination."""
-        assert _is_termination_intent("") is False
+        assert is_termination_intent("") is False
 
     def test_accept_not_termination(self):
         """Acceptance phrases are NOT termination."""
-        assert _is_termination_intent("yes, go ahead") is False
-        assert _is_termination_intent("accept") is False
+        assert is_termination_intent("yes, go ahead") is False
+        assert is_termination_intent("accept") is False
 
 
 # ===================================================================
