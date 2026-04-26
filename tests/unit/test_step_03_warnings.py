@@ -39,7 +39,7 @@ class TestCornerCases:
         """crude oil → warning about generic API assumption."""
         state = DesignState(
             hot_fluid_name="crude oil",
-            cold_fluid_name="ethanol",
+            cold_fluid_name="thermal oil",
             T_hot_in_C=150.0,
             T_hot_out_C=90.0,
             T_cold_in_C=30.0,
@@ -144,9 +144,36 @@ class TestCornerCases:
             P_cold_Pa=101325.0,
         )
         step = Step03FluidProperties()
-        result = await step.execute(state)
 
-        # Should have no warnings (no crude, no water, no high viscosity)
+        # Stable props: constant viscosity (ratio=1.0 → no variation warning),
+        # confidence=1.0 (no petroleum-source warning), viscosity < 0.1 Pa·s.
+        _STABLE_PROPS = FluidProperties(
+            density_kg_m3=880.0,
+            viscosity_Pa_s=0.005,
+            cp_J_kgK=2200.0,
+            k_W_mK=0.14,
+            Pr=78.0,
+        )
+
+        async def _stable_adapter(fluid_name, T_mean_C, pressure_Pa=None):
+            return _STABLE_PROPS
+
+        # Provide a valid freezing point well below min operating temperature
+        # (thermal oil min = 100°C = 373.15 K; ethanol min = 30°C = 303.15 K;
+        # return T_freeze = 200 K for both so margin is positive and large).
+        def _stable_freeze(fluid_name, pressure_Pa=None):
+            return 200.0, "test"
+
+        with patch(
+            "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
+            side_effect=_stable_adapter,
+        ), patch(
+            "hx_engine.app.steps.step_03_fluid_props.get_freezing_or_pour_point",
+            side_effect=_stable_freeze,
+        ):
+            result = await step.execute(state)
+
+        # Should have no warnings (stable props, no crude, no water, no high viscosity)
         assert len(result.warnings) == 0
 
     async def test_unknown_fluid_error_is_helpful(self):

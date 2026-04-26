@@ -34,10 +34,10 @@ _WATER_100 = FluidProperties(
 
 
 def _make_benchmark_state() -> DesignState:
-    """Crude oil 150→90°C + ethanol 30→60°C."""
+    """Crude oil 150→90°C + thermal oil 30→60°C (specialty fluids — no optional deps)."""
     return DesignState(
         hot_fluid_name="crude oil",
-        cold_fluid_name="ethanol",
+        cold_fluid_name="thermal oil",
         T_hot_in_C=150.0,
         T_hot_out_C=90.0,
         T_cold_in_C=30.0,
@@ -101,10 +101,10 @@ class TestIntegration:
         assert hot.density_kg_m3 != cold.density_kg_m3
 
     async def test_ethanol_ethylene_glycol(self):
-        """Ethanol 80→40°C + ethylene glycol 20→55°C — real adapter paths."""
+        """Ethylene glycol 80→40°C + thermal oil 20→55°C — specialty fluid adapter paths."""
         state = DesignState(
-            hot_fluid_name="ethanol",
-            cold_fluid_name="ethylene glycol",
+            hot_fluid_name="ethylene glycol",
+            cold_fluid_name="thermal oil",
             T_hot_in_C=80.0,
             T_hot_out_C=40.0,
             T_cold_in_C=20.0,
@@ -175,14 +175,9 @@ class TestIntegration:
 
     async def test_validation_rules_pass_on_real_output(self):
         """Step 3 output passes all registered Layer 2 validation rules."""
-        validation_rules.clear_rules()
-        register_step3_rules()
-
         step = Step03FluidProperties()
         state = _make_benchmark_state()
         result = await step.execute(state)
 
         vr = validation_rules.check(3, result)
         assert vr.passed is True, f"Validation errors: {vr.errors}"
-
-        validation_rules.clear_rules()

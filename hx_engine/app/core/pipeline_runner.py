@@ -348,8 +348,6 @@ class PipelineRunner:
 
                         if restart_from is not None and restart_from < step.step_id:
                             # --- Restart from an earlier step ---
-                            # Clear stale state from restart point onward
-                            clear_state_from_step(state, restart_from)
                             # Reset escalation counter — new execution path
                             escalation_count = 0
                             logger.info(
@@ -357,39 +355,10 @@ class PipelineRunner:
                                 "through Step %d after user chose restart",
                                 restart_from, step.step_id,
                             )
-                            # Re-execute steps from restart_from through current step
-                            restart_steps = [
-                                s for s in PIPELINE_STEPS
-                                if restart_from <= s.step_id <= step.step_id
-                            ]
-                            for restart_step_cls in restart_steps:
-                                rs = restart_step_cls()
-                                await self.sse_manager.emit(
-                                    session_id,
-                                    StepStartedEvent(
-                                        session_id=session_id,
-                                        step_id=rs.step_id,
-                                        step_name=rs.step_name,
-                                    ).model_dump(),
-                                )
-                                try:
-                                    r = await rs.run_with_review_loop(
-                                        state, self.ai_engineer
-                                    )
-                                except (CalculationError, StepHardFailure) as exc:
-                                    state.pipeline_status = "error"
-                                    await self._emit_step_error(
-                                        session_id, rs,
-                                        str(exc) if isinstance(exc, CalculationError)
-                                        else "; ".join(exc.validation_errors),
-                                    )
-                                    return state
-                                self._apply_outputs(state, r)
-                                state.current_step = rs.step_id
-                                if rs.step_id not in state.completed_steps:
-                                    state.completed_steps.append(rs.step_id)
-                                await self._emit_decision_event(session_id, rs, r, 0)
-                                await self.session_store.save(session_id, state)
+                            if await self._rerun_steps_from(
+                                state, session_id, restart_from, step.step_id,
+                            ) is None:
+                                return state  # error already emitted
                             # Current step was re-executed as part of the restart
                             # chain — break out of the escalation while-loop.
                             break
@@ -702,36 +671,12 @@ class PipelineRunner:
                     "Convergence restart #%d from Step %d",
                     state.convergence_restart_count, restart_from,
                 )
-                clear_state_from_step(state, restart_from)
-                restart_steps = [
-                    s for s in PIPELINE_STEPS if s.step_id >= restart_from
-                ]
-                for step_cls in restart_steps:
-                    rs = step_cls()
-                    await self.sse_manager.emit(
-                        session_id,
-                        StepStartedEvent(
-                            session_id=session_id,
-                            step_id=rs.step_id,
-                            step_name=rs.step_name,
-                        ).model_dump(),
-                    )
-                    try:
-                        r = await rs.run_with_review_loop(state, self.ai_engineer)
-                    except (CalculationError, StepHardFailure) as exc:
-                        state.pipeline_status = "error"
-                        await self._emit_step_error(
-                            session_id, rs,
-                            str(exc) if isinstance(exc, CalculationError)
-                            else "; ".join(exc.validation_errors),
-                        )
-                        return state
-                    self._apply_outputs(state, r)
-                    state.current_step = rs.step_id
-                    if rs.step_id not in state.completed_steps:
-                        state.completed_steps.append(rs.step_id)
-                    await self._emit_decision_event(session_id, rs, r, 0)
-                    await self.session_store.save(session_id, state)
+                result_state = await self._rerun_steps_from(
+                    state, session_id, restart_from,
+                )
+                if result_state is None:
+                    return state  # error already emitted, pipeline_status='error'
+                state = result_state
 
                 # Re-run convergence loop (continues the while loop)
                 state.convergence_trajectory.clear()
@@ -792,6 +737,57 @@ class PipelineRunner:
         await self._emit_decision_event(session_id, step, result, 0)
         await self.session_store.save(session_id, state)
 
+        return state
+
+    # ------------------------------------------------------------------
+    # Shared restart helper
+    # ------------------------------------------------------------------
+
+    async def _rerun_steps_from(
+        self,
+        state: DesignState,
+        session_id: str,
+        from_step: int,
+        to_step: Optional[int] = None,
+    ) -> Optional[DesignState]:
+        """Clear state from `from_step` onward and re-execute steps in order.
+
+        `to_step=None` means re-run all steps from `from_step` to end of
+        pipeline.  Returns the updated state on success, or None if any step
+        errored (state already marked pipeline_status='error' on return).
+        """
+        clear_state_from_step(state, from_step)
+        restart_steps = [
+            s for s in PIPELINE_STEPS
+            if s.step_id >= from_step
+            and (to_step is None or s.step_id <= to_step)
+        ]
+        for step_cls in restart_steps:
+            rs = step_cls()
+            await self.sse_manager.emit(
+                session_id,
+                StepStartedEvent(
+                    session_id=session_id,
+                    step_id=rs.step_id,
+                    step_name=rs.step_name,
+                ).model_dump(),
+            )
+            try:
+                r = await rs.run_with_review_loop(state, self.ai_engineer)
+            except (CalculationError, StepHardFailure) as exc:
+                state.pipeline_status = "error"
+                await self._emit_step_error(
+                    session_id, rs,
+                    str(exc) if isinstance(exc, CalculationError)
+                    else "; ".join(exc.validation_errors),
+                )
+                return None
+            self._apply_outputs(state, r)
+            state.current_step = rs.step_id
+            if rs.step_id not in state.completed_steps:
+                state.completed_steps.append(rs.step_id)
+            await self._emit_decision_event(session_id, rs, r, 0)
+            await self.session_store.save(session_id, state)
         return state
 
     # ------------------------------------------------------------------

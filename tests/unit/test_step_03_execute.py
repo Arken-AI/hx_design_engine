@@ -22,10 +22,10 @@ _WATER_45 = FluidProperties(
 
 
 def _make_benchmark_state() -> DesignState:
-    """Crude oil 150→90°C + ethanol 30→60°C — both resolve without mocks."""
+    """Crude oil 150→90°C + thermal oil 30→60°C — both resolve without optional deps."""
     return DesignState(
         hot_fluid_name="crude oil",
-        cold_fluid_name="ethanol",
+        cold_fluid_name="thermal oil",
         T_hot_in_C=150.0,
         T_hot_out_C=90.0,
         T_cold_in_C=30.0,
