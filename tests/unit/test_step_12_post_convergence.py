@@ -24,6 +24,7 @@ from hx_engine.app.models.step_result import (
     StepResult,
 )
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
+from tests.unit.conftest import make_collector as _make_collector
 
 
 def _make_geometry(**overrides) -> GeometrySpec:
@@ -90,25 +91,13 @@ def _converging_state() -> DesignState:
     )
 
 
-class MockSSEManager:
-    def __init__(self):
-        self.events: list[dict] = []
-
-    async def emit(self, session_id: str, event: dict) -> None:
-        self.events.append(event)
-
-
 class TestPostConvergenceAI:
-    @pytest.fixture
-    def sse_manager(self):
-        return MockSSEManager()
-
     @pytest.fixture
     def ai_engineer(self):
         return AIEngineer(stub_mode=True)
 
     @pytest.mark.asyncio
-    async def test_post_convergence_ai_runs(self, sse_manager, ai_engineer):
+    async def test_post_convergence_ai_runs(self, ai_engineer):
         """After loop converges, Steps 7-11 re-run with AI enabled."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -140,7 +129,8 @@ class TestPostConvergenceAI:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_run,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            _, emit = _make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         # There should be post-convergence calls with in_convergence_loop=False
         assert len(post_flags) > 0, "Post-convergence AI pass did not run"
@@ -148,7 +138,7 @@ class TestPostConvergenceAI:
         assert state.convergence_converged is True
 
     @pytest.mark.asyncio
-    async def test_post_convergence_results_applied(self, sse_manager, ai_engineer):
+    async def test_post_convergence_results_applied(self, ai_engineer):
         """Values from the post-convergence pass are applied to state."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -173,7 +163,8 @@ class TestPostConvergenceAI:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_run,
         ):
-            await step12.run(state, ai_engineer, sse_manager, "test-session")
+            _, emit = _make_collector()
+            await step12.run(state, ai_engineer, emit_event=emit)
 
         # Post-convergence h_shell should be the final value
         assert state.h_shell_W_m2K == final_h_shell

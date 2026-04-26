@@ -14,7 +14,10 @@ import json
 import logging
 import math
 import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Final
+
+from pydantic import BaseModel
 
 from hx_engine.app.core.state_utils import apply_outputs
 from hx_engine.app.data.tema_tables import find_shell_diameter, get_tube_count
@@ -31,7 +34,6 @@ from hx_engine.app.models.step_result import (
 
 if TYPE_CHECKING:
     from hx_engine.app.core.ai_engineer import AIEngineer
-    from hx_engine.app.core.sse_manager import SSEManager
     from hx_engine.app.models.design_state import DesignState
     from hx_engine.app.models.design_state import GeometrySpec
 
@@ -218,8 +220,7 @@ class Step12Convergence:
         self,
         state: "DesignState",
         ai_engineer: "AIEngineer",
-        sse_manager: "SSEManager",
-        session_id: str,
+        emit_event: Callable[[BaseModel], Awaitable[None]],
     ) -> StepResult:
         """Run the convergence loop.
 
@@ -274,10 +275,9 @@ class Step12Convergence:
                     and self._check_convergence(state, delta_U_pct)
                 )
                 adjustment_desc = ""
-                await sse_manager.emit(
-                    session_id,
+                await emit_event(
                     IterationProgressEvent(
-                        session_id=session_id,
+                        session_id="",
                         iteration_number=iteration,
                         max_iterations=self.MAX_ITERATIONS,
                         current_U=current_U,
@@ -296,7 +296,7 @@ class Step12Convergence:
                         ),
                         velocity_m_s=getattr(state, "tube_velocity_m_s", None),
                         adjustment_made=None,  # filled after adjustment below
-                    ).model_dump(),
+                    )
                 )
 
                 # --- check convergence ---
@@ -335,7 +335,7 @@ class Step12Convergence:
         # --- post-convergence ---
         if converged:
             # Re-run Steps 7→11 with AI enabled for final review
-            await self._post_convergence_ai_pass(state, ai_engineer, sse_manager, session_id, sub_steps)
+            await self._post_convergence_ai_pass(state, ai_engineer, emit_event, sub_steps)
             return StepResult(
                 step_id=self.step_id,
                 step_name=self.step_name,
@@ -751,8 +751,7 @@ class Step12Convergence:
         self,
         state: "DesignState",
         ai_engineer: "AIEngineer",
-        sse_manager: "SSEManager",
-        session_id: str,
+        emit_event: Callable[[BaseModel], Awaitable[None]],
         sub_steps: list[type],
     ) -> None:
         """Re-run Steps 7→11 with AI enabled on the final converged geometry."""
@@ -760,13 +759,12 @@ class Step12Convergence:
         for step_cls in sub_steps:
             step = step_cls()
 
-            await sse_manager.emit(
-                session_id,
+            await emit_event(
                 StepStartedEvent(
-                    session_id=session_id,
+                    session_id="",
                     step_id=step.step_id,
                     step_name=step.step_name,
-                ).model_dump(),
+                )
             )
 
             result = await step.run_with_review_loop(state, ai_engineer)
@@ -777,21 +775,19 @@ class Step12Convergence:
 
             # Emit decision event
             await self._emit_sub_step_decision(
-                sse_manager, session_id, step, result,
+                emit_event, step, result,
             )
 
     @staticmethod
     async def _emit_sub_step_decision(
-        sse_manager: "SSEManager",
-        session_id: str,
+        emit_event: Callable[[BaseModel], Awaitable[None]],
         step: Any,
         result: "StepResult",
     ) -> None:
         """Emit the appropriate SSE event for a post-convergence sub-step."""
-        await sse_manager.emit(
-            session_id,
+        await emit_event(
             StepApprovedEvent(
-                session_id=session_id,
+                session_id="",
                 step_id=step.step_id,
                 step_name=step.step_name,
                 confidence=(
@@ -801,7 +797,7 @@ class Step12Convergence:
                     result.ai_review.reasoning if result.ai_review else ""
                 ),
                 outputs={},
-            ).model_dump(),
+            )
         )
 
     # ------------------------------------------------------------------

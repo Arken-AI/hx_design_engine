@@ -25,6 +25,7 @@ from hx_engine.app.models.step_result import (
     StepResult,
 )
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
+from tests.unit.conftest import make_collector as _make_collector
 
 
 def _make_geometry(**overrides) -> GeometrySpec:
@@ -91,25 +92,13 @@ def _non_converging_state() -> DesignState:
     )
 
 
-class MockSSEManager:
-    def __init__(self):
-        self.events: list[dict] = []
-
-    async def emit(self, session_id: str, event: dict) -> None:
-        self.events.append(event)
-
-
 class TestNonConvergence:
-    @pytest.fixture
-    def sse_manager(self):
-        return MockSSEManager()
-
     @pytest.fixture
     def ai_engineer(self):
         return AIEngineer(stub_mode=True)
 
     @pytest.mark.asyncio
-    async def test_non_convergence_escalates(self, sse_manager, ai_engineer):
+    async def test_non_convergence_escalates(self, ai_engineer):
         """Loop exhausted → ESCALATE result returned."""
         state = _non_converging_state()
         step12 = Step12Convergence()
@@ -132,14 +121,15 @@ class TestNonConvergence:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_never_converge,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            _, emit = _make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         assert result.ai_review is not None
         assert result.ai_review.decision == AIDecisionEnum.ESCALATE
         assert state.convergence_converged is False
 
     @pytest.mark.asyncio
-    async def test_non_convergence_has_trajectory(self, sse_manager, ai_engineer):
+    async def test_non_convergence_has_trajectory(self, ai_engineer):
         """Trajectory is populated after exhausting iterations."""
         state = _non_converging_state()
         step12 = Step12Convergence()
@@ -162,12 +152,13 @@ class TestNonConvergence:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_never_converge,
         ):
-            await step12.run(state, ai_engineer, sse_manager, "test-session")
+            _, emit = _make_collector()
+            await step12.run(state, ai_engineer, emit_event=emit)
 
         assert len(state.convergence_trajectory) == 3
 
     @pytest.mark.asyncio
-    async def test_restart_from_step_in_outputs(self, sse_manager, ai_engineer):
+    async def test_restart_from_step_in_outputs(self, ai_engineer):
         """Non-convergence result contains restart info."""
         state = _non_converging_state()
         step12 = Step12Convergence()
@@ -184,7 +175,8 @@ class TestNonConvergence:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_never_converge,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            _, emit = _make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         # Should have convergence_action in outputs
         assert "convergence_action" in result.outputs

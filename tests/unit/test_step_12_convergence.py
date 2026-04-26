@@ -26,6 +26,7 @@ from hx_engine.app.models.design_state import (
     FluidProperties,
     GeometrySpec,
 )
+from hx_engine.app.models.sse_events import IterationProgressEvent
 from hx_engine.app.models.step_result import (
     AIDecisionEnum,
     AIReview,
@@ -37,6 +38,7 @@ from hx_engine.app.steps.step_12_convergence import (
     Step12Convergence,
     _clamp_baffle_spacing,
 )
+from tests.unit.conftest import make_collector
 
 
 # ===================================================================
@@ -144,16 +146,6 @@ def _make_converging_substep_results(iteration: int) -> list[StepResult]:
             }
         results.append(StepResult(step_id=step_id, step_name=name, outputs=outputs))
     return results
-
-
-class MockSSEManager:
-    """Mock SSE manager that records events."""
-
-    def __init__(self):
-        self.events: list[dict] = []
-
-    async def emit(self, session_id: str, event: dict) -> None:
-        self.events.append(event)
 
 
 # ===================================================================
@@ -421,15 +413,11 @@ class TestConvergenceRun:
     """Tests for the full async run() method with mocked sub-steps."""
 
     @pytest.fixture
-    def sse_manager(self):
-        return MockSSEManager()
-
-    @pytest.fixture
     def ai_engineer(self):
         return AIEngineer(stub_mode=True)
 
     @pytest.mark.asyncio
-    async def test_convergence_happy_path(self, sse_manager, ai_engineer):
+    async def test_convergence_happy_path(self, ai_engineer):
         """Sub-steps converge within a few iterations."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -462,7 +450,8 @@ class TestConvergenceRun:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_run_with_review_loop,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            collected, emit = make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         assert state.convergence_converged is True
         assert state.convergence_iteration is not None
@@ -470,7 +459,7 @@ class TestConvergenceRun:
         assert state.in_convergence_loop is False
 
     @pytest.mark.asyncio
-    async def test_try_finally_flag_reset(self, sse_manager, ai_engineer):
+    async def test_try_finally_flag_reset(self, ai_engineer):
         """in_convergence_loop is cleared even when sub-step raises."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -483,13 +472,14 @@ class TestConvergenceRun:
             new=mock_run_raises,
         ):
             # The exception from all sub-steps being caught in the loop
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            collected, emit = make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         # Flag MUST be cleared regardless of exception
         assert state.in_convergence_loop is False
 
     @pytest.mark.asyncio
-    async def test_max_iterations_hit(self, sse_manager, ai_engineer):
+    async def test_max_iterations_hit(self, ai_engineer):
         """Loop exhausts all iterations without converging."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -514,14 +504,15 @@ class TestConvergenceRun:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_never_converges,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            collected, emit = make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         assert state.convergence_converged is False
         assert result.ai_review is not None
         assert result.ai_review.decision == AIDecisionEnum.ESCALATE
 
     @pytest.mark.asyncio
-    async def test_ai_skipped_in_loop(self, sse_manager, ai_engineer):
+    async def test_ai_skipped_in_loop(self, ai_engineer):
         """Verify in_convergence_loop flag is True during loop execution."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -550,7 +541,8 @@ class TestConvergenceRun:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_check_flag,
         ):
-            result = await step12.run(state, ai_engineer, sse_manager, "test-session")
+            collected, emit = make_collector()
+            result = await step12.run(state, ai_engineer, emit_event=emit)
 
         # All calls during the loop should see in_convergence_loop=True
         assert len(loop_flags) > 0, "No loop calls captured"
@@ -559,7 +551,7 @@ class TestConvergenceRun:
         assert len(post_flags) > 0, "No post-convergence calls captured"
 
     @pytest.mark.asyncio
-    async def test_sse_iteration_events(self, sse_manager, ai_engineer):
+    async def test_sse_iteration_events(self, ai_engineer):
         """IterationProgressEvent emitted each iteration."""
         state = _converging_state()
         step12 = Step12Convergence()
@@ -586,12 +578,66 @@ class TestConvergenceRun:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_converge_iter2,
         ):
-            await step12.run(state, ai_engineer, sse_manager, "test-session")
+            collected, emit = make_collector()
+            await step12.run(state, ai_engineer, emit_event=emit)
 
-        iter_events = [
-            e for e in sse_manager.events if e.get("event_type") == "iteration_progress"
-        ]
+        iter_events = [e for e in collected if isinstance(e, IterationProgressEvent)]
         assert len(iter_events) >= 1
+
+
+# ===================================================================
+# tests — emit_event required (Phase 3.4 contract)
+# ===================================================================
+
+
+class TestEmitEventRequired:
+    @pytest.mark.asyncio
+    async def test_emit_event_now_required(self):
+        """Calling run() without emit_event raises TypeError (required arg)."""
+        step12 = Step12Convergence()
+        state = _converging_state()
+        ai_engineer = AIEngineer(stub_mode=True)
+        with pytest.raises(TypeError):
+            await step12.run(state, ai_engineer)  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_session_id_stamped_by_closure(self):
+        """Events collected via a closure that stamps session_id carry the correct value."""
+        from hx_engine.app.models.sse_events import SSEBaseEvent
+
+        expected_sid = "test-session-123"
+        collected, base_emit = make_collector()
+
+        async def emit_with_sid(event: SSEBaseEvent) -> None:  # type: ignore[override]
+            event.session_id = expected_sid
+            await base_emit(event)
+
+        state = _converging_state()
+        step12 = Step12Convergence()
+        step12.MAX_ITERATIONS = 1
+
+        async def mock_substeps(inner_self, state, ai_eng):
+            step_id = inner_self.step_id
+            outputs = {}
+            if step_id == 9:
+                outputs = {"U_dirty_W_m2K": 350.0}
+            elif step_id == 11:
+                outputs = {"overdesign_pct": 15.0, "area_required_m2": 25.0, "area_provided_m2": 28.75}
+            elif step_id == 10:
+                outputs = {"dP_tube_Pa": 45000.0, "dP_shell_Pa": 95000.0}
+            elif step_id == 7:
+                outputs = {"tube_velocity_m_s": 1.4}
+            return StepResult(step_id=step_id, step_name=inner_self.step_name, outputs=outputs)
+
+        with patch(
+            "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
+            new=mock_substeps,
+        ):
+            await step12.run(state, AIEngineer(stub_mode=True), emit_event=emit_with_sid)
+
+        iter_events = [e for e in collected if isinstance(e, IterationProgressEvent)]
+        assert len(iter_events) >= 1
+        assert all(e.session_id == expected_sid for e in iter_events)
 
 
 # ===================================================================
@@ -686,16 +732,12 @@ class TestSingleShellIterationCountRegression:
     """Locks single-shell convergence iteration count against future drift."""
 
     @pytest.fixture
-    def sse_manager(self) -> MockSSEManager:
-        return MockSSEManager()
-
-    @pytest.fixture
     def ai_engineer(self) -> AIEngineer:
         return AIEngineer(stub_mode=True)
 
     @pytest.mark.asyncio
     async def test_single_shell_converges_in_pinned_iteration_count(
-        self, sse_manager, ai_engineer,
+        self, ai_engineer,
     ):
         """Stable single-shell trajectory converges in exactly the pinned count."""
         state = _converging_state()
@@ -713,7 +755,8 @@ class TestSingleShellIterationCountRegression:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=mock_run_with_review_loop,
         ):
-            await step12.run(state, ai_engineer, sse_manager, "single-shell-baseline")
+            collected, emit = make_collector()
+            await step12.run(state, ai_engineer, emit_event=emit)
 
         assert state.convergence_converged is True
         assert state.convergence_iteration == SINGLE_SHELL_BASELINE_ITERATIONS

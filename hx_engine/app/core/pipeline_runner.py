@@ -13,6 +13,8 @@ import re
 import time
 from typing import Any, Optional
 
+from pydantic import BaseModel
+
 from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
 from hx_engine.app.core.session_store import SessionStore
@@ -605,8 +607,12 @@ class PipelineRunner:
             )
 
             try:
+                async def _emit(event: BaseModel) -> None:
+                    event.session_id = session_id  # type: ignore[attr-defined]
+                    await self.sse_manager.emit(session_id, event.model_dump())
+
                 result = await step12.run(
-                    state, self.ai_engineer, self.sse_manager, session_id,
+                    state, self.ai_engineer, emit_event=_emit,
                 )
             except Exception as exc:
                 logger.exception("Step 12 convergence loop failed")
