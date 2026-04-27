@@ -866,8 +866,11 @@ SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 _SKILL_CACHE: dict[str, str] = {}
 
+# Step 1 (Requirements Validation) has ai_mode=NONE — no AI review, no
+# skill file, no entry here. Validation rules live in
+# hx_engine/app/core/requirements_validator.py instead.
 _STEP_FILE_NAMES: dict[int, str] = {
-    1: "step_01_requirements.md", 2: "step_02_heat_duty.md",
+    2: "step_02_heat_duty.md",
     3: "step_03_fluid_properties.md", 4: "step_04_tema_geometry.md",
     5: "step_05_lmtd_f_factor.md", 6: "step_06_initial_u.md",
     7: "step_07_tube_side_htc.md", 8: "step_08_shell_side_htc.md",

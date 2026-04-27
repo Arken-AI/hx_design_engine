@@ -71,7 +71,7 @@ class TestBuildSystemPrompt:
     @pytest.mark.parametrize(
         "step_id, expected_fragment",
         [
-            (1, "Process Requirements"),
+            # Step 1 excluded: ai_mode=NONE, _build_system_prompt never called in production
             (2, "Heat Duty Calculation"),
             (3, "Fluid Properties"),
             (4, "TEMA Type"),
@@ -81,14 +81,6 @@ class TestBuildSystemPrompt:
     def test_contains_step_specific_content(self, step_id, expected_fragment):
         prompt = _build_system_prompt(step_id, f"Step {step_id}")
         assert expected_fragment in prompt
-
-    def test_step1_has_fluid_name_rules(self):
-        prompt = _build_system_prompt(1, "Process Requirements")
-        assert "FLUID NAME RULES" in prompt
-
-    def test_step1_has_scope_check(self):
-        prompt = _build_system_prompt(1, "Process Requirements")
-        assert "PHASE SCOPE CHECK" in prompt
 
     def test_step4_has_tema_selection(self):
         prompt = _build_system_prompt(4, "TEMA Geometry")
@@ -117,17 +109,30 @@ class TestBuildSystemPrompt:
         # Should still contain the base prompt
         assert "senior heat exchanger design engineer" in prompt
 
-    def test_all_16_steps_have_skill_files(self):
-        for sid in range(1, 17):
+    def test_steps_2_to_16_have_skill_file_entries(self):
+        """Steps with AI review must have an entry in _STEP_FILE_NAMES.
+        Step 1 is excluded: ai_mode=NONE means no skill file is needed.
+        """
+        for sid in range(2, 17):
             assert sid in _STEP_FILE_NAMES, f"Step {sid} missing from _STEP_FILE_NAMES"
+        assert 1 not in _STEP_FILE_NAMES, (
+            "Step 1 has ai_mode=NONE and must not have a _STEP_FILE_NAMES entry"
+        )
 
-    def test_all_16_steps_have_md_skill_files(self):
-        """All 16 steps must have a corresponding .md skill file on disk."""
-        for sid in range(1, 17):
+    def test_steps_2_to_16_have_md_skill_files_on_disk(self):
+        """Steps 2–16 must have a corresponding .md skill file on disk.
+        Step 1 is excluded: ai_mode=NONE means no skill file is needed or expected.
+        """
+        for sid in range(2, 17):
             filename = _STEP_FILE_NAMES.get(sid)
             assert filename, f"Step {sid} missing from _STEP_FILE_NAMES"
             skill_path = SKILLS_DIR / filename
             assert skill_path.exists(), f"Skill file missing: {skill_path}"
+        # The deleted Step 1 skill file must not silently reappear.
+        assert not (SKILLS_DIR / "step_01_requirements.md").exists(), (
+            "step_01_requirements.md was deliberately removed (ai_mode=NONE) "
+            "and must not be reintroduced"
+        )
 
 
 # -----------------------------------------------------------------------
