@@ -103,6 +103,73 @@ def _is_termination_intent(text: str) -> bool:
     return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
 
 
+# ---------------------------------------------------------------------------
+# Step 7 auto-restart on tube-velocity Layer 2 violation.
+#
+# Step 7 (Tube-Side HTC) cannot fix tube velocity by re-executing itself —
+# velocity is governed by ``n_tubes / n_passes`` set in Steps 4/6.  Before
+# escalating to the user, the pipeline tries up to ``MAX_VELOCITY_RESTARTS``
+# automatic geometry adjustments: doubling ``n_passes`` for a "below hard
+# minimum" violation, halving for "above hard maximum", and re-running
+# Steps 5–6 so LMTD F-factor and the chosen shell are refreshed.  Step 6
+# recomputes ``n_tubes`` from required area, so we only mutate ``n_passes``
+# here — that is the lever that actually changes ``tubes_per_pass`` after
+# Step 6 re-runs.
+# ---------------------------------------------------------------------------
+
+MAX_VELOCITY_RESTARTS = 3
+_N_PASSES_MAX = 8  # TEMA limit (mirrors Step 7 Option B in _apply_user_text_override)
+_N_PASSES_MIN = 1
+
+
+def _is_velocity_bound_error(errors: list[str]) -> bool:
+    """True when at least one Layer 2 error message is a tube-velocity bound."""
+    for err in errors or ():
+        lowered = err.lower()
+        if "tube velocity" in lowered and (
+            "below hard minimum" in lowered or "above hard maximum" in lowered
+        ):
+            return True
+    return False
+
+
+def _adjust_n_passes_for_velocity(
+    state: "DesignState", errors: list[str],
+) -> Optional[tuple[int, int, str]]:
+    """Adjust ``state.geometry.n_passes`` to recover from a velocity bound error.
+
+    Returns ``(old_n_passes, new_n_passes, direction)`` on success, or
+    ``None`` when adjustment is not possible (no geometry, no current
+    ``n_passes``, or already at the cap/floor for the failing direction).
+    ``direction`` is ``"increase"`` (velocity_low) or ``"decrease"`` (velocity_high).
+    """
+    if state.geometry is None or state.geometry.n_passes is None:
+        return None
+
+    is_low = any("below hard minimum" in e.lower() for e in errors)
+    is_high = any("above hard maximum" in e.lower() for e in errors)
+
+    old_n_passes = state.geometry.n_passes
+    if is_low:
+        if old_n_passes >= _N_PASSES_MAX:
+            return None
+        new_n_passes = min(_N_PASSES_MAX, old_n_passes * 2)
+        direction = "increase"
+    elif is_high:
+        if old_n_passes <= _N_PASSES_MIN:
+            return None
+        new_n_passes = max(_N_PASSES_MIN, old_n_passes // 2)
+        direction = "decrease"
+    else:
+        return None
+
+    if new_n_passes == old_n_passes:
+        return None
+
+    state.geometry.n_passes = new_n_passes
+    return old_n_passes, new_n_passes, direction
+
+
 async def _refresh_fluid_props_for_shell_side(state: DesignState) -> None:
     """Re-fetch fluid properties for the shell-side fluid at the mean shell temperature.
 
@@ -199,6 +266,7 @@ class PipelineRunner:
                 escalation_count = 0
                 max_actionable_warnings = 1
                 warning_pause_count = 0
+                velocity_restart_count = 0
                 while True:
                     start_ms = time.monotonic()
                     try:
@@ -243,6 +311,90 @@ class PipelineRunner:
                             "attempting AI recovery: %s",
                             step.step_id, vr.errors,
                         )
+
+                        # --- Auto geometry-restart for Step 7 velocity bound failures ---
+                        # Step 7 cannot fix tube velocity by re-executing itself —
+                        # velocity depends on n_tubes / n_passes set in Steps 4/6.
+                        # Try doubling (or halving) n_passes and re-running Steps 5–6
+                        # before falling through to AI recovery / user escalation.
+                        if (
+                            step.step_id == 7
+                            and velocity_restart_count < MAX_VELOCITY_RESTARTS
+                            and _is_velocity_bound_error(vr.errors)
+                        ):
+                            adjustment = _adjust_n_passes_for_velocity(state, vr.errors)
+                            if adjustment is not None:
+                                old_np, new_np, direction = adjustment
+                                velocity_restart_count += 1
+                                logger.info(
+                                    "[STEP7-AUTO-RESTART] Velocity violation %s "
+                                    "(attempt %d/%d): n_passes %d → %d, "
+                                    "restarting Steps 5–6",
+                                    vr.errors, velocity_restart_count,
+                                    MAX_VELOCITY_RESTARTS, old_np, new_np,
+                                )
+                                # Drop the failing Step 7 record so the re-run
+                                # produces the only Step 7 record for this attempt.
+                                state.step_records = [
+                                    r for r in state.step_records
+                                    if r.step_id != step.step_id
+                                ]
+                                # Clear stale Step 5+ state so re-execution is fresh.
+                                clear_state_from_step(state, 5)
+                                # Re-execute Steps 5 and 6 inline so LMTD F-factor
+                                # and the chosen shell are refreshed for the new
+                                # n_passes, then loop back to re-run Step 7 at the
+                                # top of the inner while-loop.
+                                for restart_step_cls in (Step05LMTD, Step06InitialU):
+                                    rs = restart_step_cls()
+                                    await self.sse_manager.emit(
+                                        session_id,
+                                        StepStartedEvent(
+                                            session_id=session_id,
+                                            step_id=rs.step_id,
+                                            step_name=rs.step_name,
+                                        ).model_dump(),
+                                    )
+                                    try:
+                                        rr = await rs.run_with_review_loop(
+                                            state, self.ai_engineer
+                                        )
+                                    except (CalculationError, StepHardFailure) as exc:
+                                        state.pipeline_status = "error"
+                                        await self._emit_step_error(
+                                            session_id, rs,
+                                            str(exc) if isinstance(exc, CalculationError)
+                                            else "; ".join(exc.validation_errors),
+                                            recommendation=(
+                                                "Auto velocity-restart of Steps 5–6 failed."
+                                            ),
+                                        )
+                                        return state
+                                    self._apply_outputs(state, rr)
+                                    state.current_step = rs.step_id
+                                    if rs.step_id not in state.completed_steps:
+                                        state.completed_steps.append(rs.step_id)
+                                    await self._emit_decision_event(
+                                        session_id, rs, rr, 0,
+                                    )
+                                    await self.session_store.save(session_id, state)
+                                # Re-emit step_started so the frontend resets the
+                                # Step 7 card before the retry.
+                                await self.sse_manager.emit(
+                                    session_id,
+                                    StepStartedEvent(
+                                        session_id=session_id,
+                                        step_id=step.step_id,
+                                        step_name=step.step_name,
+                                    ).model_dump(),
+                                )
+                                state.notes.append(
+                                    f"[Step 7 auto-restart {velocity_restart_count}/"
+                                    f"{MAX_VELOCITY_RESTARTS}] {direction} n_passes "
+                                    f"{old_np} → {new_np} to recover from "
+                                    f"{vr.errors[0]}"
+                                )
+                                continue  # re-run Step 7 at top of inner while
 
                         # If AI already produced an ESCALATE, skip recovery
                         # and fall through to the escalation handler below.

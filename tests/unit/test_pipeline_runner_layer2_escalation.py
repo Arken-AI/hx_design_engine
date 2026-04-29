@@ -1052,3 +1052,256 @@ class TestDesignStateTerminationField:
         state.termination_reason = "User chose to abandon S&T design"
         assert state.pipeline_status == "terminated"
         assert state.termination_reason is not None
+
+
+# ===================================================================
+# Step 7 Auto Geometry-Restart on Velocity Bound Failure
+# ===================================================================
+# Reference: bug_draft_engine_step7_velocity_no_autoiterate.md
+
+from hx_engine.app.core.pipeline_runner import (  # noqa: E402
+    MAX_VELOCITY_RESTARTS,
+    _adjust_n_passes_for_velocity,
+    _is_velocity_bound_error,
+)
+
+
+class TestIsVelocityBoundError:
+    """Pure helper — recognises tube-velocity Layer 2 bound messages."""
+
+    def test_below_minimum_is_velocity_bound(self):
+        assert _is_velocity_bound_error(
+            ["Tube velocity 0.177 m/s below hard minimum 0.3 m/s"]
+        ) is True
+
+    def test_above_maximum_is_velocity_bound(self):
+        assert _is_velocity_bound_error(
+            ["Tube velocity 6.20 m/s above hard maximum 5.0 m/s"]
+        ) is True
+
+    def test_other_step_7_error_is_not_velocity_bound(self):
+        assert _is_velocity_bound_error(
+            ["h_tube must be positive, got -1.00 W/m²K"]
+        ) is False
+
+    def test_empty_errors_is_not_velocity_bound(self):
+        assert _is_velocity_bound_error([]) is False
+
+    def test_case_insensitive(self):
+        assert _is_velocity_bound_error(
+            ["tube velocity 0.122 m/s BELOW HARD MINIMUM 0.3 m/s"]
+        ) is True
+
+
+class TestAdjustNPassesForVelocity:
+    """Pure helper — mutates state.geometry.n_passes for velocity recovery."""
+
+    def _state_with_geometry(self, n_passes: int):
+        from hx_engine.app.models.design_state import GeometrySpec
+        state = DesignState(session_id="t")
+        state.geometry = GeometrySpec(
+            n_tubes=200, n_passes=n_passes,
+            shell_diameter_m=0.5, tube_od_m=0.02, tube_id_m=0.016,
+            tube_length_m=3.0, baffle_spacing_m=0.2,
+            pitch_ratio=1.25, baffle_cut=0.25,
+        )
+        return state
+
+    def test_velocity_low_doubles_n_passes(self):
+        state = self._state_with_geometry(n_passes=2)
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 0.177 m/s below hard minimum 0.3 m/s"],
+        )
+        assert out == (2, 4, "increase")
+        assert state.geometry.n_passes == 4
+
+    def test_velocity_low_caps_at_8(self):
+        state = self._state_with_geometry(n_passes=6)
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 0.10 m/s below hard minimum 0.3 m/s"],
+        )
+        assert out == (6, 8, "increase")
+        assert state.geometry.n_passes == 8
+
+    def test_velocity_low_at_cap_returns_none(self):
+        state = self._state_with_geometry(n_passes=8)
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 0.10 m/s below hard minimum 0.3 m/s"],
+        )
+        assert out is None
+        assert state.geometry.n_passes == 8
+
+    def test_velocity_high_halves_n_passes(self):
+        state = self._state_with_geometry(n_passes=4)
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 6.20 m/s above hard maximum 5.0 m/s"],
+        )
+        assert out == (4, 2, "decrease")
+        assert state.geometry.n_passes == 2
+
+    def test_velocity_high_at_floor_returns_none(self):
+        state = self._state_with_geometry(n_passes=1)
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 6.20 m/s above hard maximum 5.0 m/s"],
+        )
+        assert out is None
+        assert state.geometry.n_passes == 1
+
+    def test_no_geometry_returns_none(self):
+        state = DesignState(session_id="t")
+        out = _adjust_n_passes_for_velocity(
+            state, ["Tube velocity 0.10 m/s below hard minimum 0.3 m/s"],
+        )
+        assert out is None
+
+    def test_unrelated_error_returns_none(self):
+        state = self._state_with_geometry(n_passes=2)
+        out = _adjust_n_passes_for_velocity(
+            state, ["h_tube must be positive, got -1.00 W/m²K"],
+        )
+        assert out is None
+        assert state.geometry.n_passes == 2
+
+
+class TestStep7AutoVelocityRestart:
+    """Integration — Step 7 Layer 2 velocity failure triggers Steps 5–6 restart."""
+
+    @pytest.mark.asyncio
+    async def test_auto_restart_increments_n_passes_and_re_runs_steps_5_6(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state,
+    ):
+        """When Step 7 Layer 2 fails on tube velocity and geometry exists,
+        the pipeline doubles n_passes, re-runs Steps 5+6, and re-runs Step 7
+        — without immediately escalating to the user.
+        """
+        from hx_engine.app.models.design_state import GeometrySpec
+
+        # Seed state with a geometry so the auto-restart path is taken.
+        base_state.geometry = GeometrySpec(
+            n_tubes=200, n_passes=2,
+            shell_diameter_m=0.5, tube_od_m=0.02, tube_id_m=0.016,
+            tube_length_m=3.0, baffle_spacing_m=0.2,
+            pitch_ratio=1.25, baffle_cut=0.25,
+        )
+
+        # Step 7 always fails Layer 2 with a velocity error.
+        result_velocity_low = StepResult(
+            step_id=7,
+            step_name="Tube-Side H",
+            outputs={"tube_velocity_m_s": 0.177, "h_tube_W_m2K": 500.0},
+            ai_review=None,
+        )
+        mock_step = MockStep(result_velocity_low)
+
+        failed_vr = _make_validation_result(
+            passed=False,
+            errors=["Tube velocity 0.177 m/s below hard minimum 0.3 m/s"],
+        )
+
+        # Stub Step 5 / Step 6 re-runs so the inline restart succeeds without
+        # touching real correlations.
+        async def _noop_run(self, state, ai_engineer):
+            return StepResult(
+                step_id=self.step_id,
+                step_name=self.step_name,
+                outputs={},
+                ai_review=None,
+            )
+
+        # Each user-response future call returns a "skip" so the eventual
+        # escalation (after restarts exhaust) closes cleanly.
+        def _fresh_future(_session_id):
+            fut = asyncio.Future()
+            fut.set_result({"type": "skip", "values": {}})
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(
+            side_effect=_fresh_future,
+        )
+
+        from hx_engine.app.steps.step_05_lmtd import Step05LMTD
+        from hx_engine.app.steps.step_06_initial_u import Step06InitialU
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=failed_vr,
+        ), patch.object(
+            Step05LMTD, "run_with_review_loop", _noop_run,
+        ), patch.object(
+            Step06InitialU, "run_with_review_loop", _noop_run,
+        ):
+            await pipeline_runner.run(base_state)
+
+        # n_passes doubled MAX_VELOCITY_RESTARTS times: 2 → 4 → 8 (then capped).
+        assert base_state.geometry.n_passes == 8, (
+            f"Expected n_passes to climb to 8 across {MAX_VELOCITY_RESTARTS} "
+            f"auto-restarts, got {base_state.geometry.n_passes}"
+        )
+        # An auto-restart note is recorded for each successful adjustment.
+        restart_notes = [n for n in base_state.notes if "auto-restart" in n]
+        assert len(restart_notes) >= 2, (
+            f"Expected at least 2 auto-restart notes, got {restart_notes}"
+        )
+        # Step 5 and Step 6 were re-emitted via step_started events.
+        started_step_ids = [
+            e.get("step_id") for e in mock_sse_manager.emitted_events
+            if isinstance(e, dict) and e.get("event_type") == "step_started"
+        ]
+        assert 5 in started_step_ids, (
+            f"Step 5 should re-run during velocity auto-restart; "
+            f"started ids: {started_step_ids}"
+        )
+        assert 6 in started_step_ids, (
+            f"Step 6 should re-run during velocity auto-restart; "
+            f"started ids: {started_step_ids}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_geometry_skips_auto_restart_and_falls_through(
+        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state,
+    ):
+        """No geometry → auto-restart skipped, existing AI recovery path runs."""
+        # base_state has no geometry — guard should skip auto-restart entirely.
+        result_velocity_low = StepResult(
+            step_id=7,
+            step_name="Tube-Side H",
+            outputs={"tube_velocity_m_s": 0.177},
+            ai_review=None,
+        )
+        mock_step = MockStep(result_velocity_low)
+
+        failed_vr = _make_validation_result(
+            passed=False,
+            errors=["Tube velocity 0.177 m/s below hard minimum 0.3 m/s"],
+        )
+
+        def _fresh_future(_session_id):
+            fut = asyncio.Future()
+            fut.set_result({"type": "skip", "values": {}})
+            return fut
+
+        mock_sse_manager.create_user_response_future = MagicMock(
+            side_effect=_fresh_future,
+        )
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=failed_vr,
+        ):
+            await pipeline_runner.run(base_state)
+
+        # No step_started events for Steps 5 or 6 — auto-restart was skipped.
+        started_step_ids = [
+            e.get("step_id") for e in mock_sse_manager.emitted_events
+            if isinstance(e, dict) and e.get("event_type") == "step_started"
+        ]
+        assert 5 not in started_step_ids
+        assert 6 not in started_step_ids
+        # No auto-restart notes recorded.
+        assert not any("auto-restart" in n for n in base_state.notes)
