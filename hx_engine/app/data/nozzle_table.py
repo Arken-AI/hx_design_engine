@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import math
 
+from hx_engine.app.core.exceptions import CalculationError
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Serth Table 5.3 — nominal nozzle diameter by shell size
 # ═══════════════════════════════════════════════════════════════════════════
 # (shell_lower_in, shell_upper_in, nozzle_nominal_in)
+# Bands MUST stay sorted ascending by shell_lower_in — the lookup relies on it.
 _NOZZLE_TABLE: list[tuple[float, float, float]] = [
     (4.0, 10.0, 2.0),
     (12.0, 17.25, 3.0),
@@ -24,6 +27,15 @@ _NOZZLE_TABLE: list[tuple[float, float, float]] = [
     (31.0, 37.0, 8.0),
     (39.0, 42.0, 10.0),
 ]
+
+# Tolerance (inches) absorbing float-conversion drift on band edges.
+# 1e-3 in. ≈ 0.025 mm — far below any real engineering resolution but enough
+# to keep e.g. 0.9398 m × 39.3701 = 36.99819… inside the (31, 37) band.
+_BOUNDARY_TOL_IN: float = 1e-3
+
+# Engineering envelope of the table.
+_ENVELOPE_MIN_IN: float = _NOZZLE_TABLE[0][0]   # 4.0
+_ENVELOPE_MAX_IN: float = _NOZZLE_TABLE[-1][1]  # 42.0
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Schedule 40 nominal → actual inside diameter (inches → metres)
@@ -60,21 +72,53 @@ def get_next_larger_nozzle_diameter_m(current_id_m: float) -> float | None:
 def get_default_nozzle_diameter_m(shell_id_m: float) -> float:
     """Look up default nozzle ID from Serth Table 5.3.
 
-    Converts shell_id_m → inches, finds matching range, returns the
-    Schedule 40 actual inside diameter in metres.
+    Converts shell_id_m → inches and returns a Schedule 40 actual inside
+    diameter in metres.
+
+    Behaviour at the band edges:
+
+    * **In-band** (within any ``(lower, upper)`` ± ``_BOUNDARY_TOL_IN``):
+      returns that band's nozzle.
+    * **In-gap** (between two bands, e.g. 10–12, 17.25–19.25, 21.25–23,
+      29–31, 37–39 in.): snaps **up** to the next-larger band's nozzle.
+      Snapping up rather than down is conservative for ρv² and matches the
+      auto-correction strategy already used downstream in Step 10.
+    * **Outside the engineering envelope** (≲ 4 in. or ≳ 42 in.): raises a
+      structured ``CalculationError(step_id=10)`` so the pipeline runner
+      surfaces it cleanly instead of leaking a bare ``ValueError``.
 
     Raises:
-        ValueError: If shell_id_m is outside the table range.
+        CalculationError: If shell_id_m is outside the 4–42 in. envelope.
     """
     shell_in = shell_id_m * _M_TO_IN
 
-    for lower, upper, nom_nozzle in _NOZZLE_TABLE:
-        if lower <= shell_in <= upper:
+    # Out-of-envelope (with edge tolerance) — structured failure so
+    # pipeline_runner classifies it and the user never sees a stack trace.
+    if shell_in < _ENVELOPE_MIN_IN - _BOUNDARY_TOL_IN or \
+       shell_in > _ENVELOPE_MAX_IN + _BOUNDARY_TOL_IN:
+        raise CalculationError(
+            step_id=10,
+            message=(
+                f"Shell ID {shell_id_m:.4f} m ({shell_in:.2f} in.) "
+                f"is outside the nozzle table envelope "
+                f"[{_ENVELOPE_MIN_IN:.0f}–{_ENVELOPE_MAX_IN:.0f} in.]"
+            ),
+        )
+
+    # Bands are ascending. The first band whose upper bound (with tolerance)
+    # is ≥ shell_in is either the band that contains shell_in or the band
+    # immediately above a gap → snap-up to that band's nozzle.
+    for _lower, upper, nom_nozzle in _NOZZLE_TABLE:
+        if shell_in <= upper + _BOUNDARY_TOL_IN:
             return _SCH40_ID_M[nom_nozzle]
 
-    raise ValueError(
-        f"Shell ID {shell_id_m:.4f} m ({shell_in:.2f} in.) "
-        f"is outside the nozzle table range [4–42 in.]"
+    # Unreachable: the envelope check above guarantees we matched a band.
+    raise CalculationError(
+        step_id=10,
+        message=(
+            f"Shell ID {shell_id_m:.4f} m ({shell_in:.2f} in.) "
+            f"could not be matched to any nozzle band"
+        ),
     )
 
 
