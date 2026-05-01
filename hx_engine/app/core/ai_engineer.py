@@ -17,9 +17,17 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from anthropic import AsyncAnthropic
+from anthropic import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncAnthropic,
+    AuthenticationError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from hx_engine.app.config import settings
 from hx_engine.app.models.step_result import (
@@ -1415,6 +1423,12 @@ class AIEngineer:
 
     def __init__(self, *, stub_mode: bool = False):
         self._stub_mode = stub_mode
+        # Becomes True after a 401 / PermissionDeniedError so the rest of
+        # the run uses the stub/deterministic path instead of hammering
+        # the API. Reset only when a new AIEngineer is constructed (i.e.
+        # at engine startup). One human-readable banner is logged when
+        # this flips.
+        self._auth_disabled: bool = False
         if not stub_mode:
             api_key = settings.anthropic_api_key
             if not api_key:
@@ -1424,6 +1438,16 @@ class AIEngineer:
             self._client: AsyncAnthropic | None = AsyncAnthropic(api_key=api_key)
         else:
             self._client = None
+
+    @property
+    def is_available(self) -> bool:
+        """True iff a real Claude call is possible right now.
+
+        Returns False in stub mode and after the run has hit a 401 — both
+        the per-step reviewer and the redesign loop check this so they can
+        fall back to deterministic behaviour without retrying the API.
+        """
+        return (not self._stub_mode) and (not self._auth_disabled)
 
     async def review(
         self,
@@ -1447,6 +1471,18 @@ class AIEngineer:
                 ai_called=False,
             )
 
+        if self._auth_disabled:
+            # Auth was already invalidated earlier in this run — short-circuit
+            # without spamming the API and without spamming the log (the
+            # banner was emitted on the first 401).
+            return AIReview(
+                decision=AIDecisionEnum.PROCEED,
+                confidence=0.85,
+                corrections=[],
+                reasoning="AI disabled for this run (auth failure). Proceeding deterministically.",
+                ai_called=False,
+            )
+
         return await self._call_claude(step, state, result, failure_context)
 
     async def _call_claude(
@@ -1456,7 +1492,15 @@ class AIEngineer:
         result: "StepResult",
         failure_context: FailureContext | None = None,
     ) -> AIReview:
-        """Make the actual Claude API call."""
+        """Make the actual Claude API call.
+
+        Auth (401 / 403) errors flip ``self._auth_disabled`` for the rest
+        of the run after a single visible banner — subsequent reviews then
+        return the stub PROCEED. Rate-limit (429) and 5xx errors retry
+        with bounded exponential backoff. Other failures degrade to a
+        WARN review (preserves the historical "do not block on AI flake"
+        contract).
+        """
         assert self._client is not None
 
         # Build context for AI
@@ -1465,38 +1509,122 @@ class AIEngineer:
         # Assemble step-specific system prompt
         system_prompt = _build_system_prompt(step.step_id, step.step_name)
 
-        try:
-            message = await self._client.messages.create(
-                model=_MODEL,
-                max_tokens=_MAX_TOKENS,
-                temperature=_TEMPERATURE,
-                system=[
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-
-            text = ""
-            for block in message.content:
-                if hasattr(block, "text"):
-                    text += block.text
-
-            return self._parse_review(text)
-
-        except Exception as e:
-            logger.error("Claude review failed: %s", e, exc_info=True)
-            # On API failure, proceed with warning rather than blocking
+        text = await self._anthropic_request_with_retry(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            label=f"step_{step.step_id}_review",
+        )
+        if text is None:
+            # Auth disabled mid-call (banner already logged) → behave like stub.
+            if self._auth_disabled:
+                return AIReview(
+                    decision=AIDecisionEnum.PROCEED,
+                    confidence=0.85,
+                    corrections=[],
+                    reasoning="AI disabled for this run (auth failure). Proceeding deterministically.",
+                    ai_called=False,
+                )
+            # Other failures fall back to WARN — historical contract.
             return AIReview(
                 decision=AIDecisionEnum.WARN,
                 confidence=0.70,
                 corrections=[],
-                reasoning=f"AI review failed ({e}). Proceeding with caution.",
+                reasoning="AI review failed after retries. Proceeding with caution.",
                 ai_called=True,
             )
+
+        return self._parse_review(text)
+
+    # ------------------------------------------------------------------
+    # Shared low-level Anthropic call with auth handling + retry
+    # ------------------------------------------------------------------
+
+    _MAX_RETRIES = 3
+    _BACKOFF_BASE_S = 0.5  # 0.5s, 1s, 2s
+
+    async def _anthropic_request_with_retry(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        label: str,
+    ) -> str | None:
+        """Call Anthropic with bounded exponential backoff for 429/5xx.
+
+        Returns the concatenated text response, or ``None`` when:
+        - auth was disabled (401 / 403) — caller should fall back.
+        - all retries were exhausted on transient errors.
+        - a non-retriable error occurred.
+
+        Side effects: on 401/403, sets ``self._auth_disabled = True`` and
+        emits one human-readable WARNING log line. Subsequent calls in
+        the same run short-circuit (caller checks ``is_available``).
+        """
+        import asyncio as _asyncio
+
+        if self._auth_disabled:
+            return None
+        assert self._client is not None
+
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                message = await self._client.messages.create(
+                    model=_MODEL,
+                    max_tokens=_MAX_TOKENS,
+                    temperature=_TEMPERATURE,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+                text = ""
+                for block in message.content:
+                    if hasattr(block, "text"):
+                        text += block.text
+                return text
+
+            except (AuthenticationError, PermissionDeniedError) as e:
+                if not self._auth_disabled:
+                    logger.warning(
+                        "[AI-AUTH-DISABLED] Anthropic rejected the API key "
+                        "(%s). Disabling AI for the remainder of this run; "
+                        "all subsequent steps will use deterministic fallback. "
+                        "Fix HX_ANTHROPIC_API_KEY and restart the engine to "
+                        "re-enable AI reviews.",
+                        type(e).__name__,
+                    )
+                    self._auth_disabled = True
+                return None
+
+            except (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError) as e:
+                if attempt + 1 >= self._MAX_RETRIES:
+                    logger.error(
+                        "[AI-RETRY-EXHAUSTED] %s after %d attempts on %s: %s",
+                        label, self._MAX_RETRIES, type(e).__name__, e,
+                    )
+                    return None
+                delay = self._BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning(
+                    "[AI-RETRY] %s on %s (attempt %d/%d), backing off %.2fs: %s",
+                    type(e).__name__, label, attempt + 1, self._MAX_RETRIES,
+                    delay, e,
+                )
+                await _asyncio.sleep(delay)
+                continue
+
+            except Exception as e:
+                # Unknown failure — log and bail (caller surfaces WARN).
+                logger.error(
+                    "[AI-CALL-FAILED] Unexpected error on %s: %s",
+                    label, e, exc_info=True,
+                )
+                return None
+
+        return None
 
     def _build_failure_context_prompt(self, ctx: FailureContext) -> str:
         """Build the failure context block appended to retry prompts.
@@ -1770,3 +1898,159 @@ class AIEngineer:
             recommendations=[str(r) for r in recommendations_raw],
             user_summary=str(user_summary) if user_summary else None,
         )
+
+    # ------------------------------------------------------------------
+    # Redesign-loop advisor (separate from per-step review)
+    # ------------------------------------------------------------------
+
+    async def recommend_redesign(
+        self,
+        *,
+        state: "DesignState",
+        failed_step_id: int,
+        constraint: str,
+        failure_message: str,
+        failing_value: Any = None,
+        allowed_range: tuple[Any, Any] = (None, None),
+        legal_levers: list[str],
+        history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Ask the AI which lever to tweak to recover from a constraint violation.
+
+        Returns ``{"lever": str, "direction": str, "magnitude_hint": str|None,
+        "rationale": str, "ai_response_excerpt": str}`` on success, or
+        ``None`` when the AI is unavailable / returns an unparseable
+        response. The redesign driver then falls back to its
+        deterministic round-robin over ``legal_levers``.
+        """
+        if not self.is_available:
+            return None
+
+        history = history or []
+        history_block = ""
+        if history:
+            lines = ["", "### Previously Tried (do NOT repeat)"]
+            for h in history[-10:]:
+                lines.append(
+                    f"- attempt {h.get('attempt_number')}: lever={h.get('lever')!r} "
+                    f"{h.get('old_value')!r} → {h.get('new_value')!r} "
+                    f"(direction={h.get('direction')!r}) — outcome={h.get('outcome')!r}"
+                )
+            history_block = "\n".join(lines)
+
+        legal_block = ", ".join(legal_levers) or "(none)"
+        low, high = allowed_range
+        range_str = (
+            f"[{low if low is not None else '-∞'}, "
+            f"{high if high is not None else '+∞'}]"
+        )
+
+        # Snapshot a small set of currently-active geometry / arrangement
+        # values so the AI can reason about magnitude.
+        geom = state.geometry
+        snapshot = {
+            "shell_diameter_m": getattr(geom, "shell_diameter_m", None) if geom else None,
+            "tube_length_m": getattr(geom, "tube_length_m", None) if geom else None,
+            "tube_od_m": getattr(geom, "tube_od_m", None) if geom else None,
+            "n_passes": getattr(geom, "n_passes", None) if geom else None,
+            "shell_passes": getattr(geom, "shell_passes", None) if geom else None,
+            "n_shells": getattr(geom, "n_shells", None) if geom else None,
+            "baffle_spacing_m": getattr(geom, "baffle_spacing_m", None) if geom else None,
+            "baffle_cut": getattr(geom, "baffle_cut", None) if geom else None,
+            "pitch_layout": getattr(geom, "pitch_layout", None) if geom else None,
+            "multi_shell_arrangement": state.multi_shell_arrangement,
+        }
+        snapshot_block = json.dumps(snapshot, indent=2, default=str)
+
+        user_prompt = (
+            f"## Redesign Advice — Step {failed_step_id} constraint violation\n\n"
+            f"Constraint: **{constraint}**\n"
+            f"Failure: {failure_message}\n"
+            f"Failing value: {failing_value!r}\n"
+            f"Allowed range: {range_str}\n\n"
+            f"### Current Geometry / Arrangement\n```json\n{snapshot_block}\n```\n\n"
+            f"### Legal Levers (you must pick exactly one)\n{legal_block}\n"
+            f"{history_block}\n\n"
+            f"Pick one upstream lever to change so the next pipeline run "
+            f"will satisfy this constraint. Respond ONLY with this JSON:\n"
+            "{\n"
+            '  "lever": "<one of the legal levers>",\n'
+            '  "direction": "increase" | "decrease" | "swap",\n'
+            '  "magnitude_hint": "<short text, e.g. \\"double\\", \\"+1 step\\", \\"to square\\">",\n'
+            '  "rationale": "<one sentence — why this lever, why this direction>"\n'
+            "}\n"
+        )
+
+        system_prompt = _REDESIGN_SYSTEM_PROMPT
+        text = await self._anthropic_request_with_retry(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            label=f"redesign_step_{failed_step_id}_{constraint}",
+        )
+        if text is None:
+            return None
+
+        # Extract JSON
+        import re as _re
+        data: dict[str, Any] | None = None
+        try:
+            data = json.loads(text.strip())
+        except json.JSONDecodeError:
+            m = _re.search(r"\{.*\}", text, _re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    data = None
+        if not isinstance(data, dict):
+            logger.warning(
+                "[AI-REDESIGN] unparseable response for %s: %r",
+                constraint, text[:200],
+            )
+            return None
+
+        lever = str(data.get("lever", "")).strip()
+        if lever not in legal_levers:
+            logger.warning(
+                "[AI-REDESIGN] AI suggested non-legal lever %r (legal=%s)",
+                lever, legal_levers,
+            )
+            return None
+
+        return {
+            "lever": lever,
+            "direction": str(data.get("direction", "")).strip(),
+            "magnitude_hint": (
+                str(data.get("magnitude_hint", "")).strip() or None
+            ),
+            "rationale": str(data.get("rationale", "")).strip(),
+            "ai_response_excerpt": text.strip()[:200],
+        }
+
+
+# ===================================================================
+# Redesign system prompt — lives at module scope so tests can read it
+# ===================================================================
+
+_REDESIGN_SYSTEM_PROMPT = """\
+You are a senior heat-exchanger design engineer guiding an automated
+redesign loop. A downstream step has proven the current geometry
+infeasible. Your job is to pick exactly ONE upstream lever to change
+so the next pipeline run will likely satisfy the failing constraint.
+
+CONSTRAINTS:
+- Choose only from the explicit "Legal Levers" list — any other answer
+  will be rejected and the loop will fall back to deterministic logic.
+- Prefer the smallest, most reversible change that addresses the root
+  cause. Bigger jumps (e.g. +2 sizes, doubling) only when the gap is
+  large or smaller jumps already failed.
+- Do NOT repeat any (lever, direction, magnitude) combination that
+  appears in the "Previously Tried" section.
+- If multiple levers could work, prefer ones that do not invalidate
+  the user's stated TEMA preference or shell-side fluid choice.
+- "swap" is only valid for categorical levers like pitch_layout
+  (triangular ↔ square) or multi_shell_arrangement (series ↔ parallel).
+
+OUTPUT: Respond ONLY with the JSON object described in the user
+message. No prose before or after.
+"""

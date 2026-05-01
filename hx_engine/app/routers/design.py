@@ -14,6 +14,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.core.pipeline_runner import PipelineRunner
+from hx_engine.app.core.redesign_loop import RedesignDriver
 from hx_engine.app.core.requirements_validator import validate_requirements, verify_token
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
@@ -23,6 +24,7 @@ from hx_engine.app.core.volumetric_flow import (
 )
 from hx_engine.app.dependencies import (
     get_pipeline_runner,
+    get_redesign_driver,
     get_session_store,
     get_sse_manager,
 )
@@ -90,6 +92,7 @@ async def start_design(
     session_store: SessionStore = Depends(get_session_store),
     sse_manager: SSEManager = Depends(get_sse_manager),
     pipeline_runner: PipelineRunner = Depends(get_pipeline_runner),
+    redesign_driver: RedesignDriver = Depends(get_redesign_driver),
 ) -> DesignResponse:
     """Create a new HX design session and start the pipeline in the background.
 
@@ -181,8 +184,13 @@ async def start_design(
     await session_store.save(session_id, state)
     await session_store.heartbeat(session_id)
 
-    # Launch pipeline in background
-    background_tasks.add_task(pipeline_runner.run, state)
+    # Launch pipeline in background — wrapped in the RedesignDriver so a
+    # downstream DesignConstraintViolation triggers an AI-driven
+    # upstream-lever tweak + restart-from-Step-1 loop instead of a hard
+    # failure. The injected ``pipeline_runner`` dependency stays around for
+    # tests and for direct (non-redesign) execution paths.
+    _ = pipeline_runner  # kept in signature for backward compatibility
+    background_tasks.add_task(redesign_driver.run, state)
 
     return DesignResponse(
         session_id=session_id,

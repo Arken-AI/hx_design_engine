@@ -7,6 +7,7 @@ import redis.asyncio as aioredis
 from hx_engine.app.config import settings
 from hx_engine.app.core.ai_engineer import AIEngineer
 from hx_engine.app.core.pipeline_runner import PipelineRunner
+from hx_engine.app.core.redesign_loop import RedesignDriver
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 
@@ -79,4 +80,14 @@ def get_pipeline_runner() -> PipelineRunner:
         session_store=get_session_store(),
         sse_manager=get_sse_manager(),
         ai_engineer=get_ai_engineer(),
+    )
+
+
+def get_redesign_driver() -> RedesignDriver:
+    """Wraps :func:`get_pipeline_runner` with the AI-driven redesign loop."""
+    return RedesignDriver(
+        runner=get_pipeline_runner(),
+        ai_engineer=get_ai_engineer(),
+        sse_manager=get_sse_manager(),
+        session_store=get_session_store(),
     )

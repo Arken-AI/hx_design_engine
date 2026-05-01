@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.core.exceptions import CalculationError, DesignConstraintViolation
 from hx_engine.app.data.nozzle_table import (
     get_default_nozzle_diameter_m,
     get_next_larger_nozzle_diameter_m,
@@ -42,18 +42,20 @@ class TestNozzleLookup:
         assert result == pytest.approx(0.10226, rel=0.02)
 
     def test_out_of_range_too_small(self) -> None:
-        with pytest.raises(CalculationError, match="outside the nozzle table envelope"):
+        with pytest.raises(DesignConstraintViolation, match="outside the nozzle table envelope"):
             get_default_nozzle_diameter_m(0.05)  # ~2 inches
 
     def test_out_of_range_too_large(self) -> None:
-        with pytest.raises(CalculationError, match="outside the nozzle table envelope"):
+        with pytest.raises(DesignConstraintViolation, match="outside the nozzle table envelope"):
             get_default_nozzle_diameter_m(1.5)  # ~59 inches
 
     def test_out_of_range_carries_step_id_10(self) -> None:
-        """Structured failure must be tagged to Step 10 for pipeline_runner."""
-        with pytest.raises(CalculationError) as exc_info:
+        """Structured failure must be tagged to Step 10 for the redesign driver."""
+        with pytest.raises(DesignConstraintViolation) as exc_info:
             get_default_nozzle_diameter_m(1.5)
         assert exc_info.value.step_id == 10
+        assert exc_info.value.constraint == "nozzle_envelope"
+        assert "n_shells" in exc_info.value.suggested_levers
 
     # ── Boundary / floating-point drift cases (regression for the
     #    'Shell ID 0.9398 m (37.00 in.)' hard-crash bug) ──────────────

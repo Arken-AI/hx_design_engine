@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Imported at runtime (not just TYPE_CHECKING) because DesignState stores
 # StepRecord instances in step_records.
-from hx_engine.app.models.step_result import StepRecord  # noqa: E402
+from hx_engine.app.models.step_result import RedesignAttempt, StepRecord  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +618,21 @@ class DesignState(BaseModel):
     # AI generates different, more targeted options instead of repeating itself.
     # Format: { step_id: [{ "attempt": int, "options": [...], "user_chose": str }, ...] }
     escalation_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+
+    # --- redesign loop history (global, populated by RedesignDriver) ---
+    # Audit trail of every lever change the redesign driver tried after a
+    # DesignConstraintViolation. Used by the AI prompt to avoid suggesting
+    # the same tweak twice, and surfaced in the UI / final report so an
+    # engineer can review the loop's reasoning post hoc.
+    redesign_history: list[RedesignAttempt] = Field(default_factory=list)
+    # Number of completed redesign attempts (also == len(redesign_history))
+    # — kept as a dedicated counter so the loop driver can update it
+    # without serialising the full list on every check.
+    redesign_attempt_count: int = 0
+    # Set to True when AI auth failed (401) or was disabled mid-run, so the
+    # driver and any downstream code can fall back to deterministic logic
+    # without re-trying the AI on every iteration.
+    ai_disabled_for_run: bool = False
 
     # ------------------------------------------------------------------
     # State snapshot / restore helpers (used by correction loop in base.py)

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 
-from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.core.exceptions import CalculationError, DesignConstraintViolation
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Serth Table 5.3 — nominal nozzle diameter by shell size
@@ -84,25 +84,40 @@ def get_default_nozzle_diameter_m(shell_id_m: float) -> float:
       Snapping up rather than down is conservative for ρv² and matches the
       auto-correction strategy already used downstream in Step 10.
     * **Outside the engineering envelope** (≲ 4 in. or ≳ 42 in.): raises a
-      structured ``CalculationError(step_id=10)`` so the pipeline runner
-      surfaces it cleanly instead of leaking a bare ``ValueError``.
+      structured ``DesignConstraintViolation(step_id=10)`` so the
+      RedesignDriver can ask an upstream lever (n_shells, shell_passes,
+      tube_length_m, multi_shell_arrangement) to bring the shell back
+      inside the table envelope and restart the pipeline.
 
     Raises:
-        CalculationError: If shell_id_m is outside the 4–42 in. envelope.
+        DesignConstraintViolation: If shell_id_m is outside the 4–42 in.
+            envelope. Carries failing value, allowed range, and the legal
+            upstream levers for the redesign loop.
+        CalculationError: For unreachable internal lookup failures.
     """
     shell_in = shell_id_m * _M_TO_IN
 
-    # Out-of-envelope (with edge tolerance) — structured failure so
-    # pipeline_runner classifies it and the user never sees a stack trace.
+    # Out-of-envelope (with edge tolerance) — structured violation so the
+    # RedesignDriver picks an upstream lever (smaller shell ID → bigger
+    # n_shells / shell_passes, or a longer tube to drop required shell area).
     if shell_in < _ENVELOPE_MIN_IN - _BOUNDARY_TOL_IN or \
        shell_in > _ENVELOPE_MAX_IN + _BOUNDARY_TOL_IN:
-        raise CalculationError(
+        raise DesignConstraintViolation(
             step_id=10,
+            constraint="nozzle_envelope",
             message=(
                 f"Shell ID {shell_id_m:.4f} m ({shell_in:.2f} in.) "
                 f"is outside the nozzle table envelope "
                 f"[{_ENVELOPE_MIN_IN:.0f}–{_ENVELOPE_MAX_IN:.0f} in.]"
             ),
+            failing_value=shell_in,
+            allowed_range=(_ENVELOPE_MIN_IN, _ENVELOPE_MAX_IN),
+            suggested_levers=[
+                "n_shells",
+                "shell_passes",
+                "tube_length_m",
+                "multi_shell_arrangement",
+            ],
         )
 
     # Bands are ascending. The first band whose upper bound (with tolerance)
