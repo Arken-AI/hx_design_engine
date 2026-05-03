@@ -260,6 +260,59 @@ class TestRespondToEscalation:
         )
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_respond_accepts_when_future_pending_even_if_state_flag_false(
+        self, client: AsyncClient
+    ):
+        """Regression for the 410-on-click bug: a pending in-memory future is
+        the authoritative signal that the pipeline is awaiting input.  The
+        persisted ``waiting_for_user`` flag can briefly lag (save ordering),
+        so /respond must accept the response when a future is pending even
+        if the loaded state shows ``waiting_for_user=False``.
+        """
+        create_resp = await client.post(
+            "/api/v1/hx/design",
+            json={
+                "raw_request": "Design HX",
+                "user_id": "test-user",
+                "hot_fluid_name": "water",
+                "cold_fluid_name": "water",
+                "T_hot_in_C": 80.0,
+                "T_hot_out_C": 40.0,
+                "T_cold_in_C": 25.0,
+                "T_cold_out_C": 45.0,
+                "m_dot_hot_kg_s": 5.0,
+            },
+        )
+        session_id = create_resp.json()["session_id"]
+
+        await asyncio.sleep(0.3)
+
+        # Simulate the race: future has been created (pipeline is awaiting)
+        # but the persisted state still reports waiting_for_user=False
+        # because the prior save() hasn't been replayed in our load.
+        sse_manager = dependencies._sse_manager
+        sse_manager.create_user_response_future(session_id)
+
+        state = await dependencies._session_store.load(session_id)
+        state.waiting_for_user = False
+        await dependencies._session_store.save(session_id, state)
+
+        resp = await client.post(
+            f"/api/v1/hx/design/{session_id}/respond",
+            json={"type": "override", "values": {"user_input": "A", "option_index": 0}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "received"
+
+        # And after the future has been resolved, a follow-up POST with
+        # neither a pending future nor a waiting state must 410.
+        resp2 = await client.post(
+            f"/api/v1/hx/design/{session_id}/respond",
+            json={"type": "accept"},
+        )
+        assert resp2.status_code == 410
+
 
 # ---------------------------------------------------------------------------
 # Session store in-memory fallback

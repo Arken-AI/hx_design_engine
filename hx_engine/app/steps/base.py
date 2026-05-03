@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, runtime_checkable, Protocol
 logger = logging.getLogger(__name__)
 
 from hx_engine.app.core import validation_rules
+from hx_engine.app.core.exceptions import DesignConstraintViolation
 from hx_engine.app.models.step_result import (
     AIDecisionEnum,
     AIModeEnum,
@@ -237,6 +238,10 @@ class BaseStep(ABC):
                             new_result = await self.execute(state)
                             vr = validation_rules.check(self.step_id, new_result)
                             layer2_passed = vr.passed
+                        except DesignConstraintViolation:
+                            # Hand off to the outer RedesignDriver — a corrected
+                            # re-execute can itself prove the geometry infeasible.
+                            raise
                         except Exception:
                             logger.warning(
                                 "WARN resolution re-execute failed for step %s (attempt %d)",
@@ -300,6 +305,9 @@ class BaseStep(ABC):
                         vr = validation_rules.check(self.step_id, new_result)
                         layer2_passed = vr.passed
                         rule_failed = vr.errors[0] if vr.errors else None
+                    except DesignConstraintViolation:
+                        # Hand off to the outer RedesignDriver.
+                        raise
                     except Exception as exc:
                         logger.warning(
                             "CORRECT re-execute failed for step %s (attempt %d): %s",

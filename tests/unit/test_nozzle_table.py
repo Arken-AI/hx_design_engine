@@ -6,6 +6,7 @@ import math
 
 import pytest
 
+from hx_engine.app.core.exceptions import CalculationError, DesignConstraintViolation
 from hx_engine.app.data.nozzle_table import (
     get_default_nozzle_diameter_m,
     get_next_larger_nozzle_diameter_m,
@@ -41,12 +42,58 @@ class TestNozzleLookup:
         assert result == pytest.approx(0.10226, rel=0.02)
 
     def test_out_of_range_too_small(self) -> None:
-        with pytest.raises(ValueError, match="outside the nozzle table range"):
+        with pytest.raises(DesignConstraintViolation, match="outside the nozzle table envelope"):
             get_default_nozzle_diameter_m(0.05)  # ~2 inches
 
     def test_out_of_range_too_large(self) -> None:
-        with pytest.raises(ValueError, match="outside the nozzle table range"):
+        with pytest.raises(DesignConstraintViolation, match="outside the nozzle table envelope"):
             get_default_nozzle_diameter_m(1.5)  # ~59 inches
+
+    def test_out_of_range_carries_step_id_10(self) -> None:
+        """Structured failure must be tagged to Step 10 for the redesign driver."""
+        with pytest.raises(DesignConstraintViolation) as exc_info:
+            get_default_nozzle_diameter_m(1.5)
+        assert exc_info.value.step_id == 10
+        assert exc_info.value.constraint == "nozzle_envelope"
+        assert "n_shells" in exc_info.value.suggested_levers
+
+    # ── Boundary / floating-point drift cases (regression for the
+    #    'Shell ID 0.9398 m (37.00 in.)' hard-crash bug) ──────────────
+    def test_37_inch_boundary_returns_8in_nozzle(self) -> None:
+        """0.9398 m × 39.3701 ≈ 36.998 in. — must land in (31, 37) band → 8-in."""
+        result = get_default_nozzle_diameter_m(0.9398)
+        assert result == pytest.approx(0.20272, rel=1e-3)
+
+    def test_42_inch_upper_envelope_boundary(self) -> None:
+        """Exactly 42 in. must succeed (returns 10-in. nozzle), not raise."""
+        shell_m = 42.0 / _M_TO_IN
+        result = get_default_nozzle_diameter_m(shell_m)
+        assert result == pytest.approx(0.25451, rel=1e-3)
+
+    def test_4_inch_lower_envelope_boundary(self) -> None:
+        """Exactly 4 in. must succeed (returns 2-in. nozzle), not raise."""
+        shell_m = 4.0 / _M_TO_IN
+        result = get_default_nozzle_diameter_m(shell_m)
+        assert result == pytest.approx(0.05250, rel=1e-3)
+
+    # ── Gap-region snap-up cases — every gap in Serth Table 5.3 must
+    #    snap UP to the next-larger band's nozzle, never raise. ───────
+    @pytest.mark.parametrize(
+        "shell_in, expected_nozzle_id_m, gap_desc",
+        [
+            (11.0, 0.07793, "10–12 in. gap → 3-in. nozzle"),
+            (18.0, 0.10226, "17.25–19.25 in. gap → 4-in. nozzle"),
+            (22.0, 0.15405, "21.25–23 in. gap → 6-in. nozzle"),
+            (30.0, 0.20272, "29–31 in. gap → 8-in. nozzle"),
+            (38.0, 0.25451, "37–39 in. gap → 10-in. nozzle"),
+        ],
+    )
+    def test_gap_regions_snap_up(
+        self, shell_in: float, expected_nozzle_id_m: float, gap_desc: str
+    ) -> None:
+        shell_m = shell_in / _M_TO_IN
+        result = get_default_nozzle_diameter_m(shell_m)
+        assert result == pytest.approx(expected_nozzle_id_m, rel=1e-3), gap_desc
 
 
 class TestRhoVSquared:
