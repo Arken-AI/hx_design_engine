@@ -56,6 +56,20 @@ except ImportError:                            # pragma: no cover
 
 _STEP_ID = 2  # used in CalculationError
 
+# Physical-validity bounds for raw CoolProp scalar outputs.
+# Used by ``_get_props_coolprop`` to convert silently-extrapolated /
+# non-physical values (negative Cp, NaN Pr, etc.) into a typed
+# CalculationError before they reach pydantic-validated FluidProperties.
+# Single source of truth — the error message format reuses these tuples.
+# (property_name, lower_bound, upper_bound, unit_label)
+_COOLPROP_PROP_BOUNDS: tuple[tuple[str, float, float, str], ...] = (
+    ("cp",  1e2,  1e5,  "J/kg·K"),
+    ("rho", 1e-2, 2e3,  "kg/m³"),
+    ("mu",  1e-7, 1e0,  "Pa·s"),
+    ("k",   5e-3, 1e2,  "W/m·K"),
+    ("Pr",  1e-3, 1e4,  "(dimensionless)"),
+)
+
 # ── fluid name normalisation aliases ──────────────────────────────────────────
 # Maps common engineering names (as produced by NL parsing / AI) to names
 # that the lookup chain already recognises.  Applied once at the top of
@@ -328,6 +342,28 @@ def _get_props_coolprop(
             f"T={temperature_C}°C, P={pressure_Pa} Pa",
             cause=exc,
         ) from exc
+
+    # --- Sanity-check raw CoolProp outputs before constructing FluidProperties ---
+    # CoolProp can silently return extrapolated / non-physical values (negative
+    # Cp, negative viscosity, enormous Pr) when evaluated outside the EOS
+    # validity envelope (e.g. sub-triple-point temperatures from a bad upstream
+    # T_out solve). Catch them here with a typed CalculationError so the
+    # pipeline can surface a meaningful step-error instead of a Pydantic
+    # ValidationError from deep inside the adapter.
+    _values = {"cp": cp, "rho": rho, "mu": mu, "k": k, "Pr": Pr}
+    _bad: list[str] = []
+    for _name, _lo, _hi, _unit in _COOLPROP_PROP_BOUNDS:
+        _v = _values[_name]
+        if _v is None or not math.isfinite(_v) or _v < _lo or _v > _hi:
+            _bad.append(f"{_name}={_v!r} (expected {_lo:g}–{_hi:g} {_unit})")
+    if _bad:
+        raise CalculationError(
+            _STEP_ID,
+            f"CoolProp returned non-physical properties for '{coolprop_name}' "
+            f"at T={temperature_C:.1f}°C, P={pressure_Pa:.0f} Pa — "
+            f"likely caused by a temperature outside the fluid's EOS validity "
+            f"range: {'; '.join(_bad)}",
+        )
 
     # Phase detection
     phase = "liquid"
