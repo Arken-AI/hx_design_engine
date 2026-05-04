@@ -250,40 +250,219 @@ class Step02HeatDuty(BaseStep):
                 f"at {T_cold_estimate:.1f}°C: {exc}",
             ) from exc
 
-        # Attempt to resolve the missing temperature via energy balance.
+        # --- Vapor-inlet phase-change path -----------------------------------
+        # When the hot-fluid name carries a "vapor" / "vapour" / "gas" suffix,
+        # sensible Cp alone is thermodynamically wrong: it produces a wildly
+        # non-physical T_hot_out (e.g. −471 °C for ethanol at 1 atm).
+        # We intercept here and compute a three-segment condenser balance
+        # (desuperheat + condense + optional subcool / partial-condense) using
+        # saturation properties from the thermo adapter.
+        #
+        # Guard rail: if vapor inlet detected but P_hot_Pa is None, we MUST
+        # escalate — T_sat, h_fg, and all property evaluations are strongly
+        # pressure-dependent and the silent 1-atm fallback in the adapter is
+        # a hidden trap.
+        condenser_extras: dict = {}       # populated when the latent path fires
+        _condenser_temp_result: dict | None = None
+        _condenser_Q_W: float | None = None
+
+        _vapor_hint = (state.hot_fluid_name or "").strip().lower()
+        # Canonical phase signal first (set by Step 03 / upstream parsers); fall
+        # back to the trailing phase descriptor on the fluid name. Suffix list
+        # mirrors thermo_adapter._PHASE_SUFFIXES so detection here and name
+        # normalisation in the adapter stay in lock-step.
+        _hot_phase = (getattr(state, "hot_phase", None) or "").strip().lower()
+        _vapor_phase_values = {"vapor", "vapour", "gas", "condensing", "superheated"}
+        _is_hot_vapor = (
+            _hot_phase in _vapor_phase_values
+            or _vapor_hint.endswith(
+                (" vapor", " vapour", " gas", " vapors", " vapours", " gases")
+            )
+        )
+
+        if _is_hot_vapor and state.T_hot_out_C is None:
+            # Pressure is required for saturation-based calculations.
+            if state.P_hot_Pa is None:
+                raise CalculationError(
+                    2,
+                    f"Hot inlet '{state.hot_fluid_name}' appears to be a vapor "
+                    "but P_hot_Pa (operating pressure) was not supplied. "
+                    "Provide P_hot_Pa so the saturation temperature and latent "
+                    "heat can be used in the condenser energy balance. "
+                    "Example: P_hot_Pa = 101325 for atmospheric pressure.",
+                )
+            from hx_engine.app.adapters.thermo_adapter import get_saturation_props as _gsp
+            # Narrow try-scope: only the saturation lookup itself can fail with a
+            # typed CalculationError (e.g. CoolProp not installed). Everything
+            # below is pure arithmetic on validated floats — let any error
+            # propagate so it is diagnosable rather than relabelled as a
+            # "saturation lookup" failure.
+            try:
+                _sat = _gsp(state.hot_fluid_name, state.P_hot_Pa)
+            except CalculationError as _ce:
+                raise CalculationError(
+                    2,
+                    f"Hot inlet '{state.hot_fluid_name}' is a vapor at "
+                    f"P_hot_Pa={state.P_hot_Pa:.0f} Pa, but saturation properties "
+                    f"could not be retrieved ({_ce.message}). "
+                    "Provide T_hot_out_C explicitly (e.g. the saturation temperature "
+                    "or desired subcooled outlet) to proceed.",
+                ) from _ce
+
+            _T_sat: float = float(_sat["T_sat_C"])
+            _h_fg: float = float(_sat["h_fg"])
+            _cp_g: float = float(_sat.get("cp_g") or cp_hot)    # vapor Cp at T_sat
+            _cp_f: float = float(_sat.get("cp_f") or 2500.0)    # liquid Cp at T_sat
+
+            # Hard pre-conditions for the condenser energy balance. Silently
+            # falling through to the sensible-Cp solver here is the very bug
+            # this branch exists to prevent — every missing input must surface
+            # as a typed CalculationError(2) that names the missing field.
+            if state.m_dot_hot_kg_s is None:
+                raise CalculationError(
+                    2,
+                    f"Vapor hot inlet '{state.hot_fluid_name}' requires "
+                    "m_dot_hot_kg_s to solve the condenser energy balance.",
+                )
+            _missing_cold: list[str] = []
+            if state.m_dot_cold_kg_s is None:
+                _missing_cold.append("m_dot_cold_kg_s")
+            if state.T_cold_in_C is None:
+                _missing_cold.append("T_cold_in_C")
+            if state.T_cold_out_C is None:
+                _missing_cold.append("T_cold_out_C")
+            if _missing_cold:
+                raise CalculationError(
+                    2,
+                    f"Vapor hot inlet '{state.hot_fluid_name}' requires a fully "
+                    "determined cold side to solve the condenser energy balance. "
+                    f"Missing: {', '.join(_missing_cold)}.",
+                )
+            if _h_fg <= 0:
+                raise CalculationError(
+                    2,
+                    f"Saturation lookup for '{state.hot_fluid_name}' at "
+                    f"P={state.P_hot_Pa:.0f} Pa returned h_fg={_h_fg} J/kg "
+                    "(supercritical or degenerate). Provide T_hot_out_C "
+                    "explicitly to bypass the latent-heat balance.",
+                )
+
+            _m_hot: float = state.m_dot_hot_kg_s
+            _m_cold: float = state.m_dot_cold_kg_s
+            _Q_cold: float = _m_cold * cp_cold * (
+                state.T_cold_out_C - state.T_cold_in_C  # type: ignore[operator]
+            )
+
+            _T_in: float = state.T_hot_in_C  # type: ignore[assignment]
+
+            # Desuperheat segment (only when T_in is meaningfully above T_sat)
+            _Q_desup = (
+                _m_hot * _cp_g * (_T_in - _T_sat)
+                if _T_in > _T_sat + 0.5 else 0.0
+            )
+            _Q_cond_full = _m_hot * _h_fg
+            _Q_no_subcool = _Q_desup + _Q_cond_full
+
+            if _Q_no_subcool >= _Q_cold:
+                # Partial condenser — not all vapor condenses
+                _Q_cond_used = max(0.0, _Q_cold - _Q_desup)
+                _x_out = max(0.0, 1.0 - _Q_cond_used / _Q_cond_full)
+                _T_hot_out_sol = _T_sat
+                _basis = (
+                    "desuperheat+partial_condense"
+                    if _Q_desup > 0 else "partial_condense"
+                )
+                condenser_extras = {
+                    "heat_duty_basis": _basis,
+                    "T_sat_C": _T_sat,
+                    "lambda_J_kg": _h_fg,
+                    "cp_vapor_J_kgK": _cp_g,
+                    "cp_liquid_J_kgK": _cp_f,
+                    "x_out": round(_x_out, 4),
+                }
+            else:
+                # Full condensation + subcooling
+                _Q_subcool = _Q_cold - _Q_no_subcool
+                _dT_sub = _Q_subcool / (_m_hot * _cp_f) if _cp_f > 0 else 0.0
+                _T_hot_out_sol = _T_sat - _dT_sub
+                _basis = (
+                    "desuperheat+condense+subcool"
+                    if _Q_desup > 0 else "condense+subcool"
+                )
+                condenser_extras = {
+                    "heat_duty_basis": _basis,
+                    "T_sat_C": _T_sat,
+                    "lambda_J_kg": _h_fg,
+                    "cp_vapor_J_kgK": _cp_g,
+                    "cp_liquid_J_kgK": _cp_f,
+                }
+
+            _condenser_Q_W = _Q_cold
+            _condenser_temp_result = {
+                "calculated_field": "T_hot_out_C",
+                "T_hot_out_C": _T_hot_out_sol,
+                "T_hot_in_C": state.T_hot_in_C,
+                "T_cold_in_C": state.T_cold_in_C,
+                "T_cold_out_C": state.T_cold_out_C,
+                "Q_known_side_W": _Q_cold,
+            }
+
+        # --- Attempt to resolve the missing temperature via energy balance ---
         # This may not always be possible — e.g. if T_cold_out is missing AND
         # m_dot_cold is unknown, the system is underdetermined for that unknown.
         # In that case we skip the back-calculation and compute Q from whichever
         # side is fully determined.
         m_hot_sentinel = state.m_dot_hot_kg_s if state.m_dot_hot_kg_s is not None else 1.0
 
-        try:
-            temp_result = self._calculate_missing_temp(
-                T_hot_in_C=state.T_hot_in_C,
-                T_hot_out_C=state.T_hot_out_C,
-                T_cold_in_C=state.T_cold_in_C,
-                T_cold_out_C=state.T_cold_out_C,
-                m_dot_hot_kg_s=m_hot_sentinel,
-                m_dot_cold_kg_s=state.m_dot_cold_kg_s,
-                cp_hot_J_kgK=cp_hot,
-                cp_cold_J_kgK=cp_cold,
-            )
-        except CalculationError:
-            # Underdetermined — build a minimal temp_result from what we know
-            temp_result = {
-                "calculated_field": None,
-                "T_hot_in_C": state.T_hot_in_C,
-                "T_hot_out_C": state.T_hot_out_C,
-                "T_cold_in_C": state.T_cold_in_C,
-                "T_cold_out_C": state.T_cold_out_C,
-                "Q_known_side_W": None,
-                "m_dot_cold_kg_s": state.m_dot_cold_kg_s,
-            }
+        if _condenser_temp_result is not None:
+            # Latent-heat path succeeded — use its result directly.
+            temp_result = _condenser_temp_result
+        else:
+            try:
+                temp_result = self._calculate_missing_temp(
+                    T_hot_in_C=state.T_hot_in_C,
+                    T_hot_out_C=state.T_hot_out_C,
+                    T_cold_in_C=state.T_cold_in_C,
+                    T_cold_out_C=state.T_cold_out_C,
+                    m_dot_hot_kg_s=m_hot_sentinel,
+                    m_dot_cold_kg_s=state.m_dot_cold_kg_s,
+                    cp_hot_J_kgK=cp_hot,
+                    cp_cold_J_kgK=cp_cold,
+                )
+            except CalculationError:
+                # Underdetermined — build a minimal temp_result from what we know
+                temp_result = {
+                    "calculated_field": None,
+                    "T_hot_in_C": state.T_hot_in_C,
+                    "T_hot_out_C": state.T_hot_out_C,
+                    "T_cold_in_C": state.T_cold_in_C,
+                    "T_cold_out_C": state.T_cold_out_C,
+                    "Q_known_side_W": None,
+                    "m_dot_cold_kg_s": state.m_dot_cold_kg_s,
+                }
 
         T_hot_in: float = temp_result["T_hot_in_C"]
         T_hot_out: float = temp_result["T_hot_out_C"]
         T_cold_in: float = temp_result["T_cold_in_C"]
         T_cold_out: float = temp_result["T_cold_out_C"]
+
+        # --- Physical bounds check on any solved temperature ----------------
+        # Catch runaway sensible-Cp solutions (e.g. T = −471 °C for a
+        # condensing vapor) before they corrupt the thermo adapter.
+        _calc_field = temp_result.get("calculated_field")
+        if _calc_field is not None:
+            _solved_val = temp_result.get(_calc_field)
+            if _solved_val is not None:
+                _sv = float(_solved_val)
+                if _sv < -100.0 or _sv > 1500.0:
+                    raise CalculationError(
+                        2,
+                        f"Solved {_calc_field} = {_sv:.1f} °C is outside the "
+                        f"physical range [−100, 1500] °C — the sensible-Cp energy "
+                        f"balance is likely invalid. For vapor condensation, supply "
+                        f"T_hot_out_C directly or provide P_hot_Pa so the "
+                        f"latent-heat balance can be used.",
+                    )
 
         # --- Refine Cp with better mean temperatures after solving ---
         if (
@@ -344,9 +523,15 @@ class Step02HeatDuty(BaseStep):
             warnings=warnings,
         )
 
-        Q_hot = hot_latent["Q_W"] if hot_latent else Q_hot_sensible
+        # When the three-segment condenser solve produced a Q, use it directly
+        # for the hot side (sensible Cp would under-count the latent contribution).
+        if _condenser_Q_W is not None:
+            Q_hot = _condenser_Q_W
+            has_phase_change = True
+        else:
+            Q_hot = hot_latent["Q_W"] if hot_latent else Q_hot_sensible
+            has_phase_change = bool(hot_latent or cold_latent)
         Q_cold = cold_latent["Q_W"] if cold_latent else Q_cold_sensible
-        has_phase_change = bool(hot_latent or cold_latent)
 
         # Determine final Q and imbalance
         imbalance_pct: float | None = None
@@ -420,7 +605,11 @@ class Step02HeatDuty(BaseStep):
             "T_hot_out_C": T_hot_out,
             "T_cold_in_C": T_cold_in,
             "T_cold_out_C": T_cold_out,
-            "heat_duty_basis": self._duty_basis_label(hot_latent, cold_latent),
+            # Condenser-path heat_duty_basis takes priority over the latent-duty label
+            "heat_duty_basis": (
+                condenser_extras.get("heat_duty_basis")
+                or self._duty_basis_label(hot_latent, cold_latent)
+            ),
         }
         if hot_latent is not None:
             outputs["hot_h_fg_J_kg"] = hot_latent["h_fg"]
@@ -435,6 +624,11 @@ class Step02HeatDuty(BaseStep):
         # Expose solved m_dot_cold if it was back-calculated
         if m_dot_cold is not None and state.m_dot_cold_kg_s is None:
             outputs["m_dot_cold_kg_s"] = m_dot_cold
+        # Include condenser-specific fields (T_sat_C, lambda_J_kg, cp_*, x_out)
+        if condenser_extras:
+            for _k, _v in condenser_extras.items():
+                if _k != "heat_duty_basis":   # already set above
+                    outputs[_k] = _v
 
         return StepResult(
             step_id=self.step_id,

@@ -101,3 +101,58 @@ class TestResolveFluid:
         assert props.cp_J_kgK == pytest.approx(
             props_explicit.cp_J_kgK, rel=1e-6,
         )
+
+    async def test_resolve_properties_wraps_unexpected_error(self):
+        """Pydantic ValidationError from the adapter is wrapped as CalculationError(3).
+
+        Guards the narrowed ``except PydanticValidationError`` arm in
+        ``_resolve_fluid``: when the thermo backend produces non-physical values
+        that fail FluidProperties' field validators, the pipeline must surface
+        a typed CalculationError with ``step_id == 3`` rather than bubbling an
+        opaque "Unexpected error in step 3".
+        """
+        from pydantic import ValidationError as _PVE
+
+        # Build a real ValidationError by trying to construct an invalid model.
+        try:
+            FluidProperties(
+                density_kg_m3=-1.0,
+                viscosity_Pa_s=-1.0,
+                cp_J_kgK=-1.0,
+                k_W_mK=-1.0,
+                Pr=-1.0,
+            )
+            real_validation_error: _PVE | None = None
+        except _PVE as ve:
+            real_validation_error = ve
+
+        assert real_validation_error is not None, (
+            "FluidProperties did not reject negative inputs — test setup invalid"
+        )
+
+        with patch(
+            "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
+            new_callable=AsyncMock,
+            side_effect=real_validation_error,
+        ):
+            with pytest.raises(CalculationError) as exc_info:
+                await Step03FluidProperties._resolve_fluid(
+                    "ethanol", 250.0, 101325.0,
+                )
+
+        assert exc_info.value.step_id == 3
+        assert "Non-physical" in exc_info.value.message
+        assert "ethanol" in exc_info.value.message
+
+    async def test_resolve_properties_does_not_swallow_programming_errors(self):
+        """AttributeError / KeyError must propagate unchanged (not be relabelled
+        as 'non-physical properties'). Catching them would hide real bugs."""
+        with patch(
+            "hx_engine.app.steps.step_03_fluid_props.get_fluid_properties",
+            new_callable=AsyncMock,
+            side_effect=AttributeError("'NoneType' object has no attribute 'cp_J_kgK'"),
+        ):
+            with pytest.raises(AttributeError):
+                await Step03FluidProperties._resolve_fluid(
+                    "water", 50.0, 101325.0,
+                )
