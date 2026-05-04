@@ -68,6 +68,46 @@ class FailureContext:
     previous_attempts: list[AttemptRecord] = dc_field(default_factory=list)
 
 
+class RedesignAttempt(BaseModel):
+    """One iteration of the global design-constraint redesign loop.
+
+    The redesign driver appends one of these to ``DesignState.redesign_history``
+    every time it catches a :class:`DesignConstraintViolation`, asks the AI
+    advisor (or its deterministic fallback) for a lever change, and restarts
+    the pipeline. Each attempt is a complete, self-contained record of:
+    why the previous run failed, which lever was tweaked, what its old/new
+    value was, what the AI's reasoning was, and which Layer-1/Layer-2
+    validations passed at the resulting iteration's exit point.
+    """
+
+    attempt_number: int = Field(..., ge=1)
+
+    # --- failure that triggered this attempt ---
+    failed_step_id: int
+    constraint: str                                   # e.g. "nozzle_envelope"
+    failing_value: Any = None
+    allowed_range: list[Optional[float]] = Field(
+        default_factory=lambda: [None, None]
+    )
+    failure_message: str = ""
+
+    # --- lever change applied (one or more parameters) ---
+    lever: str                                        # canonical lever name
+    old_value: Any = None
+    new_value: Any = None
+    direction: str = ""                                # "increase" | "decrease" | "swap"
+    rationale: str = ""                                # AI reasoning or fallback note
+
+    # --- AI provenance ---
+    ai_called: bool = False
+    ai_response_excerpt: str = ""                     # first ~200 chars of AI response
+    fallback_used: bool = False                        # True iff deterministic fallback fired
+
+    # --- outcome of the resulting pipeline run ---
+    outcome: str = "pending"                           # "pending" | "succeeded" | "failed" | "violation"
+    completed_steps: list[int] = Field(default_factory=list)
+
+
 class AIReview(BaseModel):
     """Result of an AI review of a step's outputs."""
 

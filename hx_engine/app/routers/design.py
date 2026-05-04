@@ -13,7 +13,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from hx_engine.app.core.exceptions import CalculationError
-from hx_engine.app.core.pipeline_runner import PipelineRunner
+from hx_engine.app.core.redesign_loop import RedesignDriver
 from hx_engine.app.core.requirements_validator import validate_requirements, verify_token
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
@@ -22,7 +22,7 @@ from hx_engine.app.core.volumetric_flow import (
     apply_flow_inputs,
 )
 from hx_engine.app.dependencies import (
-    get_pipeline_runner,
+    get_redesign_driver,
     get_session_store,
     get_sse_manager,
 )
@@ -89,7 +89,7 @@ async def start_design(
     background_tasks: BackgroundTasks,
     session_store: SessionStore = Depends(get_session_store),
     sse_manager: SSEManager = Depends(get_sse_manager),
-    pipeline_runner: PipelineRunner = Depends(get_pipeline_runner),
+    redesign_driver: RedesignDriver = Depends(get_redesign_driver),
 ) -> DesignResponse:
     """Create a new HX design session and start the pipeline in the background.
 
@@ -181,8 +181,11 @@ async def start_design(
     await session_store.save(session_id, state)
     await session_store.heartbeat(session_id)
 
-    # Launch pipeline in background
-    background_tasks.add_task(pipeline_runner.run, state)
+    # Launch pipeline in background — wrapped in the RedesignDriver so a
+    # downstream DesignConstraintViolation triggers an AI-driven
+    # upstream-lever tweak + restart-from-Step-1 loop instead of a hard
+    # failure.
+    background_tasks.add_task(redesign_driver.run, state)
 
     return DesignResponse(
         session_id=session_id,
@@ -226,8 +229,25 @@ async def respond_to_escalation(
     if state is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if not state.waiting_for_user:
-        # Pipeline is not waiting — the timeout already fired or the step completed.
+    # The pipeline is "really" awaiting input iff either:
+    #   (a) the persisted state says so (state.waiting_for_user), or
+    #   (b) an in-process asyncio.Future has been created and not yet
+    #       resolved by sse_manager.create_user_response_future().
+    #
+    # (b) is the authoritative signal: the future is created inside
+    # _wait_for_user *after* the state.waiting_for_user=True save returns,
+    # and consumed *before* the subsequent waiting_for_user=False save, so
+    # there are short windows where the persisted flag lags the real
+    # in-memory state.  Relying on (a) alone caused the 410-on-click
+    # regression where users got
+    #   "Response window has expired. The pipeline already timed out or
+    #    completed."
+    # within seconds of the decision card appearing.  See
+    # test_respond_accepts_when_future_pending_even_if_state_flag_false.
+    future_pending = sse_manager.has_pending_user_response_future(session_id)
+    if not state.waiting_for_user and not future_pending:
+        # Pipeline really isn't waiting — the timeout fired or the step
+        # completed (or the session already responded once).
         raise HTTPException(
             status_code=410,
             detail="Response window has expired. The pipeline already timed out or completed.",

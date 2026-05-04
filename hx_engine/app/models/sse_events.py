@@ -107,7 +107,33 @@ class DesignCompleteEvent(SSEBaseEvent):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
-# All 8 SSE event types for contract testing
+class RedesignAttemptEvent(SSEBaseEvent):
+    """Emitted by the redesign driver each time a constraint violation
+    triggers a lever change + pipeline restart.
+
+    The frontend renders these as a per-attempt timeline in the run view
+    (one row per attempt: which constraint failed, which lever was tweaked
+    and in which direction, whether AI or the deterministic fallback chose
+    it, and the final outcome of the resulting pipeline run).
+    """
+
+    event_type: str = "redesign_attempt"
+    attempt_number: int
+    max_attempts: int
+    failed_step_id: int
+    constraint: str = ""
+    failure_message: str = ""
+    lever: str = ""
+    old_value: Any = None
+    new_value: Any = None
+    direction: str = ""
+    rationale: str = ""
+    ai_called: bool = False
+    fallback_used: bool = False
+    outcome: str = "in_progress"   # "in_progress" | "succeeded" | "failed" | "violation"
+
+
+# All 9 SSE event types for contract testing
 SSE_EVENT_TYPES = [
     "step_started",
     "step_approved",
@@ -117,4 +143,5 @@ SSE_EVENT_TYPES = [
     "step_error",
     "iteration_progress",
     "design_complete",
+    "redesign_attempt",
 ]

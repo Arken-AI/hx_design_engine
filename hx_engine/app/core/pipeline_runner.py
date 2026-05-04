@@ -14,7 +14,11 @@ import time
 from typing import Any, Optional
 
 from hx_engine.app.core.ai_engineer import AIEngineer
-from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
+from hx_engine.app.core.exceptions import (
+    CalculationError,
+    DesignConstraintViolation,
+    StepHardFailure,
+)
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.core.state_utils import apply_outputs, clear_state_from_step
@@ -273,6 +277,12 @@ class PipelineRunner:
                         result: StepResult = await step.run_with_review_loop(
                             state, self.ai_engineer
                         )
+                    except DesignConstraintViolation:
+                        # Recoverable design-constraint failure — propagate to
+                        # the outer RedesignDriver, which will pick a lever
+                        # tweak and restart the pipeline. Do NOT mark the run
+                        # as errored here; the driver decides the final outcome.
+                        raise
                     except CalculationError as exc:
                         state.pipeline_status = "error"
                         await self._emit_step_error(
@@ -788,6 +798,12 @@ class PipelineRunner:
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
             state.pipeline_status = "cancelled"
+            raise
+        except DesignConstraintViolation:
+            # Re-raised from the inner step loop — bubble up to RedesignDriver.
+            # ``finally`` below persists current state so the driver sees the
+            # partial run.
+            raise
         except Exception:
             logger.exception("Pipeline failed for session %s", session_id)
             state.pipeline_status = "error"
@@ -802,6 +818,10 @@ class PipelineRunner:
                 ).model_dump(),
             )
         finally:
+            # Single canonical persistence site for every exit path. The
+            # success branch may also have saved earlier (before emitting
+            # DesignCompleteEvent so consumers don't see stale state) —
+            # session_store.save is idempotent so the duplicate is harmless.
             await self.session_store.save(session_id, state)
 
         return state
@@ -834,6 +854,9 @@ class PipelineRunner:
                 result = await step12.run(
                     state, self.ai_engineer, self.sse_manager, session_id,
                 )
+            except DesignConstraintViolation:
+                # Bubble up to the outer RedesignDriver.
+                raise
             except Exception as exc:
                 logger.exception("Step 12 convergence loop failed")
                 state.pipeline_status = "error"
@@ -961,6 +984,9 @@ class PipelineRunner:
 
         try:
             result = await step.run_with_review_loop(state, self.ai_engineer)
+        except DesignConstraintViolation:
+            # Bubble up to the outer RedesignDriver.
+            raise
         except (CalculationError, StepHardFailure) as exc:
             state.pipeline_status = "error"
             await self._emit_step_error(
