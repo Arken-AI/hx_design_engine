@@ -14,8 +14,10 @@ See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1560,8 +1562,6 @@ class AIEngineer:
         emits one human-readable WARNING log line. Subsequent calls in
         the same run short-circuit (caller checks ``is_available``).
         """
-        import asyncio as _asyncio
-
         if self._auth_disabled:
             return None
         assert self._client is not None
@@ -1613,7 +1613,7 @@ class AIEngineer:
                     type(e).__name__, label, attempt + 1, self._MAX_RETRIES,
                     delay, e,
                 )
-                await _asyncio.sleep(delay)
+                await asyncio.sleep(delay)
                 continue
 
             except Exception as e:
@@ -1926,83 +1926,26 @@ class AIEngineer:
         if not self.is_available:
             return None
 
-        history = history or []
-        history_block = ""
-        if history:
-            lines = ["", "### Previously Tried (do NOT repeat)"]
-            for h in history[-10:]:
-                lines.append(
-                    f"- attempt {h.get('attempt_number')}: lever={h.get('lever')!r} "
-                    f"{h.get('old_value')!r} → {h.get('new_value')!r} "
-                    f"(direction={h.get('direction')!r}) — outcome={h.get('outcome')!r}"
-                )
-            history_block = "\n".join(lines)
-
-        legal_block = ", ".join(legal_levers) or "(none)"
-        low, high = allowed_range
-        range_str = (
-            f"[{low if low is not None else '-∞'}, "
-            f"{high if high is not None else '+∞'}]"
+        user_prompt = _build_redesign_user_prompt(
+            state=state,
+            failed_step_id=failed_step_id,
+            constraint=constraint,
+            failure_message=failure_message,
+            failing_value=failing_value,
+            allowed_range=allowed_range,
+            legal_levers=legal_levers,
+            history=history or [],
         )
-
-        # Snapshot a small set of currently-active geometry / arrangement
-        # values so the AI can reason about magnitude.
-        geom = state.geometry
-        snapshot = {
-            "shell_diameter_m": getattr(geom, "shell_diameter_m", None) if geom else None,
-            "tube_length_m": getattr(geom, "tube_length_m", None) if geom else None,
-            "tube_od_m": getattr(geom, "tube_od_m", None) if geom else None,
-            "n_passes": getattr(geom, "n_passes", None) if geom else None,
-            "shell_passes": getattr(geom, "shell_passes", None) if geom else None,
-            "n_shells": getattr(geom, "n_shells", None) if geom else None,
-            "baffle_spacing_m": getattr(geom, "baffle_spacing_m", None) if geom else None,
-            "baffle_cut": getattr(geom, "baffle_cut", None) if geom else None,
-            "pitch_layout": getattr(geom, "pitch_layout", None) if geom else None,
-            "multi_shell_arrangement": state.multi_shell_arrangement,
-        }
-        snapshot_block = json.dumps(snapshot, indent=2, default=str)
-
-        user_prompt = (
-            f"## Redesign Advice — Step {failed_step_id} constraint violation\n\n"
-            f"Constraint: **{constraint}**\n"
-            f"Failure: {failure_message}\n"
-            f"Failing value: {failing_value!r}\n"
-            f"Allowed range: {range_str}\n\n"
-            f"### Current Geometry / Arrangement\n```json\n{snapshot_block}\n```\n\n"
-            f"### Legal Levers (you must pick exactly one)\n{legal_block}\n"
-            f"{history_block}\n\n"
-            f"Pick one upstream lever to change so the next pipeline run "
-            f"will satisfy this constraint. Respond ONLY with this JSON:\n"
-            "{\n"
-            '  "lever": "<one of the legal levers>",\n'
-            '  "direction": "increase" | "decrease" | "swap",\n'
-            '  "magnitude_hint": "<short text, e.g. \\"double\\", \\"+1 step\\", \\"to square\\">",\n'
-            '  "rationale": "<one sentence — why this lever, why this direction>"\n'
-            "}\n"
-        )
-
-        system_prompt = _REDESIGN_SYSTEM_PROMPT
         text = await self._anthropic_request_with_retry(
-            system_prompt=system_prompt,
+            system_prompt=_REDESIGN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             label=f"redesign_step_{failed_step_id}_{constraint}",
         )
         if text is None:
             return None
 
-        # Extract JSON
-        import re as _re
-        data: dict[str, Any] | None = None
-        try:
-            data = json.loads(text.strip())
-        except json.JSONDecodeError:
-            m = _re.search(r"\{.*\}", text, _re.DOTALL)
-            if m:
-                try:
-                    data = json.loads(m.group(0))
-                except json.JSONDecodeError:
-                    data = None
-        if not isinstance(data, dict):
+        data = _parse_json_object(text)
+        if data is None:
             logger.warning(
                 "[AI-REDESIGN] unparseable response for %s: %r",
                 constraint, text[:200],
@@ -2026,6 +1969,98 @@ class AIEngineer:
             "rationale": str(data.get("rationale", "")).strip(),
             "ai_response_excerpt": text.strip()[:200],
         }
+
+
+# ===================================================================
+# Redesign prompt helpers — module-level for testability + SRP
+# ===================================================================
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object from raw model output, with regex fallback."""
+    try:
+        data = json.loads(text.strip())
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        try:
+            data = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
+
+
+def _format_history_block(history: list[dict[str, Any]]) -> str:
+    if not history:
+        return ""
+    lines = ["", "### Previously Tried (do NOT repeat)"]
+    for h in history[-10:]:
+        lines.append(
+            f"- attempt {h.get('attempt_number')}: lever={h.get('lever')!r} "
+            f"{h.get('old_value')!r} → {h.get('new_value')!r} "
+            f"(direction={h.get('direction')!r}) — outcome={h.get('outcome')!r}"
+        )
+    return "\n".join(lines)
+
+
+def _format_allowed_range(allowed_range: tuple[Any, Any]) -> str:
+    low, high = allowed_range
+    return (
+        f"[{low if low is not None else '-∞'}, "
+        f"{high if high is not None else '+∞'}]"
+    )
+
+
+_GEOM_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "shell_diameter_m", "tube_length_m", "tube_od_m", "n_passes",
+    "shell_passes", "n_shells", "baffle_spacing_m", "baffle_cut",
+    "pitch_layout",
+)
+
+
+def _build_geometry_snapshot(state: "DesignState") -> str:
+    """JSON snapshot of currently-active geometry/arrangement values."""
+    geom = state.geometry
+    snapshot: dict[str, Any] = {
+        f: (getattr(geom, f, None) if geom else None)
+        for f in _GEOM_SNAPSHOT_FIELDS
+    }
+    snapshot["multi_shell_arrangement"] = state.multi_shell_arrangement
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+def _build_redesign_user_prompt(
+    *,
+    state: "DesignState",
+    failed_step_id: int,
+    constraint: str,
+    failure_message: str,
+    failing_value: Any,
+    allowed_range: tuple[Any, Any],
+    legal_levers: list[str],
+    history: list[dict[str, Any]],
+) -> str:
+    legal_block = ", ".join(legal_levers) or "(none)"
+    return (
+        f"## Redesign Advice — Step {failed_step_id} constraint violation\n\n"
+        f"Constraint: **{constraint}**\n"
+        f"Failure: {failure_message}\n"
+        f"Failing value: {failing_value!r}\n"
+        f"Allowed range: {_format_allowed_range(allowed_range)}\n\n"
+        f"### Current Geometry / Arrangement\n```json\n"
+        f"{_build_geometry_snapshot(state)}\n```\n\n"
+        f"### Legal Levers (you must pick exactly one)\n{legal_block}\n"
+        f"{_format_history_block(history)}\n\n"
+        f"Pick one upstream lever to change so the next pipeline run "
+        f"will satisfy this constraint. Respond ONLY with this JSON:\n"
+        "{\n"
+        '  "lever": "<one of the legal levers>",\n'
+        '  "direction": "increase" | "decrease" | "swap",\n'
+        '  "magnitude_hint": "<short text, e.g. \\"double\\", \\"+1 step\\", \\"to square\\">",\n'
+        '  "rationale": "<one sentence — why this lever, why this direction>"\n'
+        "}\n"
+    )
 
 
 # ===================================================================

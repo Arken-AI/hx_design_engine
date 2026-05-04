@@ -99,29 +99,123 @@ _FALLBACK_SEQUENCE: list[tuple[str, str]] = [
 # ---------------------------------------------------------------------------
 
 
+_DIRECTION_INCREASE = "increase"
+_DIRECTION_DECREASE = "decrease"
+
+
+def _bracket_value(value: Any, ladder: list[Any], direction: str) -> Optional[Any]:
+    """Pick the smallest larger (increase) or largest smaller (decrease)
+    rung when ``value`` is not on the ladder. ``None`` ⇒ first rung
+    matching the direction's bias."""
+    if direction == _DIRECTION_INCREASE:
+        return next((v for v in ladder if value is None or v > value), None)
+    if direction == _DIRECTION_DECREASE:
+        return next((v for v in reversed(ladder) if value is None or v < value), None)
+    return None
+
+
+def _step_on_ladder(value: Any, ladder: list[Any], direction: str) -> Optional[Any]:
+    """Move one rung from a value already on the ladder."""
+    idx = ladder.index(value)
+    if direction == _DIRECTION_INCREASE:
+        return ladder[idx + 1] if idx + 1 < len(ladder) else None
+    if direction == _DIRECTION_DECREASE:
+        return ladder[idx - 1] if idx - 1 >= 0 else None
+    return None
+
+
 def _next_in_ladder(value: Any, ladder: list[Any], direction: str) -> Optional[Any]:
     """Return the next value up/down a discrete ladder, or None at the cap."""
     if value is None or value not in ladder:
-        # Pick the smallest larger value when increasing, largest smaller when
-        # decreasing — handles the "geometry not yet set" edge case.
-        if direction == "increase":
-            for v in ladder:
-                if value is None or v > value:
-                    return v
-            return None
-        if direction == "decrease":
-            for v in reversed(ladder):
-                if value is None or v < value:
-                    return v
-            return None
-        return None
+        return _bracket_value(value, ladder, direction)
+    return _step_on_ladder(value, ladder, direction)
 
-    idx = ladder.index(value)
+
+_BINARY_TOGGLES: dict[str, tuple[str, str]] = {
+    # lever -> (preferred_when_increase, preferred_when_decrease)
+    "pitch_layout": ("square", "triangular"),
+    "multi_shell_arrangement": ("series", "parallel"),
+}
+
+
+def _apply_ladder_on_geom(
+    geom: Any,
+    attr: str,
+    ladder: list[Any],
+    direction: str,
+    *,
+    cast: type,
+    require_existing: bool = True,
+    default_when_missing: Any = None,
+    side_effect: callable | None = None,
+) -> tuple[Any, Any] | None:
+    """Move a numeric ``geom.<attr>`` one step along ``ladder``.
+
+    ``require_existing=True`` aborts when the attribute is None.
+    ``side_effect`` is called after a successful mutation (used to null
+    dependent fields like ``tube_id_m`` when ``tube_od_m`` changes).
+    """
+    if geom is None:
+        return None
+    raw_old = getattr(geom, attr, None)
+    current = raw_old if raw_old is not None else default_when_missing
+    if current is None:
+        # require_existing=True path: nothing to bump.
+        return None
+    if raw_old is None and require_existing:
+        return None
+    new = _next_in_ladder(current, ladder, direction)
+    if new is None:
+        return None
+    setattr(geom, attr, cast(new))
+    if side_effect is not None:
+        side_effect(geom)
+    # Preserve historical old-value semantics: surface the actual previous
+    # attribute value, even when we synthesised a default to seed the ladder.
+    return raw_old, cast(new)
+
+
+def _apply_binary_toggle(
+    holder: Any,
+    attr: str,
+    direction: str,
+    options: tuple[str, str],
+) -> tuple[Any, Any] | None:
+    """Flip a categorical attribute between two values."""
+    old = getattr(holder, attr)
+    if direction == "swap":
+        new = options[1] if old == options[0] else options[0]
+    elif direction == "increase":
+        new = options[0]
+    elif direction == "decrease":
+        new = options[1]
+    else:
+        return None
+    if new == old:
+        return None
+    setattr(holder, attr, new)
+    return old, new
+
+
+def _apply_baffle_spacing(geom: Any, direction: str) -> tuple[Any, Any] | None:
+    """Multiplicative bump within GeometrySpec validator bounds."""
+    if geom is None or geom.baffle_spacing_m is None:
+        return None
+    old = geom.baffle_spacing_m
     if direction == "increase":
-        return ladder[idx + 1] if idx + 1 < len(ladder) else None
-    if direction == "decrease":
-        return ladder[idx - 1] if idx - 1 >= 0 else None
-    return None
+        new = min(old * 1.4, 2.0)        # validator caps at 2.0 m
+    elif direction == "decrease":
+        new = max(old * 0.7, 0.05)       # validator floors at 0.05 m
+    else:
+        return None
+    if abs(new - old) < 1e-6:
+        return None
+    geom.baffle_spacing_m = float(new)
+    return old, float(new)
+
+
+def _null_tube_id(geom: Any) -> None:
+    geom.tube_id_m = None
 
 
 def apply_lever(
@@ -140,121 +234,41 @@ def apply_lever(
     """
     geom = state.geometry
 
-    if lever == "n_passes":
-        if geom is None or geom.n_passes is None:
-            return None
-        new = _next_in_ladder(geom.n_passes, _N_PASSES_LADDER, direction)
-        if new is None:
-            return None
-        old = geom.n_passes
-        geom.n_passes = int(new)
-        return old, int(new)
+    ladder_levers: dict[str, dict[str, Any]] = {
+        "n_passes": dict(attr="n_passes", ladder=_N_PASSES_LADDER, cast=int),
+        "tube_length_m": dict(
+            attr="tube_length_m", ladder=_TUBE_LENGTH_LADDER_M, cast=float,
+        ),
+        "tube_od_m": dict(
+            attr="tube_od_m", ladder=_TUBE_OD_LADDER_M, cast=float,
+            side_effect=_null_tube_id,
+        ),
+        "baffle_cut": dict(
+            attr="baffle_cut", ladder=_BAFFLE_CUT_LADDER, cast=float,
+        ),
+        "n_shells": dict(
+            attr="n_shells", ladder=_N_SHELLS_LADDER, cast=int,
+            require_existing=False, default_when_missing=1,
+        ),
+        "shell_passes": dict(
+            attr="shell_passes", ladder=_SHELL_PASSES_LADDER, cast=int,
+            require_existing=False, default_when_missing=1,
+        ),
+    }
 
-    if lever == "tube_length_m":
-        if geom is None:
-            return None
-        new = _next_in_ladder(geom.tube_length_m, _TUBE_LENGTH_LADDER_M, direction)
-        if new is None:
-            return None
-        old = geom.tube_length_m
-        geom.tube_length_m = float(new)
-        return old, float(new)
-
-    if lever == "tube_od_m":
-        if geom is None:
-            return None
-        new = _next_in_ladder(geom.tube_od_m, _TUBE_OD_LADDER_M, direction)
-        if new is None:
-            return None
-        old = geom.tube_od_m
-        geom.tube_od_m = float(new)
-        # tube_id_m would now be inconsistent — null it so Step 4 recomputes.
-        geom.tube_id_m = None
-        return old, float(new)
+    if lever in ladder_levers:
+        return _apply_ladder_on_geom(geom, direction=direction, **ladder_levers[lever])
 
     if lever == "pitch_layout":
-        if geom is None:
-            return None
-        old = geom.pitch_layout
-        if direction == "swap":
-            new = "square" if old == "triangular" else "triangular"
-        elif direction == "increase":
-            new = "square"
-        elif direction == "decrease":
-            new = "triangular"
-        else:
-            return None
-        if new == old:
-            return None
-        geom.pitch_layout = new
-        return old, new
-
-    if lever == "baffle_cut":
-        if geom is None:
-            return None
-        new = _next_in_ladder(geom.baffle_cut, _BAFFLE_CUT_LADDER, direction)
-        if new is None:
-            return None
-        old = geom.baffle_cut
-        geom.baffle_cut = float(new)
-        return old, float(new)
+        return _apply_binary_toggle(geom, "pitch_layout", direction, _BINARY_TOGGLES[lever]) if geom else None
 
     if lever == "baffle_spacing_m":
-        if geom is None or geom.baffle_spacing_m is None:
-            return None
-        old = geom.baffle_spacing_m
-        if direction == "increase":
-            new = min(old * 1.4, 2.0)   # GeometrySpec validator caps at 2.0 m
-        elif direction == "decrease":
-            new = max(old * 0.7, 0.05)  # GeometrySpec validator floors at 0.05 m
-        else:
-            return None
-        if abs(new - old) < 1e-6:
-            return None
-        geom.baffle_spacing_m = float(new)
-        return old, float(new)
-
-    if lever == "n_shells":
-        if geom is None or geom.n_shells is None:
-            # Initialise to 1 so the ladder works.
-            current = 1
-        else:
-            current = geom.n_shells
-        new = _next_in_ladder(current, _N_SHELLS_LADDER, direction)
-        if new is None:
-            return None
-        old = geom.n_shells if geom else None
-        if geom is None:
-            return None
-        geom.n_shells = int(new)
-        return old, int(new)
-
-    if lever == "shell_passes":
-        if geom is None or geom.shell_passes is None:
-            current = 1
-        else:
-            current = geom.shell_passes
-        new = _next_in_ladder(current, _SHELL_PASSES_LADDER, direction)
-        if new is None:
-            return None
-        old = geom.shell_passes if geom else None
-        if geom is None:
-            return None
-        geom.shell_passes = int(new)
-        return old, int(new)
+        return _apply_baffle_spacing(geom, direction)
 
     if lever == "multi_shell_arrangement":
-        old = state.multi_shell_arrangement
-        if direction == "swap":
-            new = "parallel" if old == "series" else "series"
-        elif direction in ("increase", "decrease"):
-            new = "series" if old != "series" else "parallel"
-        else:
-            return None
-        if new == old:
-            return None
-        state.multi_shell_arrangement = new
-        return old, new
+        return _apply_binary_toggle(
+            state, "multi_shell_arrangement", direction, _BINARY_TOGGLES[lever],
+        )
 
     logger.warning("[REDESIGN] unknown lever %r — ignoring", lever)
     return None
@@ -297,170 +311,242 @@ class RedesignDriver:
         Returns when either the pipeline completes successfully, the
         redesign budget is exhausted, or an unrecoverable error occurs.
         """
-        session_id = state.session_id
-
         while True:
             try:
                 state = await self.runner.run(state)
-                # No violation raised → pipeline either completed, errored
-                # for some other reason, or was orphaned. Either way the
-                # redesign driver is done.
                 return state
-
             except DesignConstraintViolation as violation:
-                logger.info(
-                    "[REDESIGN] caught violation at Step %d (%s): %s",
-                    violation.step_id, violation.constraint, violation.message,
-                )
-
-                # Cap check — global per-run budget.
-                budget = (
-                    self.max_attempts
-                    if self.ai_engineer.is_available
-                    else self.max_fallback_attempts
-                )
-                if state.redesign_attempt_count >= budget:
-                    await self._surface_budget_exhausted(
-                        state, violation, budget,
-                    )
+                should_continue = await self._handle_violation(state, violation)
+                if not should_continue:
                     return state
 
-                # Decide what to tweak.
-                attempt_number = state.redesign_attempt_count + 1
-                history_payload = self._history_payload(state)
-                legal = self._legal_levers_for(violation)
+    # ------------------------------------------------------------------
+    # Violation handling — split into focused helpers (SRP)
+    # ------------------------------------------------------------------
 
-                ai_choice = await self.ai_engineer.recommend_redesign(
-                    state=state,
-                    failed_step_id=violation.step_id,
-                    constraint=violation.constraint,
-                    failure_message=violation.message,
-                    failing_value=violation.failing_value,
-                    allowed_range=violation.allowed_range,
-                    legal_levers=legal,
-                    history=history_payload,
-                )
+    async def _handle_violation(
+        self, state: DesignState, violation: DesignConstraintViolation,
+    ) -> bool:
+        """Process one constraint violation. Returns True iff the caller
+        should re-run the pipeline; False means the driver is done."""
+        logger.info(
+            "[REDESIGN] caught violation at Step %d (%s): %s",
+            violation.step_id, violation.constraint, violation.message,
+        )
 
-                fallback_used = False
-                if ai_choice is not None and not self._already_tried(
-                    state, ai_choice["lever"], ai_choice.get("direction", "")
-                ):
-                    lever = ai_choice["lever"]
-                    direction = ai_choice.get("direction") or "increase"
-                    rationale = ai_choice.get("rationale", "")
-                    ai_excerpt = ai_choice.get("ai_response_excerpt", "")
-                    ai_called = True
-                else:
-                    fallback_used = True
-                    fb = self._pick_fallback(state, violation)
-                    if fb is None:
-                        # No remaining lever to try.
-                        await self._surface_budget_exhausted(
-                            state, violation, budget,
-                            note="No untried legal levers remain.",
-                        )
-                        return state
-                    lever, direction = fb
-                    rationale = (
-                        "Deterministic fallback: AI unavailable or repeated "
-                        "previous suggestion."
-                    )
-                    ai_excerpt = ""
-                    ai_called = self.ai_engineer.is_available and ai_choice is not None
+        budget = self._current_budget()
+        if state.redesign_attempt_count >= budget:
+            await self._surface_budget_exhausted(state, violation, budget)
+            return False
 
-                # Apply the lever.
-                applied = apply_lever(state, lever, direction)
-                if applied is None:
-                    # Lever can't move — try the deterministic fallback once
-                    # more before giving up on this iteration.
-                    if not fallback_used:
-                        fb = self._pick_fallback(state, violation)
-                        if fb is not None:
-                            lever, direction = fb
-                            applied = apply_lever(state, lever, direction)
-                            fallback_used = True
-                            rationale += (
-                                " (AI lever could not be applied; using "
-                                "deterministic fallback.)"
-                            )
-                    if applied is None:
-                        await self._surface_budget_exhausted(
-                            state, violation, budget,
-                            note=f"Could not apply any further lever change "
-                                 f"(last tried {lever!r}/{direction}).",
-                        )
-                        return state
+        ai_choice = await self._ask_ai(state, violation)
+        choice = await self._resolve_choice(state, violation, ai_choice)
+        if choice is None:
+            await self._surface_budget_exhausted(
+                state, violation, budget,
+                note="No untried legal levers remain.",
+            )
+            return False
 
-                old_value, new_value = applied
+        applied = await self._apply_choice_with_retry(state, violation, choice)
+        if applied is None:
+            await self._surface_budget_exhausted(
+                state, violation, budget,
+                note=f"Could not apply any further lever change "
+                     f"(last tried {choice['lever']!r}/{choice['direction']}).",
+            )
+            return False
 
-                # Record the attempt.
-                attempt = RedesignAttempt(
-                    attempt_number=attempt_number,
-                    failed_step_id=violation.step_id,
-                    constraint=violation.constraint,
-                    failing_value=violation.failing_value,
-                    allowed_range=list(violation.allowed_range),
-                    failure_message=violation.message,
-                    lever=lever,
-                    old_value=old_value,
-                    new_value=new_value,
-                    direction=direction,
-                    rationale=rationale,
-                    ai_called=ai_called,
-                    ai_response_excerpt=ai_excerpt,
-                    fallback_used=fallback_used,
-                    outcome="in_progress",
-                    completed_steps=list(state.completed_steps),
-                )
-                state.redesign_history.append(attempt)
-                state.redesign_attempt_count = attempt_number
+        await self._record_and_restart(state, violation, choice, applied, budget)
+        return True
 
-                # Emit SSE so the frontend can update its timeline.
-                await self.sse_manager.emit(
-                    session_id,
-                    RedesignAttemptEvent(
-                        session_id=session_id,
-                        attempt_number=attempt_number,
-                        max_attempts=budget,
-                        failed_step_id=violation.step_id,
-                        constraint=violation.constraint,
-                        failure_message=violation.message,
-                        lever=lever,
-                        old_value=old_value,
-                        new_value=new_value,
-                        direction=direction,
-                        rationale=rationale,
-                        ai_called=ai_called,
-                        fallback_used=fallback_used,
-                        outcome="in_progress",
-                    ).model_dump(mode="json"),
-                )
+    def _current_budget(self) -> int:
+        """Per-run iteration cap, tighter when AI is unavailable."""
+        return (
+            self.max_attempts
+            if self.ai_engineer.is_available
+            else self.max_fallback_attempts
+        )
 
-                # Reset state for the restart. ``clear_state_from_step(state, 1)``
-                # nulls every step-owned field (including ``state.geometry``,
-                # which Step 4 owns) — but we just *intentionally* mutated
-                # geometry to apply the lever. Snapshot the lever-touched
-                # fields, clear, then restore so the restart honors the
-                # redesign decision.
-                geom_snapshot = state.geometry.model_copy() if state.geometry else None
-                arrangement_snapshot = state.multi_shell_arrangement
-                clear_state_from_step(state, 1)
-                state.geometry = geom_snapshot
-                state.multi_shell_arrangement = arrangement_snapshot
-                state.completed_steps = []
-                state.current_step = 0
-                state.pipeline_status = "running"
-                state.is_complete = False
-                state.waiting_for_user = False
-                state.notes.append(
-                    f"[REDESIGN attempt {attempt_number}/{budget}] "
-                    f"Step {violation.step_id} {violation.constraint!r} → "
-                    f"{lever}: {old_value!r} → {new_value!r} ({direction}). "
-                    f"{rationale}"
-                )
-                await self.session_store.save(session_id, state)
-                # Loop back and re-run the pipeline.
-                continue
+    async def _ask_ai(
+        self, state: DesignState, violation: DesignConstraintViolation,
+    ) -> dict[str, Any] | None:
+        return await self.ai_engineer.recommend_redesign(
+            state=state,
+            failed_step_id=violation.step_id,
+            constraint=violation.constraint,
+            failure_message=violation.message,
+            failing_value=violation.failing_value,
+            allowed_range=violation.allowed_range,
+            legal_levers=self._legal_levers_for(violation),
+            history=self._history_payload(state),
+        )
+
+    async def _resolve_choice(
+        self,
+        state: DesignState,
+        violation: DesignConstraintViolation,
+        ai_choice: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Pick (lever, direction, rationale, …) — AI first, fallback otherwise.
+
+        Returns ``None`` only when neither AI nor the deterministic
+        fallback can produce a fresh (lever, direction) pair.
+        """
+        if ai_choice is not None and not self._already_tried(
+            state, ai_choice["lever"], ai_choice.get("direction", ""),
+        ):
+            return {
+                "lever": ai_choice["lever"],
+                "direction": ai_choice.get("direction") or "increase",
+                "rationale": ai_choice.get("rationale", ""),
+                "ai_excerpt": ai_choice.get("ai_response_excerpt", ""),
+                "ai_called": True,
+                "fallback_used": False,
+            }
+
+        fb = self._pick_fallback(state, violation)
+        if fb is None:
+            return None
+        lever, direction = fb
+        return {
+            "lever": lever,
+            "direction": direction,
+            "rationale": (
+                "Deterministic fallback: AI unavailable or repeated "
+                "previous suggestion."
+            ),
+            "ai_excerpt": "",
+            "ai_called": self.ai_engineer.is_available and ai_choice is not None,
+            "fallback_used": True,
+        }
+
+    async def _apply_choice_with_retry(
+        self,
+        state: DesignState,
+        violation: DesignConstraintViolation,
+        choice: dict[str, Any],
+    ) -> tuple[Any, Any] | None:
+        """Apply the chosen lever. If it can't move and we used AI, try the
+        deterministic fallback once before giving up on this iteration."""
+        applied = apply_lever(state, choice["lever"], choice["direction"])
+        if applied is not None:
+            return applied
+        if choice["fallback_used"]:
+            return None
+        fb = self._pick_fallback(state, violation)
+        if fb is None:
+            return None
+        choice["lever"], choice["direction"] = fb
+        choice["fallback_used"] = True
+        choice["rationale"] += (
+            " (AI lever could not be applied; using deterministic fallback.)"
+        )
+        return apply_lever(state, choice["lever"], choice["direction"])
+
+    async def _record_and_restart(
+        self,
+        state: DesignState,
+        violation: DesignConstraintViolation,
+        choice: dict[str, Any],
+        applied: tuple[Any, Any],
+        budget: int,
+    ) -> None:
+        """Append history, emit SSE, reset state, persist — in that order."""
+        old_value, new_value = applied
+        attempt_number = state.redesign_attempt_count + 1
+
+        attempt = self._build_attempt_record(
+            attempt_number, state, violation, choice, old_value, new_value,
+        )
+        state.redesign_history.append(attempt)
+        state.redesign_attempt_count = attempt_number
+
+        await self._emit_attempt_event(
+            state, violation, choice, old_value, new_value,
+            attempt_number, budget,
+        )
+        self._reset_state_for_restart(state)
+        state.notes.append(
+            f"[REDESIGN attempt {attempt_number}/{budget}] "
+            f"Step {violation.step_id} {violation.constraint!r} → "
+            f"{choice['lever']}: {old_value!r} → {new_value!r} "
+            f"({choice['direction']}). {choice['rationale']}"
+        )
+        await self.session_store.save(state.session_id, state)
+
+    @staticmethod
+    def _build_attempt_record(
+        attempt_number: int,
+        state: DesignState,
+        violation: DesignConstraintViolation,
+        choice: dict[str, Any],
+        old_value: Any,
+        new_value: Any,
+    ) -> RedesignAttempt:
+        return RedesignAttempt(
+            attempt_number=attempt_number,
+            failed_step_id=violation.step_id,
+            constraint=violation.constraint,
+            failing_value=violation.failing_value,
+            allowed_range=list(violation.allowed_range),
+            failure_message=violation.message,
+            lever=choice["lever"],
+            old_value=old_value,
+            new_value=new_value,
+            direction=choice["direction"],
+            rationale=choice["rationale"],
+            ai_called=choice["ai_called"],
+            ai_response_excerpt=choice["ai_excerpt"],
+            fallback_used=choice["fallback_used"],
+            outcome="in_progress",
+            completed_steps=list(state.completed_steps),
+        )
+
+    async def _emit_attempt_event(
+        self,
+        state: DesignState,
+        violation: DesignConstraintViolation,
+        choice: dict[str, Any],
+        old_value: Any,
+        new_value: Any,
+        attempt_number: int,
+        budget: int,
+    ) -> None:
+        await self.sse_manager.emit(
+            state.session_id,
+            RedesignAttemptEvent(
+                session_id=state.session_id,
+                attempt_number=attempt_number,
+                max_attempts=budget,
+                failed_step_id=violation.step_id,
+                constraint=violation.constraint,
+                failure_message=violation.message,
+                lever=choice["lever"],
+                old_value=old_value,
+                new_value=new_value,
+                direction=choice["direction"],
+                rationale=choice["rationale"],
+                ai_called=choice["ai_called"],
+                fallback_used=choice["fallback_used"],
+                outcome="in_progress",
+            ).model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _reset_state_for_restart(state: DesignState) -> None:
+        """``clear_state_from_step(state, 1)`` nulls geometry (Step 4 owns it),
+        but we just intentionally mutated geometry. Snapshot, clear, restore."""
+        geom_snapshot = state.geometry.model_copy() if state.geometry else None
+        arrangement_snapshot = state.multi_shell_arrangement
+        clear_state_from_step(state, 1)
+        state.geometry = geom_snapshot
+        state.multi_shell_arrangement = arrangement_snapshot
+        state.completed_steps = []
+        state.current_step = 0
+        state.pipeline_status = "running"
+        state.is_complete = False
+        state.waiting_for_user = False
 
     # ------------------------------------------------------------------
     # Helpers

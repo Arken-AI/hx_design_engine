@@ -798,12 +798,11 @@ class PipelineRunner:
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
             state.pipeline_status = "cancelled"
-            await self.session_store.save(session_id, state)
             raise
         except DesignConstraintViolation:
             # Re-raised from the inner step loop — bubble up to RedesignDriver.
-            # Persist current state so the driver sees the partial run.
-            await self.session_store.save(session_id, state)
+            # ``finally`` below persists current state so the driver sees the
+            # partial run.
             raise
         except Exception:
             logger.exception("Pipeline failed for session %s", session_id)
@@ -818,8 +817,11 @@ class PipelineRunner:
                     recommendation="Please try again.",
                 ).model_dump(),
             )
-            await self.session_store.save(session_id, state)
-        else:
+        finally:
+            # Single canonical persistence site for every exit path. The
+            # success branch may also have saved earlier (before emitting
+            # DesignCompleteEvent so consumers don't see stale state) —
+            # session_store.save is idempotent so the duplicate is harmless.
             await self.session_store.save(session_id, state)
 
         return state
