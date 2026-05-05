@@ -24,6 +24,7 @@ from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.core.state_utils import apply_outputs, clear_state_from_step
 from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
+from hx_engine.app.config import settings as _engine_settings
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
@@ -105,6 +106,68 @@ def _is_termination_intent(text: str) -> bool:
     """Return True if *text* signals the user wants to terminate this design path."""
     lowered = text.lower()
     return any(phrase in lowered for phrase in _TERMINATION_PHRASES)
+
+
+# ---------------------------------------------------------------------------
+# Step 10 mechanical-design Layer 2 → DesignConstraintViolation routing.
+#
+# Step 10 hard-rule failures (tube ΔP > 0.7 bar, shell ΔP > 1.4 bar, nozzle
+# ρv² > TEMA erosion limit) are *mechanical-design* violations: they cannot
+# be fixed by re-running Step 10, only by changing upstream geometry levers
+# (n_passes, tube_length_m, n_shells, baffle_spacing_m, pitch_layout, ...).
+# The RedesignDriver already owns autonomous lever exploration. Routing
+# these failures through it — instead of through the user-facing AI
+# escalation path — honours the product principle that the user only ever
+# answers questions about *fundamental* process inputs (duty, flows,
+# temperatures, pressures, fluids), never about internal mechanical choices.
+#
+# Reference: artifacts/bugs/bug_draft_engine_escalation_user_facing_failure.md
+# ---------------------------------------------------------------------------
+
+_STEP10_MECHANICAL_RULE_PATTERNS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    # (constraint_id, phrases-that-must-all-appear-lowercased, suggested_levers)
+    (
+        "tube_dp_max",
+        ("tube-side", "exceeds", "0.7 bar"),
+        ("n_passes", "tube_length_m", "n_shells", "tube_od_m"),
+    ),
+    (
+        "shell_dp_max",
+        ("shell-side", "exceeds", "1.4 bar"),
+        ("baffle_spacing_m", "baffle_cut", "n_shells", "shell_passes", "pitch_layout"),
+    ),
+    (
+        "nozzle_rho_v2_max",
+        ("nozzle", "exceeds", "tema erosion limit"),
+        ("n_shells", "shell_passes", "tube_length_m"),
+    ),
+)
+
+
+def _classify_step10_mechanical_failure(
+    step_id: int, errors: list[str],
+) -> Optional[DesignConstraintViolation]:
+    """Map a Step 10 Layer 2 hard-rule failure to a DesignConstraintViolation.
+
+    Returns ``None`` if this is not a known mechanical-design Step 10 rule
+    (in which case the caller falls back to the existing AI/user escalation
+    path). Returns a populated violation otherwise so the pipeline runner
+    can ``raise`` it and let the outer ``RedesignDriver`` pick an upstream
+    lever and restart the pipeline.
+    """
+    if step_id != 10 or not errors:
+        return None
+    text = "; ".join(errors).lower()
+    for constraint, phrases, levers in _STEP10_MECHANICAL_RULE_PATTERNS:
+        if all(p in text for p in phrases):
+            return DesignConstraintViolation(
+                step_id=step_id,
+                constraint=constraint,
+                message="; ".join(errors),
+                suggested_levers=list(levers),
+            )
+    return None
+
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +288,21 @@ class PipelineRunner:
         session_store: SessionStore,
         sse_manager: SSEManager,
         ai_engineer: AIEngineer,
+        *,
+        max_escalations: Optional[int] = None,
     ) -> None:
         self.session_store = session_store
         self.sse_manager = sse_manager
         self.ai_engineer = ai_engineer
+        # Per-step in-step AI escalation budget. Resolved from settings when
+        # not explicitly supplied. Mechanical-design Step 10 violations are
+        # routed to the RedesignDriver before this budget is consumed, so
+        # this only governs residual user-facing escalation rounds.
+        self.max_escalations = (
+            max_escalations
+            if max_escalations is not None
+            else _engine_settings.max_internal_escalations
+        )
 
     async def run(self, state: DesignState) -> DesignState:
         """Execute the full pipeline, emitting SSE events for each step.
@@ -266,7 +340,7 @@ class PipelineRunner:
                 )
 
                 # --- execute step with AI review loop (re-runs on ESCALATE/WARNING) ---
-                max_escalations = 2
+                max_escalations = self.max_escalations
                 escalation_count = 0
                 max_actionable_warnings = 1
                 warning_pause_count = 0
@@ -321,6 +395,29 @@ class PipelineRunner:
                             "attempting AI recovery: %s",
                             step.step_id, vr.errors,
                         )
+
+                        # --- Step 10 mechanical-design routing (autonomous) ---
+                        # ΔP / nozzle ρv² hard-rule failures cannot be fixed by
+                        # re-running Step 10 — they require an upstream geometry
+                        # change. Hand off to the RedesignDriver instead of the
+                        # user-facing escalation path so the user is never
+                        # prompted about internal mechanical choices.
+                        mech_violation = _classify_step10_mechanical_failure(
+                            step.step_id, vr.errors,
+                        )
+                        if mech_violation is not None:
+                            logger.info(
+                                "[PIPELINE] Step %d mechanical Layer 2 violation "
+                                "(%s) — handing off to RedesignDriver: %s",
+                                step.step_id, mech_violation.constraint, vr.errors,
+                            )
+                            # Drop the failing step record so the post-redesign
+                            # re-run produces a single clean record.
+                            state.step_records = [
+                                r for r in state.step_records
+                                if r.step_id != step.step_id
+                            ]
+                            raise mech_violation
 
                         # --- Auto geometry-restart for Step 7 velocity bound failures ---
                         # Step 7 cannot fix tube velocity by re-executing itself —
@@ -703,6 +800,28 @@ class PipelineRunner:
                         result.ai_review
                         and result.ai_review.decision == AIDecisionEnum.ESCALATE
                     ):
+                        # If the residual unresolved escalation is still a
+                        # mechanical-design Step 10 issue (e.g. user feedback
+                        # didn't resolve it), hand off to the RedesignDriver
+                        # rather than surfacing internal escalation accounting
+                        # to the user.
+                        post_vr = check_validation_rules(step.step_id, result)
+                        mech_violation = _classify_step10_mechanical_failure(
+                            step.step_id, post_vr.errors,
+                        )
+                        if mech_violation is not None:
+                            logger.info(
+                                "[PIPELINE] Step %d residual escalation is a "
+                                "mechanical Layer 2 violation (%s) — handing off "
+                                "to RedesignDriver instead of erroring",
+                                step.step_id, mech_violation.constraint,
+                            )
+                            state.step_records = [
+                                r for r in state.step_records
+                                if r.step_id != step.step_id
+                            ]
+                            raise mech_violation
+
                         state.pipeline_status = "error"
                         # Build a detailed observation from escalation history
                         step_key = str(step.step_id)
@@ -715,6 +834,13 @@ class PipelineRunner:
                             )
                         history_summary = " | ".join(history_lines) if history_lines else "No user corrections were applied."
 
+                        # Plain-language user-facing message — no internal
+                        # escalation accounting (the bug forbids surfacing
+                        # "max escalation attempts (N) reached").
+                        ai_reason = (
+                            result.ai_review.reasoning
+                            or "An engineering decision could not be resolved."
+                        )
                         await self.sse_manager.emit(
                             session_id,
                             StepErrorEvent(
@@ -722,19 +848,16 @@ class PipelineRunner:
                                 step_id=step.step_id,
                                 step_name=step.step_name,
                                 message=(
-                                    f"Step {step.step_id} ({step.step_name}) — "
-                                    f"max escalation attempts ({max_escalations}) reached with unresolved conflict. "
-                                    + (result.ai_review.reasoning or "Engineering decision could not be resolved.")[:200]
+                                    f"Step {step.step_id} ({step.step_name}) "
+                                    f"could not be completed: {ai_reason[:240]}"
                                 ),
-                                observation=(
-                                    result.ai_review.reasoning
-                                    or "Engineering decision could not be resolved."
-                                ),
+                                observation=ai_reason,
                                 recommendation=(
-                                    f"Escalation history: {history_summary}. "
-                                    f"The pipeline was halted because the conflict could not be resolved "
-                                    f"after {max_escalations} attempts. Please review the input parameters "
-                                    f"(fluid assignments, fluid properties, geometry) and re-run the design."
+                                    "Please review the fundamental process "
+                                    "inputs (fluids, duty, flows, "
+                                    "temperatures, pressures) and re-run "
+                                    "the design. "
+                                    f"(Internal trail: {history_summary})"
                                 ),
                             ).model_dump(mode="json"),
                         )

@@ -273,12 +273,46 @@ class Step02HeatDuty(BaseStep):
         # normalisation in the adapter stay in lock-step.
         _hot_phase = (getattr(state, "hot_phase", None) or "").strip().lower()
         _vapor_phase_values = {"vapor", "vapour", "gas", "condensing", "superheated"}
+        _liquid_phase_values = {"liquid", "subcooled"}
         _is_hot_vapor = (
             _hot_phase in _vapor_phase_values
             or _vapor_hint.endswith(
                 (" vapor", " vapour", " gas", " vapors", " vapours", " gases")
             )
         )
+
+        # --- Saturation-temperature heuristic for implicit vapor detection ------
+        # When no explicit phase signal is present (hot_phase unset, fluid name
+        # has no phase suffix), probe the saturation temperature. If
+        # T_hot_in_C >= T_sat − 5 °C and T_hot_out_C is unknown, the stream is
+        # at or above its saturation point and should be treated as a condensing
+        # service. Skipped when hot_phase is explicitly "liquid"/"subcooled", or
+        # when T_hot_out_C is already known (no need to infer outlet conditions).
+        if (
+            not _is_hot_vapor
+            and _hot_phase not in _liquid_phase_values
+            and state.T_hot_out_C is None
+            and state.P_hot_Pa is not None
+            and state.hot_fluid_name
+        ):
+            try:
+                from hx_engine.app.adapters.thermo_adapter import (
+                    get_saturation_props as _gsp_probe,
+                )
+                _sat_probe = _gsp_probe(state.hot_fluid_name, state.P_hot_Pa)
+                _T_sat_probe = float(_sat_probe["T_sat_C"])
+                # Inlet at or above saturation → condensing service
+                if state.T_hot_in_C >= _T_sat_probe - 5.0:
+                    _is_hot_vapor = True
+                    warnings.append(
+                        f"Hot inlet temperature ({state.T_hot_in_C:.1f}°C) is at or "
+                        f"above the saturation temperature ({_T_sat_probe:.1f}°C) for "
+                        f"'{state.hot_fluid_name}' at {state.P_hot_Pa:.0f} Pa — "
+                        "inferred condensing service. Set hot_phase='liquid' explicitly "
+                        "to override this detection."
+                    )
+            except Exception:
+                pass  # Saturation lookup failed — fall through to sensible-Cp path
 
         if _is_hot_vapor and state.T_hot_out_C is None:
             # Pressure is required for saturation-based calculations.
@@ -459,9 +493,10 @@ class Step02HeatDuty(BaseStep):
                         2,
                         f"Solved {_calc_field} = {_sv:.1f} °C is outside the "
                         f"physical range [−100, 1500] °C — the sensible-Cp energy "
-                        f"balance is likely invalid. For vapor condensation, supply "
-                        f"T_hot_out_C directly or provide P_hot_Pa so the "
-                        f"latent-heat balance can be used.",
+                        f"balance is likely invalid. For vapor condensation, set "
+                        f"hot_phase='vapor' or append ' vapor' to the fluid name "
+                        f"to activate the latent-heat balance. Alternatively, "
+                        f"supply T_hot_out_C directly.",
                     )
 
         # --- Refine Cp with better mean temperatures after solving ---

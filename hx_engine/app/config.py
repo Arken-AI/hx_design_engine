@@ -23,6 +23,13 @@ class HXEngineSettings(BaseSettings):
     # --- Pipeline ---
     pipeline_orphan_threshold_seconds: int = 120
 
+    # Maximum number of in-step AI escalation rounds the runner will perform
+    # before halting a step. Mechanical-design Layer 2 violations (Step 10
+    # ΔP / nozzle ρv²) are now handed to the RedesignDriver rather than
+    # escalated to the user, so this only governs the residual user-facing
+    # escalation loop.
+    max_internal_escalations: int = 4
+
     # --- AI (reads HX_ANTHROPIC_API_KEY via env_prefix) ---
     anthropic_api_key: str = ""
     ai_model: str = "claude-sonnet-4-6"

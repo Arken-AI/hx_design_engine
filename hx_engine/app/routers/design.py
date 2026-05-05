@@ -168,6 +168,8 @@ async def start_design(
         cold_fluid_name=req.cold_fluid_name,
         P_hot_Pa=req.P_hot_Pa,
         P_cold_Pa=req.P_cold_Pa,
+        hot_phase=req.hot_phase,
+        cold_phase=req.cold_phase,
         tema_preference=req.tema_preference,
         hot_flow_input=_flow_audit(hot_res),
         cold_flow_input=_flow_audit(cold_res),
