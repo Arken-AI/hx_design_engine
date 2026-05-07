@@ -28,6 +28,7 @@ def _serth_state(**overrides) -> DesignState:
         tube_material="carbon_steel",
         shell_material="sa516_gr70",
         convergence_converged=True,
+        shell_id_finalised=True,
         area_provided_m2=47.0,
         geometry=GeometrySpec(
             tube_od_m=0.01905,

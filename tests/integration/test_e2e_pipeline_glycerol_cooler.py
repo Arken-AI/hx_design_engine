@@ -141,6 +141,7 @@ def _glycerol_cooler_converged_state() -> DesignState:
         overdesign_pct=(area_provided / (Q_W / (220.0 * 0.85 * 29.1)) - 1.0) * 100.0,
         # Step 12 convergence outputs
         convergence_converged=True,
+        shell_id_finalised=True,
         convergence_iteration=5,
         convergence_trajectory=[
             {"iteration": i, "U_dirty": 220.0 + (5 - i) * 2.0, "delta_U_pct": float(5 - i)}
