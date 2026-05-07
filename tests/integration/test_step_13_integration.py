@@ -123,26 +123,31 @@ class TestSpanStructure:
     @pytest.mark.asyncio
     async def test_three_spans_present(self, step, converged_state):
         await step.execute(converged_state)
-        spans = converged_state.vibration_details.get("spans", {})
-        assert len(spans) == 3, f"Expected 3 spans, got {len(spans)}: {list(spans.keys())}"
+        spans = converged_state.vibration_details.get("spans", [])
+        assert len(spans) == 3, f"Expected 3 spans, got {len(spans)}: {[s.get('location') for s in spans]}"
 
     @pytest.mark.asyncio
     async def test_span_names_are_inlet_central_outlet(self, step, converged_state):
         await step.execute(converged_state)
-        span_keys = set(converged_state.vibration_details.get("spans", {}).keys())
-        assert span_keys == {"inlet", "central", "outlet"}
+        spans_list = converged_state.vibration_details.get("spans", [])
+        locations = {s["location"] for s in spans_list}
+        assert locations == {"inlet", "central", "outlet"}
 
     @pytest.mark.asyncio
-    async def test_each_span_has_four_mechanism_scores(self, step, converged_state):
-        """Every span must carry fluidelastic, vortex, turbulent, acoustic."""
+    async def test_each_span_has_three_mechanism_scores(self, step, converged_state):
+        """Every span must carry fluidelastic, vortex, and turbulent safe flags.
+
+        Acoustic resonance is reported at the top level (not per-span).
+        """
         await step.execute(converged_state)
-        spans = converged_state.vibration_details["spans"]
-        required = {"fluidelastic", "vortex_shedding", "turbulent_buffeting", "acoustic_resonance"}
-        for span_name, span_data in spans.items():
+        spans_list = converged_state.vibration_details["spans"]
+        required = {"fluidelastic_safe", "vortex_shedding_safe", "turbulent_buffeting_safe"}
+        for span_data in spans_list:
+            loc = span_data.get("location", "unknown")
             present = set(span_data.keys())
             missing = required - present
             assert not missing, (
-                f"Span '{span_name}' missing mechanism keys: {missing}"
+                f"Span '{loc}' missing mechanism keys: {missing}"
             )
 
 
