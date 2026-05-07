@@ -1,6 +1,6 @@
 # Step 11: Area + Overdesign — Implementation Plan
 
-**Status:** Ready to implement  
+**Status:** Implemented (as of 2026-05-08)  
 **Depends on:** Steps 1–10 (complete), BaseStep infrastructure (complete)  
 **References:** Serth Ch. 3 (area expressions), Sinnott §12.1 (overdesign practice)
 
