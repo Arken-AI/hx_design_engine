@@ -509,15 +509,23 @@ class TestEscalationExhausted:
 
     @pytest.mark.asyncio
     async def test_escalation_exhausted_after_max_responses_emits_error(
-        self, pipeline_runner, mock_sse_manager, mock_session_store, base_state
+        self, mock_session_store, mock_sse_manager, mock_ai_engineer, base_state
     ):
         """When Layer 2 fail + ESCALATE persists past max_escalations, emit step_error.
 
         Drives the new fall-through path (Layer 2 fail + ai_has_escalation) through
         the full escalation loop until exhaustion. Guards against regressions in the
-        max_escalations guard at pipeline_runner.py:253-257 — which the plan flagged
-        as the safeguard against an infinite escalation loop.
+        max_escalations guard — the safeguard against an infinite escalation loop.
         """
+        # Pin to max_escalations=2 so the count is deterministic regardless of
+        # any future change to the configuration default.
+        pipeline_runner = PipelineRunner(
+            session_store=mock_session_store,
+            sse_manager=mock_sse_manager,
+            ai_engineer=mock_ai_engineer,
+            max_escalations=2,
+        )
+
         # Arrange: step always returns ESCALATE; Layer 2 always fails
         escalate_review = _make_escalate_review()
         persistent_escalate = StepResult(
@@ -556,13 +564,14 @@ class TestEscalationExhausted:
         event_types = _get_emitted_event_types(mock_sse_manager)
         assert event_types.count("step_escalated") == 3
         assert event_types[-1] == "step_error"
-        # Verify the step_error is the real exhaustion message, not the
-        # broad except handler's "Internal pipeline error".
+        # The user-facing message must NOT leak internal escalation accounting
+        # (no "max escalation attempts (N) reached" wording — that's a bug).
         last_error = next(
             e for e in reversed(mock_sse_manager.emitted_events)
             if isinstance(e, dict) and e.get("event_type") == "step_error"
         )
-        assert "max escalation" in last_error.get("message", "")
+        assert "max escalation" not in last_error.get("message", "").lower()
+        assert "could not be completed" in last_error.get("message", "")
 
 
 class TestStep7EscalationOptionHandling:
@@ -1305,3 +1314,149 @@ class TestStep7AutoVelocityRestart:
         assert 6 not in started_step_ids
         # No auto-restart notes recorded.
         assert not any("auto-restart" in n for n in base_state.notes)
+
+
+
+# ===================================================================
+# Step 10 mechanical-design Layer 2 -> RedesignDriver routing
+# Reference: artifacts/bugs/bug_draft_engine_escalation_user_facing_failure.md
+# ===================================================================
+
+from hx_engine.app.core.exceptions import DesignConstraintViolation
+from hx_engine.app.core.pipeline_runner import _classify_step10_mechanical_failure
+
+
+class TestClassifyStep10MechanicalFailure:
+    """Classifier returns a DesignConstraintViolation for dP / nozzle rho_v2 rules."""
+
+    def test_tube_dp_over_limit_classified(self):
+        v = _classify_step10_mechanical_failure(
+            10, ["Tube-side \u0394P 77758 Pa exceeds 0.7 bar (70000 Pa) limit"],
+        )
+        assert v is not None
+        assert v.constraint == "tube_dp_max"
+        assert v.step_id == 10
+        legal = {
+            "n_passes", "tube_length_m", "tube_od_m", "pitch_layout",
+            "baffle_cut", "baffle_spacing_m", "n_shells", "shell_passes",
+            "multi_shell_arrangement",
+        }
+        for lever in v.suggested_levers:
+            assert lever in legal
+
+    def test_shell_dp_over_limit_classified(self):
+        v = _classify_step10_mechanical_failure(
+            10, ["Shell-side \u0394P 165000 Pa exceeds 1.4 bar (140000 Pa) limit"],
+        )
+        assert v is not None
+        assert v.constraint == "shell_dp_max"
+
+    def test_nozzle_rho_v2_over_limit_classified(self):
+        v = _classify_step10_mechanical_failure(
+            10,
+            [
+                "Tube-side nozzle \u03c1v\u00b2 2500 kg/m\u00b7s\u00b2 exceeds "
+                "TEMA erosion limit (2230 kg/m\u00b7s\u00b2); auto-correction "
+                "was not applied"
+            ],
+        )
+        assert v is not None
+        assert v.constraint == "nozzle_rho_v2_max"
+
+    def test_unknown_step10_error_not_classified(self):
+        # Layer 1 contract issues (missing outputs) must NOT route to redesign
+        # -- they are real bugs, not mechanical-design infeasibilities.
+        v = _classify_step10_mechanical_failure(
+            10, ["dP_tube_Pa is missing from Step 10 outputs"],
+        )
+        assert v is None
+
+    def test_non_step10_never_classified(self):
+        v = _classify_step10_mechanical_failure(
+            7, ["Tube-side \u0394P exceeds 0.7 bar"],
+        )
+        assert v is None
+
+    def test_empty_errors_returns_none(self):
+        assert _classify_step10_mechanical_failure(10, []) is None
+
+
+class TestStep10MechanicalLayer2RoutesToRedesign:
+    """Step 10 dP / nozzle rho_v2 Layer 2 failures must raise DesignConstraintViolation."""
+
+    @pytest.mark.asyncio
+    async def test_step10_dp_layer2_failure_raises_violation_not_step_error(
+        self, pipeline_runner, mock_sse_manager, base_state,
+    ):
+        """The pipeline runner must hand off Step 10 dP failures to the
+        outer RedesignDriver rather than emitting a user-facing step_error.
+        """
+        clean_review = _make_proceed_review()
+        step10_result = StepResult(
+            step_id=10,
+            step_name="Pressure Drops",
+            outputs={"dP_tube_Pa": 77758.0, "dP_shell_Pa": 50000.0},
+            ai_review=clean_review,
+        )
+
+        class _MockStep10(MockStep):
+            step_id = 10
+            step_name = "Pressure Drops"
+
+        mock_step = _MockStep10(step10_result)
+        failed_vr = _make_validation_result(
+            passed=False,
+            errors=["Tube-side \u0394P 77758 Pa exceeds 0.7 bar (70000 Pa) limit"],
+        )
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=failed_vr,
+        ):
+            with pytest.raises(DesignConstraintViolation) as exc_info:
+                await pipeline_runner.run(base_state)
+
+        assert exc_info.value.step_id == 10
+        assert exc_info.value.constraint == "tube_dp_max"
+        assert exc_info.value.suggested_levers  # non-empty
+
+        # Critically: NO user-facing step_error event was emitted, and NO raw
+        # "max escalation attempts (N) reached" wording leaked to the client.
+        for ev in mock_sse_manager.emitted_events:
+            if not isinstance(ev, dict):
+                continue
+            assert ev.get("event_type") != "step_error"
+            assert "max escalation" not in str(ev).lower()
+
+
+class TestMaxEscalationsConfigurable:
+    """The per-step escalation budget must be configurable, not a literal 2."""
+
+    def test_default_max_escalations_comes_from_settings(
+        self, mock_session_store, mock_sse_manager, mock_ai_engineer,
+    ):
+        from hx_engine.app.config import settings as _s
+
+        runner = PipelineRunner(
+            session_store=mock_session_store,
+            sse_manager=mock_sse_manager,
+            ai_engineer=mock_ai_engineer,
+        )
+        assert runner.max_escalations == _s.max_internal_escalations
+        # The default must be greater than 2 -- the bug requires the AI to
+        # have more autonomous room before any user-facing pause.
+        assert runner.max_escalations > 2
+
+    def test_explicit_max_escalations_override(
+        self, mock_session_store, mock_sse_manager, mock_ai_engineer,
+    ):
+        runner = PipelineRunner(
+            session_store=mock_session_store,
+            sse_manager=mock_sse_manager,
+            ai_engineer=mock_ai_engineer,
+            max_escalations=7,
+        )
+        assert runner.max_escalations == 7

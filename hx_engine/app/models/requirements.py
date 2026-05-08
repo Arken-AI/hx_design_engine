@@ -57,6 +57,13 @@ class DesignRequest(BaseModel):
     P_hot_Pa: Optional[float] = None
     P_cold_Pa: Optional[float] = None
 
+    # --- Phase regime (optional explicit override) ---
+    # Accepted values: "liquid" | "vapor" | "vapour" | "gas" | "condensing" |
+    # "superheated" | "evaporating" | "subcooled". When absent, Step 2 infers
+    # phase from the fluid name suffix and a saturation-temperature probe.
+    hot_phase: Optional[str] = None
+    cold_phase: Optional[str] = None
+
     # --- Purely optional ---
     tema_preference: Optional[str] = None
 

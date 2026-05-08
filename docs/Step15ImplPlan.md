@@ -1,6 +1,6 @@
 # Step 15 Implementation Plan — Cost Estimate (Turton Method)
 
-**Status:** Planning  
+**Status:** Implemented (as of 2026-05-08)  
 **Depends on:** Steps 1–14 (complete), BaseStep infrastructure (complete)  
 **Reference:** STEPS_6_16_PLAN.md §Phase C, ARKEN_MASTER_PLAN.md §6.3, Turton et al. _Analysis, Synthesis, and Design of Chemical Processes_ (5th ed., 2013) Appendix A  
 **Date:** 2026-04-10
