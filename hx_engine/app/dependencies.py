@@ -44,9 +44,7 @@ async def startup() -> None:
             settings.redis_url,
         )
     _session_store = SessionStore(_redis_client)
-    _ai_engineer = AIEngineer(
-        stub_mode=(not settings.anthropic_api_key),
-    )
+    _ai_engineer = AIEngineer()
 
 
 async def shutdown() -> None:
