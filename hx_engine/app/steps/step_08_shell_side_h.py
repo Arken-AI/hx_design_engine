@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Optional
 
 from hx_engine.app.adapters.thermo_adapter import (
     get_fluid_properties,
@@ -707,3 +708,122 @@ class Step08ShellSideH(BaseStep):
             outputs=outputs,
             warnings=warnings,
         )
+
+    async def _refresh_shell_side_fluid_props(self, state: "DesignState") -> None:
+        """Re-fetch fluid properties for the shell-side fluid at mean shell temperature.
+
+        Called from apply_user_override when the user requests viscosity verification
+        or after a fluid-swap so Step 8 re-runs with fresh thermophysical properties.
+        """
+        shell_side = state.shell_side_fluid
+        if shell_side == "hot":
+            fluid_name = state.hot_fluid_name
+            T_in = state.T_hot_in_C
+            T_out = state.T_hot_out_C
+            pressure = state.P_hot_Pa
+        else:
+            fluid_name = state.cold_fluid_name
+            T_in = state.T_cold_in_C
+            T_out = state.T_cold_out_C
+            pressure = state.P_cold_Pa
+
+        if fluid_name is None or T_in is None or T_out is None:
+            logger.warning("Cannot refresh shell-side fluid props — missing fluid name or temps")
+            return
+
+        T_mean = (T_in + T_out) / 2.0
+        effective_pressure = pressure if pressure is not None else 101325.0
+        try:
+            new_props = await get_fluid_properties(fluid_name, T_mean, effective_pressure)
+            if shell_side == "hot":
+                state.hot_fluid_props = new_props
+            else:
+                state.cold_fluid_props = new_props
+            logger.info("Refreshed shell-side fluid props for %r at T_mean=%.1f°C", fluid_name, T_mean)
+        except Exception as exc:
+            logger.warning("Failed to refresh shell-side fluid props: %s", exc)
+
+    @staticmethod
+    def _swap_shell_side_fluid(state: "DesignState") -> int:
+        """Swap shell/tube fluid allocation. Returns the restart-from-step (3)."""
+        old_val = state.shell_side_fluid
+        state.shell_side_fluid = "cold" if old_val == "hot" else "hot"
+        logger.info(
+            "Step8: shell_side_fluid swapped %r → %r — restart from Step 3",
+            old_val, state.shell_side_fluid,
+        )
+        return 3
+
+    async def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str,
+    ) -> Optional[int]:
+        if option_index == 0:
+            await self._refresh_shell_side_fluid_props(state)
+            return None
+        if option_index == 1:
+            return self._swap_shell_side_fluid(state)
+
+        if re.search(r"verif.*viscosity|viscosity.*verif|re-?run.*step\s*8.*viscosity|force.*mu", text, re.IGNORECASE):
+            await self._refresh_shell_side_fluid_props(state)
+            return None
+        if re.search(r"swap.*fluid|fluid.*swap|oil.*tube.*side|water.*shell.*side", text, re.IGNORECASE):
+            return self._swap_shell_side_fluid(state)
+        return None
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        shell_side = state.shell_side_fluid or "?"
+        shell_fluid_name = (
+            state.hot_fluid_name if shell_side == "hot"
+            else state.cold_fluid_name if shell_side == "cold"
+            else "?"
+        )
+        lines.append(f"Shell-side fluid: {shell_side} ({shell_fluid_name})")
+
+        h_shell = result.outputs.get("h_shell_W_m2K")
+        re_shell = result.outputs.get("Re_shell")
+        g_s = result.outputs.get("G_s_kg_m2s")
+        visc_corr = result.outputs.get("visc_correction")
+        t_wall = result.outputs.get("T_wall_estimated_C")
+        mu_wall = result.outputs.get("mu_wall_Pa_s")
+        kern_div = result.outputs.get("kern_divergence_pct")
+        h_kern = result.outputs.get("h_shell_kern_W_m2K")
+        j_product = result.outputs.get("J_product")
+
+        if shell_side == "hot" and state.hot_fluid_props:
+            fp = state.hot_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+        elif shell_side == "cold" and state.cold_fluid_props:
+            fp = state.cold_fluid_props
+            lines.append(
+                f"Shell-side bulk props: μ={fp.viscosity_Pa_s:.6f} Pa·s, "
+                f"ρ={fp.density_kg_m3:.1f} kg/m³, "
+                f"Cp={fp.cp_J_kgK:.0f} J/kg·K, k={fp.k_W_mK:.4f} W/m·K"
+            )
+
+        if h_shell is not None:
+            lines.append(f"h_shell (Bell-Delaware) = {h_shell:.1f} W/m²K")
+        if h_kern is not None:
+            lines.append(f"h_shell (Kern) = {h_kern:.1f} W/m²K")
+        if kern_div is not None:
+            lines.append(f"Kern divergence = {kern_div:.1f}%")
+        if re_shell is not None:
+            lines.append(f"Re_shell = {re_shell:.0f}")
+        if g_s is not None:
+            lines.append(f"G_s = {g_s:.1f} kg/m²s")
+        if visc_corr is not None:
+            lines.append(f"Viscosity correction (μ_bulk/μ_wall)^0.14 = {visc_corr:.4f}")
+        if t_wall is not None:
+            lines.append(f"T_wall estimate = {t_wall:.1f} °C")
+        if mu_wall is not None:
+            lines.append(f"μ_wall = {mu_wall:.6f} Pa·s")
+        if j_product is not None:
+            lines.append(f"J-factor product = {j_product:.4f}")
+        return "\n".join(lines)

@@ -271,3 +271,52 @@ class TestFE4ShellIdFinalised:
         result = await step.execute(state)
         assert "shell_id_finalised" in result.outputs
         assert isinstance(result.outputs["shell_id_finalised"], bool)
+
+
+# ---------------------------------------------------------------------------
+# on_review_accepted: TEMA hint extraction
+# ---------------------------------------------------------------------------
+
+class TestStep04OnReviewAccepted:
+    @pytest.mark.asyncio
+    async def test_extracts_tema_code_from_recommendation(self):
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        await step.on_review_accepted(state, corrections=[], recommendation="Use AES for this service.")
+        assert state.tema_preference == "AES"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", ["AES", "AEP", "AEU", "AEL", "AEW", "BEM", "NEN", "BEU"])
+    async def test_all_tema_codes_extracted(self, code):
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        await step.on_review_accepted(state, corrections=[], recommendation=f"Recommend {code} type.")
+        assert state.tema_preference == code
+
+    @pytest.mark.asyncio
+    async def test_no_tema_code_leaves_preference_unchanged(self):
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        state.tema_preference = "AES"
+        await step.on_review_accepted(state, corrections=[], recommendation="Looks good, proceed.")
+        assert state.tema_preference == "AES"
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_correction_sets_tema_preference(self):
+        """on_review_accepted must not overwrite an explicit correction on tema_preference."""
+        from unittest.mock import MagicMock
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        state.tema_preference = None
+        correction = MagicMock()
+        correction.field = "tema_preference"
+        await step.on_review_accepted(state, corrections=[correction], recommendation="Use BEM.")
+        assert state.tema_preference is None  # hint skipped; correction owns the field
+
+    @pytest.mark.asyncio
+    async def test_empty_recommendation_is_no_op(self):
+        step = Step04TEMAGeometry()
+        state = _make_state()
+        state.tema_preference = "AES"
+        await step.on_review_accepted(state, corrections=[], recommendation="")
+        assert state.tema_preference == "AES"

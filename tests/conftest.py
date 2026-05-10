@@ -2,11 +2,32 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
 
 from hx_engine.app.models.design_state import DesignState
+
+
+@pytest.fixture(autouse=True)
+def _restore_validation_rules():
+    """Restore the global validation rule registry after every test.
+
+    Some test classes call ``validation_rules.clear_rules()`` in
+    setup/teardown to isolate rule-registration assertions.  Without
+    restoration, all subsequently-executed tests lose rules that were
+    registered at import time (e.g. step_10_rules.py auto-registers on
+    import).  This fixture snapshots and restores the registry so each
+    test gets a clean slate without leaving the shared state corrupted.
+    """
+    from hx_engine.app.core.validation_rules import _rules
+
+    # Deep-copy the list of RuleMeta objects for each step
+    snapshot = {k: list(v) for k, v in _rules.items()}
+    yield
+    _rules.clear()
+    _rules.update(snapshot)
 
 
 @pytest.fixture

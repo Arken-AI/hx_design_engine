@@ -13,6 +13,7 @@ Pieces implemented here:
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import TYPE_CHECKING
@@ -40,6 +41,9 @@ from hx_engine.app.steps.base import BaseStep
 
 if TYPE_CHECKING:
     from hx_engine.app.models.design_state import DesignState
+    from hx_engine.app.models.step_result import AICorrection
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1309,3 +1313,57 @@ class Step04TEMAGeometry(BaseStep):
             outputs=outputs,
             warnings=all_warnings,
         )
+
+    async def on_review_accepted(
+        self,
+        state: "DesignState",
+        corrections: list["AICorrection"],
+        recommendation: str,
+    ) -> None:
+        """Extract TEMA type hints from the AI's recommendation text.
+
+        Called after the user accepts the AI review. Skipped if the accepted
+        corrections already set tema_preference directly.
+        """
+        if not recommendation:
+            return
+        correction_fields = {c.field for c in corrections} if corrections else set()
+        if "tema_preference" in correction_fields:
+            return  # explicit correction takes priority over the hint
+        match = re.search(
+            r"\b(AES|AEP|AEU|AEL|AEW|BEM|NEN|BEU)\b",
+            recommendation,
+            re.IGNORECASE,
+        )
+        if match:
+            suggested = match.group(1).upper()
+            logger.info("Applying recommendation hint: tema_preference = %r", suggested)
+            state.tema_preference = suggested
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        geom = result.outputs.get("geometry")
+        lines = []
+        if state.T_hot_in_C is not None and state.T_cold_out_C is not None:
+            dt1 = state.T_hot_in_C - (state.T_cold_out_C or 0)
+            dt2 = (state.T_hot_out_C or 0) - (state.T_cold_in_C or 0)
+            dt_mean = (dt1 + dt2) / 2
+            lines.append(f"ΔT_mean = {dt_mean:.1f} °C  (ΔT₁={dt1:.1f}, ΔT₂={dt2:.1f})")
+        if geom is not None:
+            tube_od = getattr(geom, "tube_od_m", None)
+            tube_id = getattr(geom, "tube_id_m", None)
+            shell_d = getattr(geom, "shell_diameter_m", None)
+            baffle_s = getattr(geom, "baffle_spacing_m", None)
+            pitch_r = getattr(geom, "pitch_ratio", None)
+            if tube_od and tube_id:
+                lines.append(
+                    f"Tube ID < OD check: {tube_id:.4f} < {tube_od:.4f}"
+                    f" = {tube_id < tube_od}"
+                )
+            if pitch_r:
+                lines.append(f"Pitch ratio = {pitch_r:.3f}  (valid: 1.2–1.5)")
+            if baffle_s and shell_d:
+                ratio = baffle_s / shell_d
+                lines.append(
+                    f"Baffle/shell ratio = {ratio:.3f}  (valid: 0.2–1.0)"
+                )
+        return "\n".join(lines)

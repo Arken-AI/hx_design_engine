@@ -430,3 +430,26 @@ class Step05LMTD(BaseStep):
                 return True
 
         return False
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        t_hi = state.T_hot_in_C
+        t_ho = state.T_hot_out_C
+        t_ci = state.T_cold_in_C
+        t_co = state.T_cold_out_C
+        if all(v is not None for v in (t_hi, t_ho, t_ci, t_co)):
+            dt1 = t_hi - t_co
+            dt2 = t_ho - t_ci
+            lines.append(f"ΔT₁ = T_hot_in − T_cold_out = {dt1:.1f} °C")
+            lines.append(f"ΔT₂ = T_hot_out − T_cold_in = {dt2:.1f} °C")
+            lines.append(f"Approach temp = min(ΔT₁, ΔT₂) = {min(dt1, dt2):.1f} °C")
+        r_val = result.outputs.get("R")
+        p_val = result.outputs.get("P")
+        f_val = result.outputs.get("F_factor")
+        if r_val is not None:
+            lines.append(f"R = {r_val:.3f}")
+        if p_val is not None:
+            lines.append(f"P = {p_val:.3f}")
+        if f_val is not None:
+            lines.append(f"F = {f_val:.3f}")
+        return "\n".join(lines)
