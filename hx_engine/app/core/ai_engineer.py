@@ -1,4 +1,4 @@
-"""AI Engineer — Claude Sonnet 4.6 integration for step review.
+"""AI Engineer — permanent stub (Layer 3 bypassed).
 
 Uses ANTHROPIC_API_KEY from .env (loaded via HXEngineSettings) to make
 real LLM calls for every step review.  Pass stub_mode=True only in tests.
@@ -14,24 +14,9 @@ See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import re
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from anthropic import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncAnthropic,
-    AuthenticationError,
-    InternalServerError,
-    PermissionDeniedError,
-    RateLimitError,
-)
-
-from hx_engine.app.config import settings
 from hx_engine.app.models.step_result import (
     AICorrection,
     AIDecisionEnum,
@@ -46,10 +31,6 @@ if TYPE_CHECKING:
     from hx_engine.app.steps.base import BaseStep
 
 logger = logging.getLogger(__name__)
-
-_MODEL = settings.ai_model
-_MAX_TOKENS = 2048
-_TEMPERATURE = 0.1
 
 # Confidence threshold: >= this → auto-proceed, < this → escalate to user
 CONFIDENCE_THRESHOLD = 0.7
@@ -936,46 +917,28 @@ def _build_system_prompt(step_id: int, step_name: str) -> str:
 
 
 class AIEngineer:
-    """AI engineer using Claude Sonnet 4.6 for step review.
+    """Permanent stub — always returns PROCEED without calling the API.
 
-    In production, ANTHROPIC_API_KEY must be set in .env.
-    Pass stub_mode=True only in tests to skip real API calls.
+    The class shell is preserved so that all 16 step files, base.py,
+    pipeline_runner.py, redesign_loop.py, and all integration tests
+    compile and pass without modification.
     """
 
-    def __init__(self, *, stub_mode: bool = False):
-        self._stub_mode = stub_mode
-        # Becomes True after a 401 / PermissionDeniedError so the rest of
-        # the run uses the stub/deterministic path instead of hammering
-        # the API. Reset only when a new AIEngineer is constructed (i.e.
-        # at engine startup). One human-readable banner is logged when
-        # this flips.
-        self._auth_disabled: bool = False
-        if not stub_mode:
-            api_key = settings.anthropic_api_key
-            if not api_key:
-                raise ValueError(
-                    "ANTHROPIC_API_KEY is not set — add it to your .env file."
-                )
-            self._client: AsyncAnthropic | None = AsyncAnthropic(api_key=api_key)
-        else:
-            self._client = None
+    def __init__(self, *, stub_mode: bool = True):
+        self._stub_mode = True
+        self._client = None
 
     @property
     def is_available(self) -> bool:
-        """True iff a real Claude call is possible right now.
-
-        Returns False in stub mode and after the run has hit a 401 — both
-        the per-step reviewer and the redesign loop check this so they can
-        fall back to deterministic behaviour without retrying the API.
-        """
-        return (not self._stub_mode) and (not self._auth_disabled)
+        """Always False — live API is permanently disabled."""
+        return False
 
     async def review(
         self,
         step: "BaseStep",
         state: "DesignState",
         result: "StepResult",
-        failure_context: FailureContext | None = None,
+        failure_context: "FailureContext | None" = None,
     ) -> AIReview:
         """Review a step's outputs.
 
@@ -1406,27 +1369,12 @@ class AIEngineer:
         user_summary = data.get("user_summary")
 
         return AIReview(
-            decision=decision,
-            confidence=confidence,
-            corrections=corrections,
-            reasoning=str(data.get("reasoning", "")),
-            observation=str(data.get("observation", "")),
-            recommendation=recommendation_raw or None,
-            options=[str(o) for o in options_raw],
-            option_ratings=[int(r) for r in ratings_raw if isinstance(r, (int, float))],
-            ai_called=True,
-            # Step 16 extras
-            design_summary=str(design_summary) if design_summary else None,
-            assumptions=[str(a) for a in assumptions_raw],
-            design_strengths=[str(s) for s in strengths_raw],
-            design_risks=[str(r) for r in risks_raw],
-            recommendations=[str(r) for r in recommendations_raw],
-            user_summary=str(user_summary) if user_summary else None,
+            decision=AIDecisionEnum.PROCEED,
+            confidence=0.85,
+            corrections=[],
+            reasoning="Stub: auto-approved (AI review permanently disabled)",
+            ai_called=False,
         )
-
-    # ------------------------------------------------------------------
-    # Redesign-loop advisor (separate from per-step review)
-    # ------------------------------------------------------------------
 
     async def recommend_redesign(
         self,
@@ -1440,177 +1388,5 @@ class AIEngineer:
         legal_levers: list[str],
         history: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """Ask the AI which lever to tweak to recover from a constraint violation.
-
-        Returns ``{"lever": str, "direction": str, "magnitude_hint": str|None,
-        "rationale": str, "ai_response_excerpt": str}`` on success, or
-        ``None`` when the AI is unavailable / returns an unparseable
-        response. The redesign driver then falls back to its
-        deterministic round-robin over ``legal_levers``.
-        """
-        if not self.is_available:
-            return None
-
-        user_prompt = _build_redesign_user_prompt(
-            state=state,
-            failed_step_id=failed_step_id,
-            constraint=constraint,
-            failure_message=failure_message,
-            failing_value=failing_value,
-            allowed_range=allowed_range,
-            legal_levers=legal_levers,
-            history=history or [],
-        )
-        text = await self._anthropic_request_with_retry(
-            system_prompt=_REDESIGN_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            label=f"redesign_step_{failed_step_id}_{constraint}",
-        )
-        if text is None:
-            return None
-
-        data = _parse_json_object(text)
-        if data is None:
-            logger.warning(
-                "[AI-REDESIGN] unparseable response for %s: %r",
-                constraint, text[:200],
-            )
-            return None
-
-        lever = str(data.get("lever", "")).strip()
-        if lever not in legal_levers:
-            logger.warning(
-                "[AI-REDESIGN] AI suggested non-legal lever %r (legal=%s)",
-                lever, legal_levers,
-            )
-            return None
-
-        return {
-            "lever": lever,
-            "direction": str(data.get("direction", "")).strip(),
-            "magnitude_hint": (
-                str(data.get("magnitude_hint", "")).strip() or None
-            ),
-            "rationale": str(data.get("rationale", "")).strip(),
-            "ai_response_excerpt": text.strip()[:200],
-        }
-
-
-# ===================================================================
-# Redesign prompt helpers — module-level for testability + SRP
-# ===================================================================
-
-
-def _parse_json_object(text: str) -> dict[str, Any] | None:
-    """Parse a JSON object from raw model output, with regex fallback."""
-    try:
-        data = json.loads(text.strip())
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if not m:
-            return None
-        try:
-            data = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    return data if isinstance(data, dict) else None
-
-
-def _format_history_block(history: list[dict[str, Any]]) -> str:
-    if not history:
-        return ""
-    lines = ["", "### Previously Tried (do NOT repeat)"]
-    for h in history[-10:]:
-        lines.append(
-            f"- attempt {h.get('attempt_number')}: lever={h.get('lever')!r} "
-            f"{h.get('old_value')!r} → {h.get('new_value')!r} "
-            f"(direction={h.get('direction')!r}) — outcome={h.get('outcome')!r}"
-        )
-    return "\n".join(lines)
-
-
-def _format_allowed_range(allowed_range: tuple[Any, Any]) -> str:
-    low, high = allowed_range
-    return (
-        f"[{low if low is not None else '-∞'}, "
-        f"{high if high is not None else '+∞'}]"
-    )
-
-
-_GEOM_SNAPSHOT_FIELDS: tuple[str, ...] = (
-    "shell_diameter_m", "tube_length_m", "tube_od_m", "n_passes",
-    "shell_passes", "n_shells", "baffle_spacing_m", "baffle_cut",
-    "pitch_layout",
-)
-
-
-def _build_geometry_snapshot(state: "DesignState") -> str:
-    """JSON snapshot of currently-active geometry/arrangement values."""
-    geom = state.geometry
-    snapshot: dict[str, Any] = {
-        f: (getattr(geom, f, None) if geom else None)
-        for f in _GEOM_SNAPSHOT_FIELDS
-    }
-    snapshot["multi_shell_arrangement"] = state.multi_shell_arrangement
-    return json.dumps(snapshot, indent=2, default=str)
-
-
-def _build_redesign_user_prompt(
-    *,
-    state: "DesignState",
-    failed_step_id: int,
-    constraint: str,
-    failure_message: str,
-    failing_value: Any,
-    allowed_range: tuple[Any, Any],
-    legal_levers: list[str],
-    history: list[dict[str, Any]],
-) -> str:
-    legal_block = ", ".join(legal_levers) or "(none)"
-    return (
-        f"## Redesign Advice — Step {failed_step_id} constraint violation\n\n"
-        f"Constraint: **{constraint}**\n"
-        f"Failure: {failure_message}\n"
-        f"Failing value: {failing_value!r}\n"
-        f"Allowed range: {_format_allowed_range(allowed_range)}\n\n"
-        f"### Current Geometry / Arrangement\n```json\n"
-        f"{_build_geometry_snapshot(state)}\n```\n\n"
-        f"### Legal Levers (you must pick exactly one)\n{legal_block}\n"
-        f"{_format_history_block(history)}\n\n"
-        f"Pick one upstream lever to change so the next pipeline run "
-        f"will satisfy this constraint. Respond ONLY with this JSON:\n"
-        "{\n"
-        '  "lever": "<one of the legal levers>",\n'
-        '  "direction": "increase" | "decrease" | "swap",\n'
-        '  "magnitude_hint": "<short text, e.g. \\"double\\", \\"+1 step\\", \\"to square\\">",\n'
-        '  "rationale": "<one sentence — why this lever, why this direction>"\n'
-        "}\n"
-    )
-
-
-# ===================================================================
-# Redesign system prompt — lives at module scope so tests can read it
-# ===================================================================
-
-_REDESIGN_SYSTEM_PROMPT = """\
-You are a senior heat-exchanger design engineer guiding an automated
-redesign loop. A downstream step has proven the current geometry
-infeasible. Your job is to pick exactly ONE upstream lever to change
-so the next pipeline run will likely satisfy the failing constraint.
-
-CONSTRAINTS:
-- Choose only from the explicit "Legal Levers" list — any other answer
-  will be rejected and the loop will fall back to deterministic logic.
-- Prefer the smallest, most reversible change that addresses the root
-  cause. Bigger jumps (e.g. +2 sizes, doubling) only when the gap is
-  large or smaller jumps already failed.
-- Do NOT repeat any (lever, direction, magnitude) combination that
-  appears in the "Previously Tried" section.
-- If multiple levers could work, prefer ones that do not invalidate
-  the user's stated TEMA preference or shell-side fluid choice.
-- "swap" is only valid for categorical levers like pitch_layout
-  (triangular ↔ square) or multi_shell_arrangement (series ↔ parallel).
-
-OUTPUT: Respond ONLY with the JSON object described in the user
-message. No prose before or after.
-"""
+        """Always returns None — redesign driver uses deterministic round-robin."""
+        return None

@@ -22,27 +22,24 @@ _MAX_TOKENS = 1024
 _TEMPERATURE = 0.0  # deterministic for engineering values
 
 
-_SYSTEM_PROMPT = """\
-You are an expert heat exchanger design engineer with deep knowledge of \
-fouling resistances from TEMA Standards (RGP-T-2.4), Perry's Chemical \
-Engineers' Handbook (Table 11-10), and Kern's Process Heat Transfer.
-
-When asked for a fouling resistance (R_f) for a fluid, you must:
-1. Identify the fluid category and service conditions
-2. Provide the R_f value in m²·K/W
-3. Rate your confidence from 0.0 to 1.0
-4. Cite your reasoning and source
-
-Respond ONLY with a JSON object in this exact format:
-{
-    "rf_value": <float in m²·K/W>,
-    "confidence": <float 0.0-1.0>,
-    "reasoning": "<brief explanation citing source>",
-    "classification": "<clean|moderate|heavy|severe>"
-}
-
-Do NOT include any text outside the JSON object.\
-"""
+_SYSTEM_PROMPT = (
+    "You are an expert heat exchanger design engineer with deep knowledge of "
+    "fouling resistances from TEMA Standards (RGP-T-2.4), Perry's Chemical "
+    "Engineers' Handbook (Table 11-10), and Kern's Process Heat Transfer.\n\n"
+    "When asked for a fouling resistance (R_f) for a fluid, you must:\n"
+    "1. Identify the fluid category and service conditions\n"
+    "2. Provide the R_f value in m2*K/W\n"
+    "3. Rate your confidence from 0.0 to 1.0\n"
+    "4. Cite your reasoning and source\n\n"
+    "Respond ONLY with a JSON object in this exact format:\n"
+    "{\n"
+    '    \"rf_value\": <float in m2*K/W>,\n'
+    '    \"confidence\": <float 0.0-1.0>,\n'
+    '    \"reasoning\": \"<brief explanation citing source>\",\n'
+    '    \"classification\": \"<clean|moderate|heavy|severe>\"\n'
+    "}\n\n"
+    "Do NOT include any text outside the JSON object."
+)
 
 
 def _build_user_prompt(
@@ -52,10 +49,10 @@ def _build_user_prompt(
 ) -> str:
     """Build the user prompt for the fouling factor request."""
     parts = [
-        f"What is the fouling resistance (R_f) in m²·K/W for: {fluid_name}"
+        f"What is the fouling resistance (R_f) in m2*K/W for: {fluid_name}"
     ]
     if temperature_C is not None:
-        parts.append(f"Operating temperature: {temperature_C:.0f}°C")
+        parts.append(f"Operating temperature: {temperature_C:.0f} C")
     if additional_context:
         parts.append(f"Additional context: {additional_context}")
     parts.append(
@@ -85,7 +82,7 @@ async def get_fouling_from_ai(
     """
     api_key = settings.anthropic_api_key
     if not api_key or api_key == "your_anthropic_api_key_here":
-        logger.warning("ANTHROPIC_API_KEY not configured — cannot call AI")
+        logger.warning("ANTHROPIC_API_KEY not configured -- cannot call AI")
         return {
             "rf_value": 0.000352,
             "confidence": 0.0,
@@ -138,7 +135,6 @@ async def get_fouling_from_ai(
 
 def _parse_response(text: str) -> dict:
     """Parse Claude's JSON response, with fallback for malformed responses."""
-    # Try to extract JSON from the response
     text = text.strip()
 
     # Try direct parse
@@ -149,7 +145,7 @@ def _parse_response(text: str) -> dict:
         pass
 
     # Try extracting JSON from markdown code blocks
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(1))
@@ -158,7 +154,7 @@ def _parse_response(text: str) -> dict:
             pass
 
     # Try finding any JSON object in the text
-    match = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(0))
@@ -179,7 +175,7 @@ def _parse_response(text: str) -> dict:
 def _validate_parsed(data: dict) -> dict:
     """Validate and normalize the parsed AI response."""
     rf = float(data.get("rf_value", 0.000352))
-    # Sanity: R_f should be between 0 and 0.01 m²·K/W
+    # Sanity: R_f should be between 0 and 0.01 m2*K/W
     if rf <= 0 or rf > 0.01:
         logger.warning("AI returned out-of-range R_f=%.6f, clamping", rf)
         rf = max(0.000001, min(0.01, rf))
