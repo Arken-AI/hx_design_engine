@@ -1,6 +1,6 @@
 # Step 10: Pressure Drops — Implementation Plan
 
-**Status:** Ready to implement  
+**Status:** Implemented (as of 2026-05-08)  
 **Depends on:** Steps 1–9 (complete), BaseStep infrastructure (complete)  
 **References:** Serth Ch. 5 (Appendix 5.A for SI), Sinnott Ch. 12 (Bell's method §12.9.4)
 

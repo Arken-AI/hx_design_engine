@@ -353,7 +353,7 @@ class TestExecute:
         assert "confidence_score" in result.outputs
         assert "confidence_breakdown" in result.outputs
         bd = result.outputs["confidence_breakdown"]
-        assert len(bd) == 4
+        assert len(bd) == len(CONFIDENCE_WEIGHTS)
         assert set(bd.keys()) == set(CONFIDENCE_WEIGHTS.keys())
 
     @pytest.mark.asyncio
@@ -363,7 +363,7 @@ class TestExecute:
         await step.execute(state)
         assert state.confidence_score is not None
         assert state.confidence_breakdown is not None
-        assert len(state.confidence_breakdown) == 4
+        assert len(state.confidence_breakdown) == len(CONFIDENCE_WEIGHTS)
 
     @pytest.mark.asyncio
     async def test_score_clamped(self, step):

@@ -326,3 +326,110 @@ class TestAllFieldsPopulated:
         assert props.cp_J_kgK is not None
         assert props.k_W_mK is not None
         assert props.Pr is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CoolProp output sanity guard
+#
+# Guards the new range/finiteness check in ``_get_props_coolprop`` that
+# converts silently-bad CoolProp outputs (negative viscosity, NaN Pr, etc.)
+# into a typed CalculationError instead of letting them propagate into a
+# pydantic ValidationError deep inside the adapter.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCoolPropOutputGuard:
+    """Six tests guarding the non-physical-output sanity check."""
+
+    @staticmethod
+    def _make_propsi_stub(overrides: dict[str, float | None]):
+        """Return a PropsSI replacement that yields sane defaults except
+        for the keys named in ``overrides`` (which are returned as-is)."""
+        defaults = {
+            "C": 4181.0,    # cp
+            "D": 997.0,     # rho
+            "V": 8.9e-4,    # mu
+            "L": 0.6,       # k
+            "Prandtl": 6.2, # Pr
+        }
+
+        def _stub(prop_key, *_args, **_kwargs):
+            if prop_key in overrides:
+                return overrides[prop_key]
+            return defaults[prop_key]
+
+        return _stub
+
+    def test_negative_viscosity_raises(self, monkeypatch):
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({"V": -1e-5}),
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert "non-physical" in exc_info.value.message.lower()
+        assert "mu" in exc_info.value.message
+
+    def test_negative_cp_raises(self, monkeypatch):
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({"C": -50.0}),
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert "cp" in exc_info.value.message
+
+    def test_nan_prandtl_raises(self, monkeypatch):
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({"Prandtl": float("nan")}),
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert "Pr" in exc_info.value.message
+
+    def test_huge_density_raises(self, monkeypatch):
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({"D": 5_000.0}),  # > 2000 kg/m³ ceiling
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert "rho" in exc_info.value.message
+
+    def test_inf_conductivity_raises(self, monkeypatch):
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({"L": float("inf")}),
+        )
+        with pytest.raises(CalculationError) as exc_info:
+            _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert "k" in exc_info.value.message
+
+    def test_sane_outputs_pass_through(self, monkeypatch):
+        """All-defaults stub must still return a valid FluidProperties."""
+        from hx_engine.app.adapters.thermo_adapter import _get_props_coolprop
+
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PropsSI",
+            self._make_propsi_stub({}),
+        )
+        # Avoid hitting the real saturation lookup which would call PropsSI again
+        # via PhaseSI / iapws fallback paths.
+        monkeypatch.setattr(
+            "hx_engine.app.adapters.thermo_adapter._CP.PhaseSI",
+            lambda *_a, **_kw: "liquid",
+            raising=False,
+        )
+        props = _get_props_coolprop("Water", 25.0, 101_325.0)
+        assert props.cp_J_kgK == pytest.approx(4181.0)
+        assert props.density_kg_m3 == pytest.approx(997.0)

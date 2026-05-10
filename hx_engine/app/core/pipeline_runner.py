@@ -16,13 +16,18 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from hx_engine.app.core.ai_engineer import AIEngineer
-from hx_engine.app.core.exceptions import CalculationError, StepHardFailure
+from hx_engine.app.core.exceptions import (
+    CalculationError,
+    DesignConstraintViolation,
+    StepHardFailure,
+)
 from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.core.design_intent import is_termination_intent
 from hx_engine.app.core.state_utils import apply_outputs, clear_state_from_step
 from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
+from hx_engine.app.config import settings as _engine_settings
 from hx_engine.app.models.design_state import DesignState
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
@@ -86,10 +91,21 @@ class PipelineRunner:
         session_store: SessionStore,
         sse_manager: SSEManager,
         ai_engineer: AIEngineer,
+        *,
+        max_escalations: Optional[int] = None,
     ) -> None:
         self.session_store = session_store
         self.sse_manager = sse_manager
         self.ai_engineer = ai_engineer
+        # Per-step in-step AI escalation budget. Resolved from settings when
+        # not explicitly supplied. Mechanical-design Step 10 violations are
+        # routed to the RedesignDriver before this budget is consumed, so
+        # this only governs residual user-facing escalation rounds.
+        self.max_escalations = (
+            max_escalations
+            if max_escalations is not None
+            else _engine_settings.max_internal_escalations
+        )
 
     async def run(self, state: DesignState) -> DesignState:
         """Execute the full pipeline, emitting SSE events for each step.
@@ -127,16 +143,23 @@ class PipelineRunner:
                 )
 
                 # --- execute step with AI review loop (re-runs on ESCALATE/WARNING) ---
-                max_escalations = 2
+                max_escalations = self.max_escalations
                 escalation_count = 0
                 max_actionable_warnings = 1
                 warning_pause_count = 0
+                velocity_restart_count = 0
                 while True:
                     start_ms = time.monotonic()
                     try:
                         result: StepResult = await step.run_with_review_loop(
                             state, self.ai_engineer
                         )
+                    except DesignConstraintViolation:
+                        # Recoverable design-constraint failure — propagate to
+                        # the outer RedesignDriver, which will pick a lever
+                        # tweak and restart the pipeline. Do NOT mark the run
+                        # as errored here; the driver decides the final outcome.
+                        raise
                     except CalculationError as exc:
                         state.pipeline_status = "error"
                         await self._emit_step_error(
@@ -175,6 +198,113 @@ class PipelineRunner:
                             "attempting AI recovery: %s",
                             step.step_id, vr.errors,
                         )
+
+                        # --- Step 10 mechanical-design routing (autonomous) ---
+                        # ΔP / nozzle ρv² hard-rule failures cannot be fixed by
+                        # re-running Step 10 — they require an upstream geometry
+                        # change. Hand off to the RedesignDriver instead of the
+                        # user-facing escalation path so the user is never
+                        # prompted about internal mechanical choices.
+                        mech_violation = _classify_step10_mechanical_failure(
+                            step.step_id, vr.errors,
+                        )
+                        if mech_violation is not None:
+                            logger.info(
+                                "[PIPELINE] Step %d mechanical Layer 2 violation "
+                                "(%s) — handing off to RedesignDriver: %s",
+                                step.step_id, mech_violation.constraint, vr.errors,
+                            )
+                            # Drop the failing step record so the post-redesign
+                            # re-run produces a single clean record.
+                            state.step_records = [
+                                r for r in state.step_records
+                                if r.step_id != step.step_id
+                            ]
+                            raise mech_violation
+
+                        # --- Auto geometry-restart for Step 7 velocity bound failures ---
+                        # Step 7 cannot fix tube velocity by re-executing itself —
+                        # velocity depends on n_tubes / n_passes set in Steps 4/6.
+                        # Try doubling (or halving) n_passes and re-running Steps 5–6
+                        # before falling through to AI recovery / user escalation.
+                        if (
+                            step.step_id == 7
+                            and velocity_restart_count < MAX_VELOCITY_RESTARTS
+                            and _is_velocity_bound_error(vr.errors)
+                        ):
+                            adjustment = _adjust_n_passes_for_velocity(state, vr.errors)
+                            if adjustment is not None:
+                                old_np, new_np, direction = adjustment
+                                velocity_restart_count += 1
+                                logger.info(
+                                    "[STEP7-AUTO-RESTART] Velocity violation %s "
+                                    "(attempt %d/%d): n_passes %d → %d, "
+                                    "restarting Steps 5–6",
+                                    vr.errors, velocity_restart_count,
+                                    MAX_VELOCITY_RESTARTS, old_np, new_np,
+                                )
+                                # Drop the failing Step 7 record so the re-run
+                                # produces the only Step 7 record for this attempt.
+                                state.step_records = [
+                                    r for r in state.step_records
+                                    if r.step_id != step.step_id
+                                ]
+                                # Clear stale Step 5+ state so re-execution is fresh.
+                                clear_state_from_step(state, 5)
+                                # Re-execute Steps 5 and 6 inline so LMTD F-factor
+                                # and the chosen shell are refreshed for the new
+                                # n_passes, then loop back to re-run Step 7 at the
+                                # top of the inner while-loop.
+                                for restart_step_cls in (Step05LMTD, Step06InitialU):
+                                    rs = restart_step_cls()
+                                    await self.sse_manager.emit(
+                                        session_id,
+                                        StepStartedEvent(
+                                            session_id=session_id,
+                                            step_id=rs.step_id,
+                                            step_name=rs.step_name,
+                                        ).model_dump(),
+                                    )
+                                    try:
+                                        rr = await rs.run_with_review_loop(
+                                            state, self.ai_engineer
+                                        )
+                                    except (CalculationError, StepHardFailure) as exc:
+                                        state.pipeline_status = "error"
+                                        await self._emit_step_error(
+                                            session_id, rs,
+                                            str(exc) if isinstance(exc, CalculationError)
+                                            else "; ".join(exc.validation_errors),
+                                            recommendation=(
+                                                "Auto velocity-restart of Steps 5–6 failed."
+                                            ),
+                                        )
+                                        return state
+                                    self._apply_outputs(state, rr)
+                                    state.current_step = rs.step_id
+                                    if rs.step_id not in state.completed_steps:
+                                        state.completed_steps.append(rs.step_id)
+                                    await self._emit_decision_event(
+                                        session_id, rs, rr, 0,
+                                    )
+                                    await self.session_store.save(session_id, state)
+                                # Re-emit step_started so the frontend resets the
+                                # Step 7 card before the retry.
+                                await self.sse_manager.emit(
+                                    session_id,
+                                    StepStartedEvent(
+                                        session_id=session_id,
+                                        step_id=step.step_id,
+                                        step_name=step.step_name,
+                                    ).model_dump(),
+                                )
+                                state.notes.append(
+                                    f"[Step 7 auto-restart {velocity_restart_count}/"
+                                    f"{MAX_VELOCITY_RESTARTS}] {direction} n_passes "
+                                    f"{old_np} → {new_np} to recover from "
+                                    f"{vr.errors[0]}"
+                                )
+                                continue  # re-run Step 7 at top of inner while
 
                         # If AI already produced an ESCALATE, skip recovery
                         # and fall through to the escalation handler below.
@@ -442,6 +572,28 @@ class PipelineRunner:
                         result.ai_review
                         and result.ai_review.decision == AIDecisionEnum.ESCALATE
                     ):
+                        # If the residual unresolved escalation is still a
+                        # mechanical-design Step 10 issue (e.g. user feedback
+                        # didn't resolve it), hand off to the RedesignDriver
+                        # rather than surfacing internal escalation accounting
+                        # to the user.
+                        post_vr = check_validation_rules(step.step_id, result)
+                        mech_violation = _classify_step10_mechanical_failure(
+                            step.step_id, post_vr.errors,
+                        )
+                        if mech_violation is not None:
+                            logger.info(
+                                "[PIPELINE] Step %d residual escalation is a "
+                                "mechanical Layer 2 violation (%s) — handing off "
+                                "to RedesignDriver instead of erroring",
+                                step.step_id, mech_violation.constraint,
+                            )
+                            state.step_records = [
+                                r for r in state.step_records
+                                if r.step_id != step.step_id
+                            ]
+                            raise mech_violation
+
                         state.pipeline_status = "error"
                         # Build a detailed observation from escalation history
                         step_key = str(step.step_id)
@@ -454,6 +606,13 @@ class PipelineRunner:
                             )
                         history_summary = " | ".join(history_lines) if history_lines else "No user corrections were applied."
 
+                        # Plain-language user-facing message — no internal
+                        # escalation accounting (the bug forbids surfacing
+                        # "max escalation attempts (N) reached").
+                        ai_reason = (
+                            result.ai_review.reasoning
+                            or "An engineering decision could not be resolved."
+                        )
                         await self.sse_manager.emit(
                             session_id,
                             StepErrorEvent(
@@ -461,19 +620,16 @@ class PipelineRunner:
                                 step_id=step.step_id,
                                 step_name=step.step_name,
                                 message=(
-                                    f"Step {step.step_id} ({step.step_name}) — "
-                                    f"max escalation attempts ({max_escalations}) reached with unresolved conflict. "
-                                    + (result.ai_review.reasoning or "Engineering decision could not be resolved.")[:200]
+                                    f"Step {step.step_id} ({step.step_name}) "
+                                    f"could not be completed: {ai_reason[:240]}"
                                 ),
-                                observation=(
-                                    result.ai_review.reasoning
-                                    or "Engineering decision could not be resolved."
-                                ),
+                                observation=ai_reason,
                                 recommendation=(
-                                    f"Escalation history: {history_summary}. "
-                                    f"The pipeline was halted because the conflict could not be resolved "
-                                    f"after {max_escalations} attempts. Please review the input parameters "
-                                    f"(fluid assignments, fluid properties, geometry) and re-run the design."
+                                    "Please review the fundamental process "
+                                    "inputs (fluids, duty, flows, "
+                                    "temperatures, pressures) and re-run "
+                                    "the design. "
+                                    f"(Internal trail: {history_summary})"
                                 ),
                             ).model_dump(mode="json"),
                         )
@@ -537,6 +693,12 @@ class PipelineRunner:
         except asyncio.CancelledError:
             logger.info("Pipeline cancelled for session %s", session_id)
             state.pipeline_status = "cancelled"
+            raise
+        except DesignConstraintViolation:
+            # Re-raised from the inner step loop — bubble up to RedesignDriver.
+            # ``finally`` below persists current state so the driver sees the
+            # partial run.
+            raise
         except Exception:
             logger.exception("Pipeline failed for session %s", session_id)
             state.pipeline_status = "error"
@@ -551,6 +713,10 @@ class PipelineRunner:
                 ).model_dump(),
             )
         finally:
+            # Single canonical persistence site for every exit path. The
+            # success branch may also have saved earlier (before emitting
+            # DesignCompleteEvent so consumers don't see stale state) —
+            # session_store.save is idempotent so the duplicate is harmless.
             await self.session_store.save(session_id, state)
 
         return state
@@ -587,6 +753,9 @@ class PipelineRunner:
                 result = await step12.run(
                     state, self.ai_engineer, emit_event=_emit,
                 )
+            except DesignConstraintViolation:
+                # Bubble up to the outer RedesignDriver.
+                raise
             except Exception as exc:
                 logger.exception("Step 12 convergence loop failed")
                 state.pipeline_status = "error"
@@ -690,6 +859,9 @@ class PipelineRunner:
 
         try:
             result = await step.run_with_review_loop(state, self.ai_engineer)
+        except DesignConstraintViolation:
+            # Bubble up to the outer RedesignDriver.
+            raise
         except (CalculationError, StepHardFailure) as exc:
             state.pipeline_status = "error"
             await self._emit_step_error(

@@ -31,6 +31,7 @@ def _serth_state(**overrides) -> DesignState:
         tube_material="carbon_steel",
         shell_material="sa516_gr70",
         convergence_converged=True,
+        shell_id_finalised=True,
         geometry=GeometrySpec(
             tube_od_m=0.01905,
             tube_id_m=0.01483,

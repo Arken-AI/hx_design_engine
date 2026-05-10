@@ -73,6 +73,23 @@ class SSEManager:
         if future and not future.done():
             future.set_result(response)
 
+    def has_pending_user_response_future(self, session_id: str) -> bool:
+        """Return True iff a user-response future exists and is unresolved.
+
+        This is the authoritative in-process signal that the pipeline is
+        currently awaiting user input.  ``DesignState.waiting_for_user`` is a
+        persisted mirror of the same fact but can briefly lag the future
+        (the future is created inside ``_wait_for_user`` *after* the
+        ``state.waiting_for_user = True`` save returns, and is consumed
+        *before* the subsequent ``state.waiting_for_user = False`` save).
+        Callers that need to know whether ``/respond`` is currently
+        meaningful should consult this method as well as the persisted
+        flag — see the 410-on-click regression in
+        ``test_respond_accepts_when_future_pending_even_if_state_flag_false``.
+        """
+        future = self._futures.get(session_id)
+        return future is not None and not future.done()
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------

@@ -23,6 +23,7 @@ from hx_engine.app.adapters.thermo_adapter import (
 )
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.models.design_state import FluidProperties
+from pydantic import ValidationError as PydanticValidationError
 from hx_engine.app.models.step_result import AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
 
@@ -109,6 +110,20 @@ class Step03FluidProperties(BaseStep):
                 f"Could not retrieve properties for '{fluid_name}' at "
                 f"T={T_mean_C:.1f}°C: {exc.message}",
                 cause=exc,
+            ) from exc
+        except PydanticValidationError as exc:
+            # Pydantic ValidationError here means the thermo backend returned
+            # non-physical values (e.g. negative viscosity or Cp from CoolProp
+            # operating outside its EOS envelope) that failed FluidProperties
+            # field validators. Surface as a typed CalculationError so the
+            # pipeline reports a meaningful step-3 error rather than
+            # "Unexpected error in step 3". Other exception types are
+            # intentionally NOT caught — they indicate programming bugs that
+            # must surface unmodified.
+            raise CalculationError(
+                3,
+                f"Non-physical properties returned for '{fluid_name}' at "
+                f"T={T_mean_C:.1f}°C — {exc}",
             ) from exc
 
     # ------------------------------------------------------------------

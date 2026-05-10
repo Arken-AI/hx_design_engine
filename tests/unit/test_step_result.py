@@ -77,13 +77,13 @@ class TestStepRecord:
 
 class TestSSEEvents:
     def test_event_types_count(self):
-        assert len(SSE_EVENT_TYPES) == 8
+        assert len(SSE_EVENT_TYPES) == 9
 
     def test_event_types_match_frontend(self):
         expected = {
             "step_started", "step_approved", "step_corrected",
             "step_warning", "step_escalated", "step_error",
-            "iteration_progress", "design_complete",
+            "iteration_progress", "design_complete", "redesign_attempt",
         }
         assert set(SSE_EVENT_TYPES) == expected
 
