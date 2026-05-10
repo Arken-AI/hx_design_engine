@@ -8,6 +8,8 @@ Tests cover:
 - Failure modes: unknown fluid, out-of-range properties
 """
 
+import importlib.util
+
 import pytest
 
 from hx_engine.app.adapters.thermo_adapter import (
@@ -30,11 +32,30 @@ from hx_engine.app.adapters.petroleum_correlations import (
 from hx_engine.app.core.exceptions import CalculationError
 from hx_engine.app.models.design_state import FluidProperties
 
+# Optional-library availability flags — used to skip tests that need them
+_iapws_available = importlib.util.find_spec("iapws") is not None
+_coolprop_available = importlib.util.find_spec("CoolProp") is not None
+_thermo_available = importlib.util.find_spec("thermo") is not None
+
+_requires_iapws_or_coolprop = pytest.mark.skipif(
+    not (_iapws_available or _coolprop_available),
+    reason="iapws and CoolProp not installed",
+)
+_requires_coolprop = pytest.mark.skipif(
+    not _coolprop_available,
+    reason="CoolProp not installed",
+)
+_requires_thermo = pytest.mark.skipif(
+    not _thermo_available,
+    reason="thermo library not installed",
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tier 1 — iapws (water / steam)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@_requires_iapws_or_coolprop
 class TestWaterAt25C:
     """NIST reference: Cp ≈ 4181 J/kg·K at 25°C, 1 atm."""
 
@@ -53,6 +74,7 @@ class TestWaterAt25C:
         assert props.viscosity_Pa_s == pytest.approx(8.9e-4, rel=0.05)
 
 
+@_requires_iapws_or_coolprop
 class TestFluidNearBoiling:
     def test_fluid_near_boiling(self):
         """Water at 99°C, 1 atm — must return liquid props, not gas."""
@@ -61,6 +83,7 @@ class TestFluidNearBoiling:
         assert props.cp_J_kgK == pytest.approx(4215.0, rel=0.02)
 
 
+@_requires_coolprop
 class TestFallbackChain:
     def test_fallback_chain_works(self, monkeypatch):
         """Mock iapws failing → CoolProp should handle water correctly."""
@@ -80,6 +103,7 @@ class TestFallbackChain:
 # Tier 3 — thermo library (broad chemical database)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@_requires_thermo
 class TestThermoLibrary:
     """Compounds that exist in thermo but NOT in CoolProp's 124 fluids."""
 
@@ -286,13 +310,13 @@ class TestAllFieldsPopulated:
     @pytest.mark.parametrize(
         "fluid,temp",
         [
-            ("water", 50.0),
+            pytest.param("water", 50.0, marks=_requires_iapws_or_coolprop),
             ("crude oil", 100.0),
-            ("ethanol", 25.0),
+            pytest.param("ethanol", 25.0, marks=_requires_coolprop),
             ("Maya crude", 100.0),
             ("kerosene", 80.0),
             ("thermal oil", 150.0),
-            ("acetic acid", 25.0),
+            pytest.param("acetic acid", 25.0, marks=_requires_thermo),
         ],
     )
     def test_all_fields_populated(self, fluid: str, temp: float):

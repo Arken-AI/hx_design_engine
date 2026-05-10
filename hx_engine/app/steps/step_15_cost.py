@@ -305,3 +305,27 @@ class Step15CostEstimate(BaseStep):
             },
             warnings=warnings,
         )
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        cost = result.outputs.get("cost_usd")
+        bd = result.outputs.get("cost_breakdown") or {}
+        if cost is not None:
+            lines.append(f"Bare module cost: ${cost:,.0f}")
+        cost_m2 = bd.get("cost_per_m2_usd")
+        if cost_m2 is not None:
+            lines.append(f"Cost/m²: ${cost_m2:,.0f}")
+        f_m = bd.get("F_M")
+        if f_m is not None:
+            lines.append(f"Material factor F_M: {f_m:.4f}")
+        f_p = bd.get("F_P")
+        if f_p is not None:
+            lines.append(f"Pressure factor F_P: {f_p:.4f}")
+        if bd.get("cepci_stale"):
+            lines.append(f"WARNING: CEPCI index is stale ({bd.get('cepci_stale_days')} days old)")
+        if bd.get("F_M_interpolated"):
+            lines.append("NOTE: Material factor was interpolated (not directly from Turton)")
+        tube_mat = result.outputs.get("tube_material")
+        if tube_mat:
+            lines.append(f"Tube material: {tube_mat}")
+        return "\n".join(lines)

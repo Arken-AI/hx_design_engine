@@ -34,7 +34,7 @@ from hx_engine.app.models.step_result import (
     StepResult,
 )
 from hx_engine.app.steps.base import BaseStep
-from hx_engine.app.core.pipeline_runner import _is_termination_intent
+from hx_engine.app.core.design_intent import is_termination_intent
 
 
 # ===================================================================
@@ -575,100 +575,50 @@ class TestEscalationExhausted:
 
 
 class TestStep7EscalationOptionHandling:
-    """Tests for Step 7 velocity escalation option handlers."""
+    """Tests for Step 7 velocity escalation option handlers — via step.apply_user_override()."""
 
     async def test_step7_option_a_swaps_fluid_allocation(self, base_state):
-        """Step 7 Option A (index 0): Swap fluid allocation to put viscous fluid on shell-side."""
-        # Arrange: shell_side_fluid is "hot" (meaning water is on shell, oil on tube)
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         base_state.shell_side_fluid = "hot"
-
-        # Act: Apply Option A (index 0) for Step 7
-        await PipelineRunner._apply_user_text_override(
-            base_state, "", step_id=7, option_index=0
-        )
-
-        # Assert: fluid allocation swapped
-        assert base_state.shell_side_fluid == "cold", (
-            "Option A should swap shell_side_fluid from 'hot' to 'cold'"
-        )
+        result = await Step07TubeSideH().apply_user_override(base_state, option_index=0, text="")
+        assert result == 3
+        assert base_state.shell_side_fluid == "cold"
 
     async def test_step7_option_b_modifies_geometry(self, base_state):
-        """Step 7 Option B (index 1): Reduce n_tubes and increase n_passes."""
-        # Arrange: set up geometry with low velocity configuration
         from hx_engine.app.models.design_state import GeometrySpec
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         base_state.geometry = GeometrySpec(
-            n_tubes=200,
-            n_passes=1,
-            shell_diameter_m=0.5,
-            tube_od_m=0.02,
-            tube_id_m=0.016,
-            tube_length_m=3.0,
-            baffle_spacing_m=0.2,
-            pitch_ratio=1.25,
-            baffle_cut=0.25,
+            n_tubes=200, n_passes=1, shell_diameter_m=0.5,
+            tube_od_m=0.02, tube_id_m=0.016, tube_length_m=3.0,
+            baffle_spacing_m=0.2, pitch_ratio=1.25, baffle_cut=0.25,
         )
-
-        # Act: Apply Option B (index 1) for Step 7
-        await PipelineRunner._apply_user_text_override(
-            base_state, "", step_id=7, option_index=1
-        )
-
-        # Assert: geometry modified to increase velocity
-        # n_tubes reduced, n_passes increased
-        assert base_state.geometry.n_tubes == 100, (
-            "Option B should halve n_tubes (200 → 100)"
-        )
-        assert base_state.geometry.n_passes == 2, (
-            "Option B should double n_passes (1 → 2)"
-        )
+        result = await Step07TubeSideH().apply_user_override(base_state, option_index=1, text="")
+        assert result is None
+        assert base_state.geometry.n_tubes == 100
+        assert base_state.geometry.n_passes == 2
 
     async def test_step7_option_b_respects_n_passes_limit(self, base_state):
-        """Step 7 Option B: n_passes should not exceed 8 (TEMA limit)."""
-        # Arrange: geometry already at n_passes=6
         from hx_engine.app.models.design_state import GeometrySpec
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         base_state.geometry = GeometrySpec(
-            n_tubes=100,
-            n_passes=6,  # Doubling would give 12, but should cap at 8
-            shell_diameter_m=0.5,
-            tube_od_m=0.02,
-            tube_id_m=0.016,
-            tube_length_m=3.0,
-            baffle_spacing_m=0.2,
-            pitch_ratio=1.25,
-            baffle_cut=0.25,
+            n_tubes=100, n_passes=6, shell_diameter_m=0.5,
+            tube_od_m=0.02, tube_id_m=0.016, tube_length_m=3.0,
+            baffle_spacing_m=0.2, pitch_ratio=1.25, baffle_cut=0.25,
         )
-
-        # Act
-        await PipelineRunner._apply_user_text_override(
-            base_state, "", step_id=7, option_index=1
-        )
-
-        # Assert: n_passes capped at 8
-        assert base_state.geometry.n_passes == 8, (
-            "Option B should cap n_passes at 8 (TEMA limit)"
-        )
+        await Step07TubeSideH().apply_user_override(base_state, option_index=1, text="")
+        assert base_state.geometry.n_passes == 8
 
     async def test_step7_regex_fallback_for_velocity_increase(self, base_state):
-        """Step 7: Regex fallback for 'reduce n_tubes' / 'increase velocity' text."""
         from hx_engine.app.models.design_state import GeometrySpec
+        from hx_engine.app.steps.step_07_tube_side_h import Step07TubeSideH
         base_state.geometry = GeometrySpec(
-            n_tubes=200,
-            n_passes=1,
-            shell_diameter_m=0.5,
-            tube_od_m=0.02,
-            tube_id_m=0.016,
-            tube_length_m=3.0,
-            baffle_spacing_m=0.2,
-            pitch_ratio=1.25,
-            baffle_cut=0.25,
+            n_tubes=200, n_passes=1, shell_diameter_m=0.5,
+            tube_od_m=0.02, tube_id_m=0.016, tube_length_m=3.0,
+            baffle_spacing_m=0.2, pitch_ratio=1.25, baffle_cut=0.25,
         )
-
-        # Act: User types free text instead of clicking button
-        await PipelineRunner._apply_user_text_override(
-            base_state, "Please reduce n_tubes and increase velocity", step_id=7, option_index=-1
+        await Step07TubeSideH().apply_user_override(
+            base_state, option_index=-1, text="Please reduce n_tubes and increase velocity",
         )
-
-        # Assert: geometry modified
         assert base_state.geometry.n_tubes == 100
         assert base_state.geometry.n_passes == 2
 
@@ -678,59 +628,59 @@ class TestStep7EscalationOptionHandling:
 # ===================================================================
 
 class TestTerminationIntentDetection:
-    """Unit tests for _is_termination_intent — phrase matching logic."""
+    """Unit tests for is_termination_intent — phrase matching logic."""
 
     def test_flag_design_as_impractical(self):
         """Option text 'Flag design as impractical...' triggers termination."""
         text = "Flag design as impractical and recommend plate or double-pipe exchanger to the user"
-        assert _is_termination_intent(text) is True
+        assert is_termination_intent(text) is True
 
     def test_terminate_keyword(self):
         """Text containing 'terminate' triggers termination."""
-        assert _is_termination_intent("Terminate this shell-and-tube design path entirely") is True
+        assert is_termination_intent("Terminate this shell-and-tube design path entirely") is True
 
     def test_not_viable(self):
         """Text containing 'not viable' triggers termination."""
-        assert _is_termination_intent("This design is not viable for S&T") is True
+        assert is_termination_intent("This design is not viable for S&T") is True
 
     def test_recommend_plate(self):
         """Text containing 'recommend plate' triggers termination."""
-        assert _is_termination_intent("Recommend plate exchanger for this duty") is True
+        assert is_termination_intent("Recommend plate exchanger for this duty") is True
 
     def test_recommend_double_pipe(self):
         """Text containing 'recommend double-pipe' triggers termination."""
-        assert _is_termination_intent("recommend double-pipe exchanger instead") is True
+        assert is_termination_intent("recommend double-pipe exchanger instead") is True
 
     def test_abort_design(self):
         """Text containing 'abort design' triggers termination."""
-        assert _is_termination_intent("abort design and start over") is True
+        assert is_termination_intent("abort design and start over") is True
 
     def test_no_further_steps(self):
         """Text containing 'no further steps' triggers termination."""
         text = "no further steps possible"
-        assert _is_termination_intent(text) is True
+        assert is_termination_intent(text) is True
 
     def test_case_insensitive(self):
         """Termination detection is case-insensitive."""
-        assert _is_termination_intent("FLAG DESIGN AS IMPRACTICAL") is True
-        assert _is_termination_intent("Terminate This Design") is True
+        assert is_termination_intent("FLAG DESIGN AS IMPRACTICAL") is True
+        assert is_termination_intent("Terminate This Design") is True
 
     def test_normal_override_not_termination(self):
         """Normal override text like 'swap fluid' is NOT termination."""
-        assert _is_termination_intent("swap fluid allocation") is False
+        assert is_termination_intent("swap fluid allocation") is False
 
     def test_proceed_not_termination(self):
         """Text like 'proceed with minimum TEMA' is NOT termination."""
-        assert _is_termination_intent("proceed with minimum TEMA shell geometry") is False
+        assert is_termination_intent("proceed with minimum TEMA shell geometry") is False
 
     def test_empty_string_not_termination(self):
         """Empty string is NOT termination."""
-        assert _is_termination_intent("") is False
+        assert is_termination_intent("") is False
 
     def test_accept_not_termination(self):
         """Acceptance phrases are NOT termination."""
-        assert _is_termination_intent("yes, go ahead") is False
-        assert _is_termination_intent("accept") is False
+        assert is_termination_intent("yes, go ahead") is False
+        assert is_termination_intent("accept") is False
 
 
 # ===================================================================

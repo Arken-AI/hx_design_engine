@@ -482,3 +482,34 @@ class Step06InitialU(BaseStep):
             return True
 
         return False
+
+    def build_ai_context(self, state: "DesignState", result: "StepResult") -> str:
+        lines = []
+        u_mid = result.outputs.get("U_W_m2K")
+        u_range = result.outputs.get("U_range", {})
+        a_req = result.outputs.get("A_m2")
+        a_prov = result.outputs.get("A_provided_m2")
+        hot_type = result.outputs.get("hot_fluid_type")
+        cold_type = result.outputs.get("cold_fluid_type")
+        n_req = result.outputs.get("n_tubes_required")
+
+        if hot_type and cold_type:
+            lines.append(f"Fluid classification: hot={hot_type}, cold={cold_type}")
+        if u_range:
+            lines.append(
+                f"U range: {u_range.get('U_low')}–{u_range.get('U_high')} W/m²K "
+                f"(using mid={u_mid})"
+            )
+        f_val = state.F_factor
+        lmtd = state.LMTD_K
+        if f_val is not None and lmtd is not None:
+            lines.append(f"eff_LMTD = F × LMTD = {f_val:.3f} × {lmtd:.2f} = {f_val * lmtd:.2f} °C")
+        if a_req and a_prov:
+            ratio = a_prov / a_req if a_req > 0 else 0
+            lines.append(
+                f"A_required = {a_req:.2f} m², A_provided = {a_prov:.2f} m², "
+                f"overdesign = {ratio:.2f}×"
+            )
+        if n_req is not None:
+            lines.append(f"Tubes required = {n_req} (before TEMA rounding)")
+        return "\n".join(lines)

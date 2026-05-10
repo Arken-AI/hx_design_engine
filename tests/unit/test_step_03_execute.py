@@ -22,10 +22,10 @@ _WATER_45 = FluidProperties(
 
 
 def _make_benchmark_state() -> DesignState:
-    """Crude oil 150→90°C + ethanol 30→60°C — both resolve without mocks."""
+    """Crude oil 150→90°C + thermal oil 30→60°C — both resolve without optional deps."""
     return DesignState(
         hot_fluid_name="crude oil",
-        cold_fluid_name="ethanol",
+        cold_fluid_name="thermal oil",
         T_hot_in_C=150.0,
         T_hot_out_C=90.0,
         T_cold_in_C=30.0,
@@ -165,3 +165,29 @@ class TestExecute:
 
         # Properties should differ (different mean temperatures)
         assert hot.Pr != cold.Pr
+
+
+class TestStep03BuildAiContext:
+    def test_returns_property_source_key(self):
+        from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        from unittest.mock import MagicMock
+        props = MagicMock()
+        props.viscosity_Pa_s = 0.001
+        props.cp_J_kgK = 4182.0
+        props.k_W_mK = 0.6
+        props.Pr = 6.99
+        props.property_source = "thermo"
+        props.property_confidence = 0.9
+        result = StepResult(step_id=3, step_name="S", outputs={"hot_fluid_props": props})
+        ctx = Step03FluidProperties().build_ai_context(DesignState(), result)
+        assert "property_source" in ctx
+        assert "thermo" in ctx
+
+    def test_handles_missing_outputs(self):
+        from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
+        from hx_engine.app.models.design_state import DesignState
+        from hx_engine.app.models.step_result import StepResult
+        ctx = Step03FluidProperties().build_ai_context(DesignState(), StepResult(step_id=3, step_name="S", outputs={}))
+        assert ctx == ""
