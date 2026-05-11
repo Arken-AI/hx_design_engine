@@ -15,6 +15,7 @@ See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hx_engine.app.models.step_result import (
