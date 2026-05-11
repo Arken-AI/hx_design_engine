@@ -82,6 +82,126 @@ USER_RESPONSE_TIMEOUT = 3600  # 1 hour — gives user time to refresh and return
 # (shorter than ESCALATE — auto-proceeds with current values on timeout)
 WARNING_PAUSE_TIMEOUT = 120
 
+# ---------------------------------------------------------------------------
+# Step 7 velocity auto-restart helpers
+# ---------------------------------------------------------------------------
+
+# Maximum number of autonomous n_passes adjustments before falling through
+# to AI recovery / user escalation for a Step 7 velocity bound failure.
+# Budget of 3 allows: n_passes 2 → 4 → 8 (three doublings) or mirrored halving.
+MAX_VELOCITY_RESTARTS: int = 3
+
+_VELOCITY_BOUND_RE = re.compile(
+    r"tube velocity .+ (above hard maximum|below hard minimum)",
+    re.IGNORECASE,
+)
+
+
+def _is_velocity_bound_error(errors: list[str]) -> bool:
+    """Return True iff any error is a tube-velocity Layer 2 bound violation."""
+    return any(_VELOCITY_BOUND_RE.search(e) for e in errors)
+
+
+def _adjust_n_passes_for_velocity(
+    state: DesignState,
+    errors: list[str],
+) -> "tuple[int, int, str] | None":
+    """Adjust geometry.n_passes to recover from a tube-velocity bound failure.
+
+    Doubles n_passes on low-velocity (below minimum); halves on high-velocity
+    (above maximum).  Caps at 8, floors at 1.  Returns (old, new, direction)
+    on a successful mutation; None when no adjustment is possible (no geometry,
+    already at cap/floor, or unrelated error).
+    """
+    if state.geometry is None:
+        return None
+    if not _is_velocity_bound_error(errors):
+        return None
+
+    _low_re = re.compile(r"below hard minimum", re.IGNORECASE)
+    _high_re = re.compile(r"above hard maximum", re.IGNORECASE)
+    is_low = any(_low_re.search(e) for e in errors)
+    is_high = any(_high_re.search(e) for e in errors)
+
+    old_np = state.geometry.n_passes
+    if is_low:
+        new_np = min(old_np * 2, 8)
+        if new_np == old_np:
+            return None
+        direction = "increase"
+    elif is_high:
+        new_np = max(old_np // 2, 1)
+        if new_np == old_np:
+            return None
+        direction = "decrease"
+    else:
+        return None
+
+    state.geometry.n_passes = new_np
+    return (old_np, new_np, direction)
+
+
+# ---------------------------------------------------------------------------
+# Step 10 mechanical-design Layer 2 classifier
+# ---------------------------------------------------------------------------
+
+# Levers the RedesignDriver may vary to resolve pressure-drop / nozzle
+# constraint violations detected in Step 10.
+_MECH_DP_LEVERS: list[str] = [
+    "n_passes",
+    "tube_length_m",
+    "tube_od_m",
+    "pitch_layout",
+    "baffle_cut",
+    "baffle_spacing_m",
+    "n_shells",
+    "shell_passes",
+    "multi_shell_arrangement",
+]
+
+_TUBE_DP_RE = re.compile(r"tube-side\s+\u0394P .+ exceeds", re.IGNORECASE)
+_SHELL_DP_RE = re.compile(r"shell-side\s+\u0394P .+ exceeds", re.IGNORECASE)
+_NOZZLE_RE = re.compile(r"nozzle\s+\u03c1v\u00b2 .+ exceeds", re.IGNORECASE)
+
+
+def _classify_step10_mechanical_failure(
+    step_id: int,
+    errors: list[str],
+) -> "DesignConstraintViolation | None":
+    """Return a DesignConstraintViolation for known Step 10 mechanical constraint
+    patterns (tube ΔP, shell ΔP, nozzle ρv²); None otherwise.
+
+    Safe to call for any step_id — non-step-10 calls always return None.
+    Contract / missing-output errors also return None (they are bugs, not
+    mechanical infeasibilities).
+    """
+    if step_id != 10 or not errors:
+        return None
+
+    for msg in errors:
+        if _TUBE_DP_RE.search(msg):
+            return DesignConstraintViolation(
+                step_id=10,
+                constraint="tube_dp_max",
+                message=msg,
+                suggested_levers=_MECH_DP_LEVERS,
+            )
+        if _SHELL_DP_RE.search(msg):
+            return DesignConstraintViolation(
+                step_id=10,
+                constraint="shell_dp_max",
+                message=msg,
+                suggested_levers=_MECH_DP_LEVERS,
+            )
+        if _NOZZLE_RE.search(msg):
+            return DesignConstraintViolation(
+                step_id=10,
+                constraint="nozzle_rho_v2_max",
+                message=msg,
+                suggested_levers=_MECH_DP_LEVERS,
+            )
+    return None
+
 
 class PipelineRunner:
     """Runs the 5-step HX design pipeline for a single session."""
