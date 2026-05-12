@@ -31,6 +31,7 @@ class HXEngineSettings(BaseSettings):
     max_internal_escalations: int = 4
 
     ai_model: str = "claude-sonnet-4-6"
+    anthropic_api_key: str = ""  # HX_ANTHROPIC_API_KEY — enables live AI reviews when set
 
     # --- Internal auth ---
     hx_engine_secret: str = "dev-secret-change-me"
