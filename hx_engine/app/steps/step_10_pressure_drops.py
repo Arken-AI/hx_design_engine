@@ -52,6 +52,16 @@ _RHO_V2_LIMIT = 2230.0          # TEMA erosion limit kg/m·s²
 _MU_VISCOUS_THRESHOLD_PA_S = 0.01  # 10 cP
 
 
+def _tube_limit(state: "DesignState") -> float:
+    """User-supplied tube-side ΔP ceiling, falling back to TEMA default."""
+    return state.dP_tube_max_Pa or _DP_TUBE_LIMIT_PA
+
+
+def _shell_limit(state: "DesignState") -> float:
+    """User-supplied shell-side ΔP ceiling, falling back to TEMA default."""
+    return state.dP_shell_max_Pa or _DP_SHELL_LIMIT_PA
+
+
 class Step10PressureDrops(BaseStep):
     """Step 10: Tube-side and shell-side pressure drops."""
 
@@ -71,9 +81,9 @@ class Step10PressureDrops(BaseStep):
     def _conditional_ai_trigger(self, state: "DesignState") -> bool:
         """Trigger AI when ΔP margin is tight or cross-checks diverge."""
         # Check after execute populates state
-        if state.dP_tube_Pa is not None and state.dP_tube_Pa > 0.85 * _DP_TUBE_LIMIT_PA:
+        if state.dP_tube_Pa is not None and state.dP_tube_Pa > 0.85 * _tube_limit(state):
             return True
-        if state.dP_shell_Pa is not None and state.dP_shell_Pa > 0.85 * _DP_SHELL_LIMIT_PA:
+        if state.dP_shell_Pa is not None and state.dP_shell_Pa > 0.85 * _shell_limit(state):
             return True
         if state.rho_v2_tube_nozzle is not None and state.rho_v2_tube_nozzle > 0.85 * _RHO_V2_LIMIT:
             return True
@@ -426,16 +436,16 @@ class Step10PressureDrops(BaseStep):
                 "— verify geometry or baffle spacing"
             )
 
-        if dP_tube_total > 0.85 * _DP_TUBE_LIMIT_PA:
+        if dP_tube_total > 0.85 * _tube_limit(state):
             warnings.append(
                 f"Tube-side ΔP {dP_tube_total:.0f} Pa is within 15% of "
-                f"{_DP_TUBE_LIMIT_PA:.0f} Pa limit"
+                f"{_tube_limit(state):.0f} Pa limit"
             )
 
-        if dP_shell_total > 0.85 * _DP_SHELL_LIMIT_PA:
+        if dP_shell_total > 0.85 * _shell_limit(state):
             warnings.append(
                 f"Shell-side ΔP {dP_shell_total:.0f} Pa is within 15% of "
-                f"{_DP_SHELL_LIMIT_PA:.0f} Pa limit"
+                f"{_shell_limit(state):.0f} Pa limit"
             )
 
         if v_tube < 0.8:
@@ -514,6 +524,9 @@ class Step10PressureDrops(BaseStep):
             "mu_s_wall_Pa_s": mu_s_wall,
             "mu_s_wall_basis": mu_s_wall_basis,
             "mu_s_wall_fail_reason": mu_s_wall_fail_reason,
+            # Effective ΔP limits (user-supplied or TEMA default) — read by R3/R4
+            "dP_tube_limit_Pa": _tube_limit(state),
+            "dP_shell_limit_Pa": _shell_limit(state),
         }
 
         return StepResult(
