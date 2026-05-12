@@ -67,6 +67,19 @@ class DesignRequest(BaseModel):
     # --- Purely optional ---
     tema_preference: Optional[str] = None
 
+    # --- Engineering constraints (optional — improve design feasibility) ---
+    dP_hot_max_Pa:      Optional[float] = None   # max hot-side ΔP (Pa); hot/cold = fluid-stream perspective
+    dP_cold_max_Pa:     Optional[float] = None   # max cold-side ΔP (Pa)
+    P_hot_design_Pa:    Optional[float] = None   # hot-side design pressure for Step 14 ASME check (Pa)
+    P_cold_design_Pa:   Optional[float] = None   # cold-side design pressure for Step 14 ASME check (Pa)
+    tube_material:      Optional[str]   = None   # e.g. "carbon_steel", "stainless_steel", "titanium"
+    fouling_hot_m2K_W:  Optional[float] = None   # hot-side fouling resistance override (m²·K/W)
+    fouling_cold_m2K_W: Optional[float] = None   # cold-side fouling resistance override (m²·K/W)
+    baffle_cut:         Optional[float] = None   # fractional baffle cut (0.15–0.45)
+    shell_diameter_m:   Optional[float] = None   # preferred shell diameter (m)
+    tube_od_m:          Optional[float] = None   # preferred tube outer diameter (m)
+    n_passes:           Optional[int]   = None   # number of tube passes (1, 2, 4, 6, or 8)
+
     # --- Token from /requirements (stateless HMAC proof) ---
     token: Optional[str] = Field(
         default=None,
