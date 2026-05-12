@@ -24,7 +24,7 @@ from hx_engine.app.core.session_store import SessionStore
 from hx_engine.app.core.sse_manager import SSEManager
 from hx_engine.app.core.state_utils import clear_state_from_step
 from hx_engine.app.models.design_state import DesignState
-from hx_engine.app.models.sse_events import RedesignAttemptEvent, StepErrorEvent
+from hx_engine.app.models.sse_events import RedesignAttemptEvent, StepErrorEvent, StepEscalatedEvent
 from hx_engine.app.models.step_result import RedesignAttempt
 
 logger = logging.getLogger(__name__)
@@ -614,12 +614,11 @@ class RedesignDriver:
         budget: int,
         note: str = "",
     ) -> None:
-        """Emit a clean failure with the closest-feasible design + reason.
+        """Emit a structured ESCALATED event with 3 geometry alternatives.
 
-        "Closest feasible" = the redesign attempt that completed the most
-        pipeline steps before its own failure. If no attempt completed any
-        steps, we fall back to the original pre-loop snapshot — which
-        means there is nothing to surface beyond the violation message.
+        Calls AIEngineer (live or stub) to obtain options, sets pipeline
+        status to "waiting" so the frontend can present them to the user,
+        and emits a StepEscalatedEvent instead of a terminal StepErrorEvent.
         """
         session_id = state.session_id
 
@@ -642,27 +641,47 @@ class RedesignDriver:
                 "tripped this constraint."
             )
 
-        state.pipeline_status = "error"
+        violation_summary = (
+            f"Constraint '{violation.constraint}' violated at Step {violation.step_id}. "
+            f"{violation.message}"
+        )
+
+        # Obtain structured alternatives from AI (live) or deterministic generator (stub)
+        raw_options = await self.ai_engineer.propose_budget_exhausted_options(
+            state, violation_summary
+        )
+
+        option_texts = [o["description"] for o in raw_options]
+        option_ratings = [o["rating"] for o in raw_options]
+
+        # Pad to exactly 3 entries in case generator returned fewer
+        while len(option_texts) < 3:
+            option_texts.append("Review input specification and re-run.")
+            option_ratings.append(3)
+
+        recommendation = (
+            note
+            or "Select one of the options below, adjust the input specification, "
+               "and re-run to resolve the constraint."
+        )
+
+        state.pipeline_status = "waiting"
         state.is_complete = False
         await self.session_store.save(session_id, state)
 
         await self.sse_manager.emit(
             session_id,
-            StepErrorEvent(
+            StepEscalatedEvent(
                 session_id=session_id,
                 step_id=violation.step_id,
                 step_name=f"Step {violation.step_id}",
                 message=(
                     f"Redesign budget ({budget} attempts) exhausted while "
                     f"trying to satisfy '{violation.constraint}'. "
-                    f"{violation.message}"
+                    f"{closest_summary}"
                 ),
-                observation=closest_summary,
-                recommendation=(
-                    note
-                    or "Review the redesign history and adjust the input "
-                       "specification (fluid choice, temperatures, allowed "
-                       "TEMA type) before re-running."
-                ),
+                options=option_texts,
+                option_ratings=option_ratings,
+                recommendation=recommendation,
             ).model_dump(mode="json"),
         )
