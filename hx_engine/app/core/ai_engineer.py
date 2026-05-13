@@ -1538,30 +1538,39 @@ class AIEngineer:
             ]
 
         # --- Live Claude path ---
-        history_snippets = []
-        redesign_history = getattr(state, "redesign_history", None) or []
-        for entry in redesign_history[-5:]:  # last 5 attempts
-            history_snippets.append(
-                f"- Attempt: changed {entry.get('lever')} to {entry.get('new_value')} "
-                f"→ {'resolved' if entry.get('resolved') else 'still violated'}"
-            )
-        history_text = "\n".join(history_snippets) if history_snippets else "None"
-
-        prompt = (
-            f"A shell-and-tube heat exchanger design has exhausted its redesign budget.\n\n"
-            f"Violation: {violation}\n\n"
-            f"Previous attempts:\n{history_text}\n\n"
-            f"Propose exactly 3 geometry modifications that could resolve the violation. "
-            f"Each option must be actionable (specify the parameter to change and the "
-            f"direction/magnitude). Return JSON only:\n"
-            f'{{"options": ['
-            f'{{"description": "...", "rating": <1-10>}}, '
-            f'{{"description": "...", "rating": <1-10>}}, '
-            f'{{"description": "...", "rating": <1-10>}}'
-            f']}}'
-        )
-
         try:
+            # Build prompt inside the try-block so any future serialization
+            # mismatch on RedesignAttempt falls through to the deterministic
+            # AlternativeGenerator instead of escaping the BackgroundTask
+            # driving _surface_budget_exhausted.
+            history_snippets = []
+            redesign_history = getattr(state, "redesign_history", None) or []
+            for entry in redesign_history[-5:]:  # last 5 attempts
+                # entry is a RedesignAttempt Pydantic model — use attribute access.
+                # The model exposes `outcome: str` with values
+                # "pending" | "succeeded" | "failed" | "violation"; only
+                # "succeeded" means the lever change resolved the violation.
+                resolved = getattr(entry, "outcome", "") == "succeeded"
+                history_snippets.append(
+                    f"- Attempt: changed {entry.lever} to {entry.new_value} "
+                    f"→ {'resolved' if resolved else 'still violated'}"
+                )
+            history_text = "\n".join(history_snippets) if history_snippets else "None"
+
+            prompt = (
+                f"A shell-and-tube heat exchanger design has exhausted its redesign budget.\n\n"
+                f"Violation: {violation}\n\n"
+                f"Previous attempts:\n{history_text}\n\n"
+                f"Propose exactly 3 geometry modifications that could resolve the violation. "
+                f"Each option must be actionable (specify the parameter to change and the "
+                f"direction/magnitude). Return JSON only:\n"
+                f'{{"options": ['
+                f'{{"description": "...", "rating": <1-10>}}, '
+                f'{{"description": "...", "rating": <1-10>}}, '
+                f'{{"description": "...", "rating": <1-10>}}'
+                f']}}'
+            )
+
             response_text = await self._anthropic_request_with_retry(
                 system_prompt="You are a senior heat exchanger process engineer.",
                 user_prompt=prompt,
