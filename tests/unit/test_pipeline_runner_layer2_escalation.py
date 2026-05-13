@@ -1382,6 +1382,137 @@ class TestStep10MechanicalLayer2RoutesToRedesign:
             assert "max escalation" not in str(ev).lower()
 
 
+# ===================================================================
+# Step 11 negative-overdesign Layer 2 -> RedesignDriver routing
+# Reference: artifacts/bugs/bug_ea9abc9b_xstack_step11_undersized_no_redesign_loop.md
+# ===================================================================
+
+from hx_engine.app.core.pipeline_runner import (
+    _classify_redesignable_layer2_failure,
+    _classify_step11_overdesign_failure,
+)
+
+
+class TestClassifyStep11OverdesignFailure:
+    """Classifier returns a DesignConstraintViolation for negative overdesign."""
+
+    def test_negative_overdesign_classified(self):
+        v = _classify_step11_overdesign_failure(
+            11,
+            ["Overdesign is -54.2% \u2014 exchanger is undersized. "
+             "Need more area or higher U."],
+        )
+        assert v is not None
+        assert v.step_id == 11
+        assert v.constraint == "overdesign_negative"
+        # Suggested levers must be a subset of the canonical legal set so
+        # the RedesignDriver can apply them.
+        legal = {
+            "n_passes", "tube_length_m", "tube_od_m", "pitch_layout",
+            "baffle_cut", "baffle_spacing_m", "n_shells", "shell_passes",
+            "multi_shell_arrangement",
+        }
+        assert v.suggested_levers
+        for lever in v.suggested_levers:
+            assert lever in legal
+
+    def test_missing_output_not_classified(self):
+        # Layer 1 contract issue must NOT route to redesign.
+        v = _classify_step11_overdesign_failure(
+            11, ["overdesign_pct is missing from Step 11 outputs"],
+        )
+        assert v is None
+
+    def test_fouling_paradox_not_classified(self):
+        # The fouling-paradox ESCALATE rule (R4) is engineer-facing, not
+        # redesign-routable.
+        v = _classify_step11_overdesign_failure(
+            11,
+            ["Low-velocity fouling paradox requires intervention: "
+             "overdesign=120.0% \u2014 excess area reduces tube velocity..."],
+        )
+        assert v is None
+
+    def test_non_step11_never_classified(self):
+        v = _classify_step11_overdesign_failure(
+            10, ["Overdesign is -54.2% \u2014 exchanger is undersized."],
+        )
+        assert v is None
+
+    def test_empty_errors_returns_none(self):
+        assert _classify_step11_overdesign_failure(11, []) is None
+
+    def test_combined_classifier_routes_step10_and_step11(self):
+        """The combined wrapper must catch both Step 10 mechanical and
+        Step 11 overdesign failures."""
+        s10 = _classify_redesignable_layer2_failure(
+            10, ["Tube-side \u0394P 77758 Pa exceeds 0.7 bar (70000 Pa) limit"],
+        )
+        assert s10 is not None
+        assert s10.constraint == "tube_dp_max"
+
+        s11 = _classify_redesignable_layer2_failure(
+            11, ["Overdesign is -54.2% \u2014 exchanger is undersized."],
+        )
+        assert s11 is not None
+        assert s11.constraint == "overdesign_negative"
+
+
+class TestStep11OverdesignLayer2RoutesToRedesign:
+    """Step 11 negative-overdesign Layer 2 failures must raise
+    DesignConstraintViolation rather than emit a user-facing step_error
+    or stall the pipeline silently."""
+
+    @pytest.mark.asyncio
+    async def test_step11_negative_overdesign_raises_violation_not_step_error(
+        self, pipeline_runner, mock_sse_manager, base_state,
+    ):
+        clean_review = _make_proceed_review()
+        step11_result = StepResult(
+            step_id=11,
+            step_name="Area & Overdesign",
+            outputs={
+                "area_required_m2": 479.0,
+                "area_provided_m2": 219.49,
+                "overdesign_pct": -54.2,
+            },
+            ai_review=clean_review,
+        )
+
+        class _MockStep11(MockStep):
+            step_id = 11
+            step_name = "Area & Overdesign"
+
+        mock_step = _MockStep11(step11_result)
+        failed_vr = _make_validation_result(
+            passed=False,
+            errors=[
+                "Overdesign is -54.2% \u2014 exchanger is undersized. "
+                "Need more area or higher U."
+            ],
+        )
+
+        with patch(
+            "hx_engine.app.core.pipeline_runner.PIPELINE_STEPS",
+            [lambda: mock_step],
+        ), patch(
+            "hx_engine.app.core.pipeline_runner.check_validation_rules",
+            return_value=failed_vr,
+        ):
+            with pytest.raises(DesignConstraintViolation) as exc_info:
+                await pipeline_runner.run(base_state)
+
+        assert exc_info.value.step_id == 11
+        assert exc_info.value.constraint == "overdesign_negative"
+        assert exc_info.value.suggested_levers  # non-empty
+
+        # No silent-stall, no user-facing step_error event.
+        for ev in mock_sse_manager.emitted_events:
+            if not isinstance(ev, dict):
+                continue
+            assert ev.get("event_type") != "step_error"
+
+
 class TestMaxEscalationsConfigurable:
     """The per-step escalation budget must be configurable, not a literal 2."""
 
