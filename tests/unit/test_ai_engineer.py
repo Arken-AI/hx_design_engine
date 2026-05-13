@@ -377,3 +377,80 @@ class TestCallClaudeCacheControl:
         assert isinstance(call_kwargs["system"], list)
         assert call_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
         assert review.decision == AIDecisionEnum.PROCEED
+
+
+# -----------------------------------------------------------------------
+# propose_budget_exhausted_options — live path attribute access on
+# RedesignAttempt models (regression test for AttributeError where the
+# loop called entry.get('lever') on Pydantic instances).
+# -----------------------------------------------------------------------
+
+class TestProposeBudgetExhaustedOptionsLivePath:
+    @pytest.mark.asyncio
+    async def test_live_path_handles_redesign_attempt_models(self, monkeypatch):
+        """Regression: live Claude path must read RedesignAttempt fields via
+        attribute access, not entry.get(...). With history populated by real
+        RedesignAttempt instances, the prompt must build cleanly and the
+        method must return 3 options without raising AttributeError.
+        """
+        from hx_engine.app.core import ai_engineer as ai_module
+        from hx_engine.app.models.step_result import RedesignAttempt
+
+        captured: dict[str, str] = {}
+
+        async def _fake_anthropic(self, *, system_prompt, user_prompt, label):
+            captured["user_prompt"] = user_prompt
+            return (
+                '{"options": ['
+                '{"description": "Increase tube length to 6 m", "rating": 8},'
+                '{"description": "Switch to 2-shell series arrangement", "rating": 7},'
+                '{"description": "Reduce tube OD to 3/4 in", "rating": 6}'
+                "]}"
+            )
+
+        monkeypatch.setattr(
+            ai_module.AIEngineer,
+            "_anthropic_request_with_retry",
+            _fake_anthropic,
+        )
+
+        ai = AIEngineer(stub_mode=False)
+        ai.is_available = True  # force live path regardless of API key
+
+        state = DesignState()
+        state.redesign_history = [
+            RedesignAttempt(
+                attempt_number=1,
+                failed_step_id=11,
+                constraint="overdesign_negative",
+                lever="tube_length",
+                old_value=4.877,
+                new_value=6.096,
+                outcome="violation",
+            ),
+            RedesignAttempt(
+                attempt_number=2,
+                failed_step_id=11,
+                constraint="overdesign_negative",
+                lever="shell_diameter",
+                old_value=0.5,
+                new_value=0.6,
+                outcome="succeeded",
+            ),
+        ]
+
+        options = await ai.propose_budget_exhausted_options(
+            state, "Overdesign is -54.2% — exchanger is undersized"
+        )
+
+        assert len(options) == 3
+        for o in options:
+            assert isinstance(o["description"], str) and o["description"]
+            assert isinstance(o["rating"], int)
+
+        # Prompt must reflect both attempts via attribute access on the model.
+        prompt = captured["user_prompt"]
+        assert "tube_length" in prompt
+        assert "shell_diameter" in prompt
+        assert "still violated" in prompt   # outcome == "violation"
+        assert "resolved" in prompt          # outcome == "succeeded"
