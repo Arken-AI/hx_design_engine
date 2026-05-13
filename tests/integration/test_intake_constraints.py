@@ -197,3 +197,74 @@ class TestAlternativeGeneratorAndProposeBudgetOptions:
         )
         # In CI there is no HX_ANTHROPIC_API_KEY, so stub mode activates automatically
         assert len(options) == 3
+
+    async def test_propose_budget_exhausted_options_live_path_with_history_returns_3(
+        self, monkeypatch
+    ):
+        """Regression: live Claude path with a populated redesign_history of
+        RedesignAttempt models must build the prompt and return 3 options
+        without raising AttributeError. Mirrors the budget-exhausted
+        escalation path that crashed in the Step 11 undersized scenario.
+        """
+        from hx_engine.app.core import ai_engineer as ai_module
+        from hx_engine.app.models.step_result import RedesignAttempt
+
+        captured: dict[str, str] = {}
+
+        async def _fake_anthropic(self, *, system_prompt, user_prompt, label):
+            captured["user_prompt"] = user_prompt
+            return (
+                '{"options": ['
+                '{"description": "Increase tube length to 6 m", "rating": 8},'
+                '{"description": "Switch to 2-shell series arrangement", "rating": 7},'
+                '{"description": "Reduce tube OD to 3/4 in", "rating": 6}'
+                "]}"
+            )
+
+        monkeypatch.setattr(
+            ai_module.AIEngineer,
+            "_anthropic_request_with_retry",
+            _fake_anthropic,
+        )
+
+        ai = AIEngineer(stub_mode=False)
+        ai.is_available = True  # force live path regardless of API key
+
+        state = _make_state()
+        state.redesign_history = [
+            RedesignAttempt(
+                attempt_number=1,
+                failed_step_id=11,
+                constraint="overdesign_negative",
+                lever="tube_length",
+                old_value=4.877,
+                new_value=6.096,
+                outcome="violation",
+            ),
+            RedesignAttempt(
+                attempt_number=2,
+                failed_step_id=11,
+                constraint="overdesign_negative",
+                lever="shell_diameter",
+                old_value=0.5,
+                new_value=0.6,
+                outcome="succeeded",
+            ),
+        ]
+
+        options = await ai.propose_budget_exhausted_options(
+            state,
+            "Constraint 'overdesign_negative' violated at Step 11. "
+            "Overdesign is -54.2% — exchanger is undersized.",
+        )
+
+        assert len(options) == 3
+        for o in options:
+            assert isinstance(o["description"], str) and o["description"]
+            assert isinstance(o["rating"], int)
+
+        prompt = captured["user_prompt"]
+        assert "tube_length" in prompt
+        assert "shell_diameter" in prompt
+        assert "still violated" in prompt   # outcome == "violation"
+        assert "resolved" in prompt          # outcome == "succeeded"
