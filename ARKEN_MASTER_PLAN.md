@@ -2,12 +2,67 @@
 
 ## Heat Exchanger Design Platform
 
-**Version 8.0 | March 2026**
+**Version 9.0 | May 2026**
 
 > Deterministic calculation + bounded AI judgment + hard rule safety net + user escalation.
 > Every step reviewed. Every decision explained. Every correction visible.
 
 **Consolidates:** DEVELOPMENT_PLAN.md (v6.0), End-to-End Build Plan, CEO Review, Engineering Reviews (3 passes), Test Plans (4 passes), Office Hours Design Doc, TODOS.md, Office Hours Session (2026-03-19, Trust-Calibration-First). All prior documents are superseded by this file.
+
+---
+
+## 0. Current Implementation Status (May 2026)
+
+> **IMPORTANT FOR AGENTS:** This section reflects the ACTUAL current state of the codebase as of May 2026. The build sequence (§14) and original plan were written prospectively. The actual implementation is substantially ahead of the documented plan. When there is a conflict between §14 and this section, **§0 wins**.
+
+### What Is Built and Working
+
+| Component                             | Status       | Notes                                                                    |
+| ------------------------------------- | ------------ | ------------------------------------------------------------------------ |
+| All 16 pipeline steps                 | ✅ Complete  | `hx_engine/app/steps/step_01_*.py` → `step_16_*.py` all implemented      |
+| `RedesignDriver`                      | ✅ Complete  | `hx_engine/app/core/redesign_loop.py` — NOT in §4 yet (see §4.4 below)   |
+| Bell-Delaware (Steps 6–9)             | ✅ Validated | Serth 5.1 gate passed                                                    |
+| Convergence loop (Step 12)            | ✅ Complete  | CG1A try/finally, ΔU < 1% criterion                                      |
+| Phase-change support (condensation)   | ✅ Partial   | Shah correlation + incremental zone calc; evaporation deferred           |
+| Skills-based AI prompts               | ✅ Complete  | `hx_engine/app/skills/step_XX_*.md` files; `base.md` shared base         |
+| `thermo_adapter.py` 5-tier chain      | ✅ Complete  | iapws → CoolProp → Petroleum correlations → Specialty → thermo           |
+| `/requirements` endpoint + HMAC token | ✅ Complete  | `hx_engine/app/routers/requirements.py`                                  |
+| `DesignState` extended model          | ✅ Complete  | FAR richer than §7.3 documents — see updated §7.3 below                  |
+| Volumetric flow input (P2-20)         | ✅ Complete  | `FlowInput` model; `hot_flow`/`cold_flow` on `DesignRequest`             |
+| Multi-shell support                   | ✅ Complete  | `n_shells` on `GeometrySpec`, `multi_shell_arrangement` on `DesignState` |
+| Step 7 velocity auto-restart          | ✅ Complete  | `MAX_VELOCITY_RESTARTS=3`, adjusts `n_passes`, re-runs Steps 5–6 inline  |
+| Backend `HXEngineClient`              | ✅ Complete  | `start_design()`, `connect()`, `close()`                                 |
+| Frontend SSE streaming                | ✅ Complete  | React 19 + Vite + SSE with poll fallback                                 |
+| Docker + nginx                        | ✅ Complete  | `docker-compose.yml` with all 5 services                                 |
+| Auth (JWT)                            | ✅ Complete  | `POST /auth/login`, `GET /auth/me`, admin `create_user.py`               |
+
+### Active P1 TODOs (from `TODOS.md`)
+
+- **BD-REF-002**: Find published Bell-Delaware worked example with intermediate J-factors; add as `tests/fixtures/bd_ref_002.json`
+- **Fix `_parse_review()` regex**: Nested JSON in escalation `options` can be silently dropped
+
+### Active P2 TODOs
+
+- Per-step AI accuracy metrics logging
+- Evaporation/boiling support (Shah condensation is done; boiling is deferred)
+
+### Architecture Model: `claude-sonnet-4-6`
+
+- `_MODEL = "claude-sonnet-4-6"`, `_TEMPERATURE = 0.1`, `_MAX_TOKENS = 1024`
+- `CONFIDENCE_THRESHOLD = 0.7`
+
+### Key Constant Reference
+
+```python
+# pipeline_runner.py
+MAX_VELOCITY_RESTARTS = 3      # Step 7 autonomous velocity fix
+USER_RESPONSE_TIMEOUT = 3600   # seconds (1 hour)
+WARNING_PAUSE_TIMEOUT = 120    # seconds
+
+# redesign_loop.py
+MAX_REDESIGN_ATTEMPTS = 8
+MAX_FALLBACK_ATTEMPTS = 2
+```
 
 ---
 
@@ -20,21 +75,21 @@
 5. [The AI Senior Engineer](#5-the-ai-senior-engineer)
 6. [AI Review Protocol — All 16 Steps](#6-ai-review-protocol--all-16-steps)
 7. [Key Contracts & Data Models](#7-key-contracts--data-models)
-9. [Real-Time Event Streaming](#9-real-time-event-streaming)
-10. [HX Engine Microservice](#10-hx-engine-microservice)
-11. [Backend Changes](#11-backend-changes)
-12. [Autoresearch — Loop 3](#12-autoresearch--loop-3)
-13. [Frontend Design Specification](#13-frontend-design-specification)
-14. [Build Sequence (Week-by-Week)](#14-build-sequence-week-by-week)
-15. [Test Plan](#15-test-plan)
-16. [Benchmark Validation Points (Hard Gates)](#16-benchmark-validation-points-hard-gates)
-17. [Drawback Mitigations](#17-drawback-mitigations)
-18. [Corner Cases & Edge Conditions](#18-corner-cases--edge-conditions)
-19. [Extensibility](#19-extensibility)
-20. [Post-Development & Deferred Items](#20-post-development--deferred-items)
-21. [Decision Log](#21-decision-log)
-22. [Open Questions](#22-open-questions)
-23. [Success Criteria](#23-success-criteria)
+8. [Real-Time Event Streaming](#9-real-time-event-streaming)
+9. [HX Engine Microservice](#10-hx-engine-microservice)
+10. [Backend Changes](#11-backend-changes)
+11. [Autoresearch — Loop 3](#12-autoresearch--loop-3)
+12. [Frontend Design Specification](#13-frontend-design-specification)
+13. [Build Sequence (Week-by-Week)](#14-build-sequence-week-by-week)
+14. [Test Plan](#15-test-plan)
+15. [Benchmark Validation Points (Hard Gates)](#16-benchmark-validation-points-hard-gates)
+16. [Drawback Mitigations](#17-drawback-mitigations)
+17. [Corner Cases & Edge Conditions](#18-corner-cases--edge-conditions)
+18. [Extensibility](#19-extensibility)
+19. [Post-Development & Deferred Items](#20-post-development--deferred-items)
+20. [Decision Log](#21-decision-log)
+21. [Open Questions](#22-open-questions)
+22. [Success Criteria](#23-success-criteria)
 
 ---
 
@@ -56,12 +111,14 @@ A chatbot retrieves and rephrases information. ARKEN is a **computational engine
 ### 1.4 What Goes In → What Comes Out
 
 **Inputs (from user):**
+
 - Fluid identities and compositions
 - Flow rates (kg/s)
 - Inlet/outlet temperatures (at least 3 of 4)
 - (Optional) Pressures, material preferences, TEMA class, constraints
 
 **Outputs (from system):**
+
 - Complete geometry (shell, tubes, baffles)
 - Thermal performance (U, Q, LMTD, overdesign)
 - Pressure drops (tube-side and shell-side)
@@ -95,6 +152,7 @@ No validation.         autores. deferred.          accuracy improvement loops.
 ### 1.7 Status Quo
 
 Engineers use one or more of:
+
 - **HTRI Xchanger Suite** — industry gold standard, ~$30k/yr, limited concurrent seats, steep learning curve (weeks of training), effectively black-box results
 - **Excel + Serth/Kern textbooks** — common at smaller firms, fully manual, error-prone, no audit trail
 - **Outsourcing to specialist consultants** — expensive, slow
@@ -106,11 +164,12 @@ Engineers use one or more of:
 - Pre-product; no external users yet
 - Calculation accuracy must match or approach HTRI/textbook benchmarks (Serth Example 5.1 ±5% on U, ±10% on dP)
 - AI must be bounded (deterministic calc + rule safety net precedes AI review) — engineers will not trust an AI that controls the math
-- Phase 1: single-phase liquids only; two-phase deferred
+- ~~Phase 1: single-phase liquids only; two-phase deferred~~ **[UPDATED May 2026]** Condensation (shell-side or tube-side) is now supported via the Shah condensation correlation and incremental zone calculations. Evaporation/boiling remains deferred. `FluidProperties` carries `phase`, `quality`, `latent_heat_J_kg`, `T_sat_C`, `P_sat_Pa`, and `enthalpy_J_kg`. `DesignState` carries `hot_phase`/`cold_phase` ("condensing"|"evaporating"|"liquid"|"vapor") and `increment_results: list[IncrementResult]`.
 
 ### 1.9 Demand Evidence
 
 _Not yet formally validated (pre-product)._ The strongest proxies are:
+
 - **Industry insider signal:** Builder has direct domain experience observing this bottleneck in real EPC / refinery environments. Not a hypothetical.
 - **Market structure signal:** The HTRI concurrent-license model (~$30k/yr) structurally guarantees this bottleneck at every mid-size firm. 1–2 seats for 15 engineers, 1 specialist. The constraint is not going away.
 - **Plan iteration signal:** v8.0 of the master plan. Deep conviction, significant iteration over prior attempts. Not someone who just had the idea.
@@ -122,6 +181,7 @@ _Not yet formally validated (pre-product)._ The strongest proxies are:
 ### 1.10 Premises
 
 All confirmed:
+
 1. Shell-and-tube heat exchangers are the right starting wedge (most common type in oil & gas / refining)
 2. Process engineers will trust AI-assisted calculations for real designs, especially with full reasoning transparency
 3. The conversational interface adds value over a traditional form (lower barrier to entry, better UX for experienced engineers)
@@ -142,19 +202,19 @@ All confirmed:
 
 **Original build-sequence approaches (v6.0 → v7.0):**
 
-| Approach | Description | Rejected Because |
-|----------|-------------|------------------|
-| **A** | Full v6.0: 16-step pipeline + AI review + autoresearch, 8-week build, then find users | Demand validated at Week 8, not Week 1 |
-| **B — Ship Fast** | Minimal 10-day build: Steps 1–5 + simple UI, no AI review, no optimization | Misses the 10× value prop; no confidence scoring, no audit trail, indistinguishable from a spreadsheet |
-| **C — API-First** | REST API for integrators before building a UI | No demand signal yet; API without a reference UI is hard to sell; B2B SaaS premise (#4 in §1.10) favors end-user product first |
+| Approach          | Description                                                                           | Rejected Because                                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **A**             | Full v6.0: 16-step pipeline + AI review + autoresearch, 8-week build, then find users | Demand validated at Week 8, not Week 1                                                                                         |
+| **B — Ship Fast** | Minimal 10-day build: Steps 1–5 + simple UI, no AI review, no optimization            | Misses the 10× value prop; no confidence scoring, no audit trail, indistinguishable from a spreadsheet                         |
+| **C — API-First** | REST API for integrators before building a UI                                         | No demand signal yet; API without a reference UI is hard to sell; B2B SaaS premise (#4 in §1.10) favors end-user product first |
 
 **Office Hours approaches (2026-03-19) — Trust-Calibration-First selected:**
 
-| Approach | Description | Status |
-|----------|-------------|--------|
-| **A — Build-First** | Complete all 16 steps end-to-end, then bring in beta users. Product is polished when engineers first see it. | Not selected — 8 weeks without a user feedback loop |
-| **B — Trust-Calibration-First (selected)** | Build Steps 1–8, then HTRI Comparison workflow (Week 5), then Steps 9–16. Beta users compare ARKEN to their HTRI results while the product is being completed. | **Selected** — accuracy and demand validated mid-build, not post-build |
-| **C — Open Benchmark First** | Publish Serth Example 5.1 validation results publicly before recruiting users. Let the benchmark recruit beta users. | Not selected — distribution risk; doesn't demonstrate the conversational interface |
+| Approach                                   | Description                                                                                                                                                    | Status                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **A — Build-First**                        | Complete all 16 steps end-to-end, then bring in beta users. Product is polished when engineers first see it.                                                   | Not selected — 8 weeks without a user feedback loop                                |
+| **B — Trust-Calibration-First (selected)** | Build Steps 1–8, then HTRI Comparison workflow (Week 5), then Steps 9–16. Beta users compare ARKEN to their HTRI results while the product is being completed. | **Selected** — accuracy and demand validated mid-build, not post-build             |
+| **C — Open Benchmark First**               | Publish Serth Example 5.1 validation results publicly before recruiting users. Let the benchmark recruit beta users.                                           | Not selected — distribution risk; doesn't demonstrate the conversational interface |
 
 ---
 
@@ -222,12 +282,14 @@ Reverse Proxy: nginx :80 (routes /api/v1/hx/ → HX Engine, everything else → 
 Every step in the 16-step pipeline passes through four layers:
 
 ### Layer 1: Step Executor
+
 - **What:** Pure Python calculation for one step
 - **Implementation:** 16 pure functions — no side effects, fully testable in isolation
 - **Speed:** 1–50ms per step
 - **Rule:** Reads from design_state, returns StepResult. Never modifies state directly.
 
 ### Layer 2: Validation Router (Hard Rules)
+
 - **What:** Pass/fail engineering checks — runs BEFORE AI review
 - **Implementation:** Pure Python rule functions, instant
 - **Speed:** <1ms
@@ -235,6 +297,7 @@ Every step in the 16-step pipeline passes through four layers:
 - **Examples:** `F_t >= 0.75`, `dP_tube < limit`, `velocity > 0.5 m/s`, `J_l > 0.40`
 
 ### Layer 3: AI Senior Engineer
+
 - **What:** Reviews step output, applies engineering judgment, suggests corrections
 - **Implementation:** Single Anthropic API call per review (NOT an agent — see Section 5)
 - **Speed:** 1–3 seconds per call
@@ -242,6 +305,7 @@ Every step in the 16-step pipeline passes through four layers:
 - **Retry logic [Decision CEO-3A]:** Retry 2× with backoff on failure. If all 3 attempts fail → WARN + proceed with `ai_called=False`.
 
 ### Layer 4: Design State
+
 - **What:** Shared Pydantic model that accumulates all outputs, corrections, warnings, review notes, and confidence scores across all 16 steps
 - **Implementation:** Initialized from request, grows with each step, serialized to JSON for frontend
 - **Speed:** Instant
@@ -310,6 +374,7 @@ async def run_step_9(design_state, ai_engineer, memory):
 **Current state (Weeks 1–5):** Plain streaming Claude, no tools, no agentic loop. The comment in `orchestration_service.py` says "When HX Engine tools become available, they will be added here." Do not add HX tool calls before Week 6 — the HX Engine pipeline must be accurate first (HTRI gate §15.8).
 
 **Week 6 upgrade:** Promote to a proper agentic loop with tool support:
+
 - Register `hx_design`, `hx_rate`, `hx_get_fluid_properties` as Claude tools (schema from `engine_client.py`)
 - Claude decides intent — no frontend keyword matching or parallel requests
 - Tool executor calls `engine_client.start_design()` → gets `{ session_id, stream_url }` → returns as tool result
@@ -325,6 +390,80 @@ async def run_step_9(design_state, ai_engineer, memory):
 - **Purpose:** Execute 16-step HX design with AI review at every step
 - **Duration:** 15–25 seconds
 - **Key:** Steps always run in order 1→16. AI does NOT control the flow.
+- **All 16 steps are fully implemented.** `PIPELINE_STEPS` in `pipeline_runner.py` contains all 16 steps. The docstring mentioning “5-step pipeline” is a known stale comment.
+
+#### 4.1 Step 7 Velocity Auto-Restart
+
+Before falling to RedesignDriver or user escalation, the pipeline tries to fix tube-side velocity violations autonomously:
+
+```python
+# pipeline_runner.py
+MAX_VELOCITY_RESTARTS = 3  # attempts before escalating to RedesignDriver
+
+# If Step 7 velocity < 0.5 m/s: double n_passes, re-run Steps 5–6 inline
+# If Step 7 velocity > 3.0 m/s: halve n_passes, re-run Steps 5–6 inline
+# After MAX_VELOCITY_RESTARTS exhausted → falls to RedesignDriver via DesignConstraintViolation
+```
+
+This is separate from the RedesignDriver loop. It runs entirely within Loop 2 before any redesign attempt counter is incremented.
+
+#### 4.2 Step 10/11 Failure Routing
+
+Step 10 (pressure drops / nozzle ρv²) and Step 11 (negative overdesign) failures are **not** surfaced to the user as escalations. Instead they raise `DesignConstraintViolation` which is caught by `pipeline_runner.py` and routed to the `RedesignDriver`:
+
+```python
+# pipeline_runner.py
+try:
+    result = step10.execute(state)
+except DesignConstraintViolation as dcv:
+    redesign_result = await RedesignDriver(state).run(dcv)
+    state = redesign_result.final_state
+    continue  # pipeline resumes from Step 10 with new geometry
+```
+
+Classification helpers:
+
+- `_classify_step10_mechanical_failure(state, result)` — checks tube dP, shell dP, nozzle ρv²
+- `_classify_step11_overdesign_failure(state, result)` — checks negative overdesign
+
+#### 4.3 Escalation History
+
+All pipeline escalations are tracked in `state.escalation_history: dict[str, list[dict]]`. The pipeline also detects termination intent via `is_termination_intent(user_message)` from `design_intent.py`.
+
+#### 4.4 RedesignDriver (Sub-Loop within Loop 2) [NEW — Not in original plan]
+
+- **Location:** `hx_engine/app/core/redesign_loop.py`
+- **Class:** `RedesignDriver`
+- **Trigger:** `DesignConstraintViolation` raised from Step 10 or Step 11
+- **Purpose:** Autonomously mutate geometry until constraints are satisfied, without asking the user
+
+```python
+# redesign_loop.py key constants
+MAX_REDESIGN_ATTEMPTS = 8
+MAX_FALLBACK_ATTEMPTS = 2
+
+# Legal levers (9 total)
+LEGAL_LEVERS = [
+    "n_passes", "tube_length_m", "tube_od_m", "pitch_layout",
+    "baffle_cut", "baffle_spacing_m", "n_shells",
+    "shell_passes", "multi_shell_arrangement"
+]
+
+# Ladder constants for deterministic fallback
+_TUBE_LENGTHS_M = [1.83, 2.44, 3.05, 3.66, 4.88, 6.10]
+_TUBE_ODS_M     = [0.01905, 0.02540, 0.03175]
+_N_PASSES       = [1, 2, 4, 6, 8]
+_BAFFLE_CUTS    = [0.20, 0.25, 0.30, 0.35]
+```
+
+**Lever selection strategy:**
+
+1. **AI-driven** (primary): asks AI to pick the best lever given the current constraint failure
+2. **Deterministic fallback** (if AI unavailable or returns invalid lever): round-robin over 9 (lever, direction) pairs from `_FALLBACK_SEQUENCE`
+
+**State tracking:** Each attempt is logged in `state.redesign_history: list[RedesignAttempt]`. The SSE stream emits `RedesignAttemptEvent` for each attempt.
+
+**After `MAX_REDESIGN_ATTEMPTS` exhausted:** If no geometry satisfies constraints, RedesignDriver escalates to the user with the best-found geometry + failure reasons.
 
 ### Loop 3: Autoresearch Optimization
 
@@ -348,13 +487,13 @@ LOOP 1 (Backend — Claude orchestration):
 
 ### Timing Expectations:
 
-| Tool | Loop 2 Behavior | Expected Time |
-|------|----------------|---------------|
-| `hx_get_fluid_properties` | No loop, direct calculation | < 100ms |
-| `hx_suggest_geometry` | No loop, heuristic lookup | < 100ms |
-| `hx_design` | Full 16-step + AI review | 15–25 seconds |
-| `hx_rate` | Steps 2-11 only (no sizing) | 5–15 seconds |
-| `hx_optimize` | 200 experiments, Steps 7-11 | 30–60 seconds | **POST-BETA** |
+| Tool                      | Loop 2 Behavior             | Expected Time |
+| ------------------------- | --------------------------- | ------------- | ------------- |
+| `hx_get_fluid_properties` | No loop, direct calculation | < 100ms       |
+| `hx_suggest_geometry`     | No loop, heuristic lookup   | < 100ms       |
+| `hx_design`               | Full 16-step + AI review    | 15–25 seconds |
+| `hx_rate`                 | Steps 2-11 only (no sizing) | 5–15 seconds  |
+| `hx_optimize`             | 200 experiments, Steps 7-11 | 30–60 seconds | **POST-BETA** |
 
 ---
 
@@ -363,21 +502,59 @@ LOOP 1 (Backend — Claude orchestration):
 ### 5.1 It Is a Single API Call, NOT an Agent
 
 This is critical. The AI reviewer does NOT:
+
 - Decide its own next action
 - Call external tools or services
 - Loop or iterate
 - Have a multi-turn conversation
 
 It IS:
+
 - A single `client.messages.create()` call to the Anthropic API
 - Prompt in (calculation result + context), JSON out (decision)
 - Your code (`pipeline_runner.py`) controls the flow entirely
+
+**Current model constants (ai_engineer.py):**
+
+```python
+_MODEL               = "claude-sonnet-4-6"
+_TEMPERATURE         = 0.1
+_MAX_TOKENS          = 1024
+CONFIDENCE_THRESHOLD = 0.7
+```
+
+**Skills-based prompt system [IMPLEMENTED — not in original plan]:**
+Step-specific AI prompts are NOT inline Python strings. They live in:
+
+```
+hx_engine/app/skills/
+    base.md                    ← shared base prompt (prompt injection mitigation included)
+    step_02_heat_duty.md       ← Step 2 specific context
+    step_03_fluid_props.md
+    step_04_tema_geometry.md
+    step_05_lmtd.md
+    step_06_initial_u.md
+    step_07_tube_side_h.md
+    step_08_shell_side_h.md
+    step_09_overall_u.md
+    step_10_pressure_drops.md
+    step_11_overdesign.md
+    step_12_convergence.md
+    step_13_vibration.md
+    step_14_mechanical.md
+    step_15_cost.md
+    step_16_final_validation.md
+```
+
+`ai_engineer._build_system_prompt(step_id, step_name)` loads `base.md` + the appropriate `step_XX_*.md` file at review time. The `_SKILLS_DIR` path constant points to this directory.
+
+Do NOT look for prompts in `core/prompts/engineer_review.txt` — that file is from the old architecture. The skills directory is the source of truth.
 
 ```python
 # ai_engineer.py — the entire AI review mechanism
 response = await client.messages.create(
     model="claude-sonnet-4-6",
-    max_tokens=1000,
+    max_tokens=1024,
     messages=[{"role": "user", "content": prompt}]
 )
 return json.loads(response.content[0].text)
@@ -405,12 +582,12 @@ for attempt in range(3):
 
 ### 5.3 The Four Decisions
 
-| Decision | Meaning | Action | User Sees |
-|----------|---------|--------|-----------|
-| **PROCEED** | Correct and reasonable | Commit to design state, next step | Green check + summary |
-| **CORRECT** | Passes hard rules but suboptimal | Modify parameter, re-run step | Wrench + before/after values |
-| **WARN** | Borderline but acceptable | Record warning, proceed | Yellow triangle + concern |
-| **ESCALATE** | Needs human judgment | Pause, ask user | Red circle + question |
+| Decision     | Meaning                          | Action                            | User Sees                    |
+| ------------ | -------------------------------- | --------------------------------- | ---------------------------- |
+| **PROCEED**  | Correct and reasonable           | Commit to design state, next step | Green check + summary        |
+| **CORRECT**  | Passes hard rules but suboptimal | Modify parameter, re-run step     | Wrench + before/after values |
+| **WARN**     | Borderline but acceptable        | Record warning, proceed           | Yellow triangle + concern    |
+| **ESCALATE** | Needs human judgment             | Pause, ask user                   | Red circle + question        |
 
 ### 5.4 Full Context Via Design State
 
@@ -477,24 +654,55 @@ Respond with JSON: {decision, confidence, reasoning, correction, user_summary}
 **Prompt injection mitigation [CEO Amendment]:** Add system-level instruction to `engineer_review.txt` that constrains the AI to only respond with the expected JSON schema and reject any embedded instructions in the design state or book context.
 
 **Try-first instruction [Decision ENG-1A]:** `engineer_review.txt` must include this instruction before the JSON schema:
+
 > "Before choosing `escalate`, attempt to resolve the issue using sound engineering judgment — apply the conservative standard, select the safer geometry, or use the TEMA default. Only choose `escalate` if you have genuinely exhausted all reasonable options and cannot proceed without user input. When you do escalate, populate `attempts`, `observation`, `recommendation`, and `options` so the user has full context."
 
 **Confidence gate [Decision ENG-1B]:** After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, treat the decision as `escalate` regardless of what the AI returned. This prevents low-confidence corrections from silently degrading the design.
 
 ### 5.6 The AI Returns Structured JSON
 
+**Actual format (as of May 2026):** `corrections` is an **array** (multiple corrections per decision), and `option_ratings` is added for engineering completeness.
+
 **proceed / correct / warn:**
+
 ```json
 {
   "decision": "proceed",
   "confidence": 0.91,
   "reasoning": "U=378 within book range (300-500) and close to past avg (385). Kern deviation 8% is well within 15% threshold. Tube-side film controls at 29% — expected for crude oil.",
-  "correction": null,
-  "user_summary": "Overall U = 378 W/m²K — consistent with past designs and reference data. Tube-side film resistance dominates at 29%."
+  "corrections": [],
+  "observation": "Tube-side film resistance dominates at 29% — typical for crude oil service.",
+  "recommendation": null,
+  "options": [],
+  "option_ratings": [],
+  "user_summary": "Overall U = 378 W/m²K — consistent with past designs and reference data."
+}
+```
+
+**correct (single correction example):**
+
+```json
+{
+  "decision": "correct",
+  "confidence": 0.82,
+  "reasoning": "J_l = 0.38 below correction threshold 0.45. Tightening baffle-tube clearance will improve leakage.",
+  "corrections": [
+    {
+      "field": "geometry.baffle_spacing_m",
+      "old_value": 0.2,
+      "new_value": 0.15,
+      "reason": "Reduce J_l leakage by tightening spacing"
+    }
+  ],
+  "observation": "Low J_l indicates significant shell-to-baffle leakage.",
+  "recommendation": "Tighten baffle spacing",
+  "options": [],
+  "option_ratings": []
 }
 ```
 
 **escalate** — extended payload required [Decision ENG-1A]:
+
 ```json
 {
   "decision": "escalate",
@@ -559,46 +767,47 @@ def restore(self, snapshot: dict[str, Any]) -> None:
 
 ### 6.1 Tiered Review Depth
 
-| Tier | When Used | AI Call | Steps |
-|------|-----------|---------|-------|
-| **Full AI Review** | Engineering judgment required — no formula can replace it | Always called (1–3s) | Steps 1, 4, 8, 9, 13, 16 |
+| Tier                   | When Used                                                    | AI Call                   | Steps                               |
+| ---------------------- | ------------------------------------------------------------ | ------------------------- | ----------------------------------- |
+| **Full AI Review**     | Engineering judgment required — no formula can replace it    | Always called (1–3s)      | Steps 1, 4, 8, 9, 13, 16            |
 | **Conditional Review** | Local Python check first; AI called ONLY if anomaly detected | Called 30–50% of the time | Steps 2, 3, 5, 6, 7, 10, 11, 14, 15 |
-| **No AI Review** | Pure convergence loop — too fast for AI latency | Never called | Step 12 (inner iteration) |
+| **No AI Review**       | Pure convergence loop — too fast for AI latency              | Never called              | Step 12 (inner iteration)           |
 
 **Expected per design:** 6 always + 3–5 conditional = 9–11 AI calls. Total: 15–25 seconds.
 
 **AI Call Count Breakdown (per design):**
 
-| Source | Count | Details |
-|--------|-------|--------|
-| Loop 1 (Backend Claude) | ~3 calls | Orchestration: tool selection + narrative generation |
-| Loop 2 (HX Engine AI reviews) | 6–8 calls | 6 FULL steps always + 0–2 CONDITIONAL triggers |
-| **Total AI calls** | **~9–11** | |
+| Source                        | Count     | Details                                              |
+| ----------------------------- | --------- | ---------------------------------------------------- |
+| Loop 1 (Backend Claude)       | ~3 calls  | Orchestration: tool selection + narrative generation |
+| Loop 2 (HX Engine AI reviews) | 6–8 calls | 6 FULL steps always + 0–2 CONDITIONAL triggers       |
+| **Total AI calls**            | **~9–11** |                                                      |
 
 ### 6.2 AI Mode Summary Table
 
-| Step | Name | AI Mode | Key Rule |
-|------|------|---------|----------|
-| 1 | Process Requirements | FULL always | Escalate if fluid ambiguous |
-| 2 | Heat Duty | CONDITIONAL | AI if Q balance error > 2% |
-| 3 | Fluid Properties | CONDITIONAL | AI if Pr < 0.5 or > 1000 |
-| 4 | TEMA Type + Geometry | FULL always | Escalate if two types equally valid |
-| 5 | LMTD + F-Factor | CONDITIONAL (F < 0.85) | Hard fail if F < 0.75 |
-| 6 | Initial U + Size | CONDITIONAL | asyncio.gather if needed |
-| 7 | Tube-side h | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
-| 8 | Shell-side h (Bell-Delaware) | FULL always | Serth 5.1 validated |
-| 9 | Overall U + Resistances | FULL | always called outside convergence loop |
-| 10 | Pressure Drops | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
-| 11 | Area + Overdesign | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop |
-| 12 | Convergence Loop (7→11) | NONE (try/finally) | Max 20 iterations, CG1A reset |
-| 13 | Vibration (5 mechanisms) | FULL always (safety) | Connors pre-filter in autoresearch |
-| 14 | Mechanical (ASME VIII) | CONDITIONAL | AI if P > 30 bar |
-| 15 | Cost (Turton + CEPCI) | CONDITIONAL | AI if cost anomalous vs past |
-| 16 | Final Validation + Confidence | FULL | always called (final sign-off) |
+| Step | Name                          | AI Mode                       | Key Rule                               |
+| ---- | ----------------------------- | ----------------------------- | -------------------------------------- |
+| 1    | Process Requirements          | FULL always                   | Escalate if fluid ambiguous            |
+| 2    | Heat Duty                     | CONDITIONAL                   | AI if Q balance error > 2%             |
+| 3    | Fluid Properties              | CONDITIONAL                   | AI if Pr < 0.5 or > 1000               |
+| 4    | TEMA Type + Geometry          | FULL always                   | Escalate if two types equally valid    |
+| 5    | LMTD + F-Factor               | CONDITIONAL (F < 0.85)        | Hard fail if F < 0.75                  |
+| 6    | Initial U + Size              | CONDITIONAL                   | asyncio.gather if needed               |
+| 7    | Tube-side h                   | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop         |
+| 8    | Shell-side h (Bell-Delaware)  | FULL always                   | Serth 5.1 validated                    |
+| 9    | Overall U + Resistances       | FULL                          | always called outside convergence loop |
+| 10   | Pressure Drops                | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop         |
+| 11   | Area + Overdesign             | CONDITIONAL (check loop flag) | Skip AI if in_convergence_loop         |
+| 12   | Convergence Loop (7→11)       | NONE (try/finally)            | Max 20 iterations, CG1A reset          |
+| 13   | Vibration (5 mechanisms)      | FULL always (safety)          | Connors pre-filter in autoresearch     |
+| 14   | Mechanical (ASME VIII)        | CONDITIONAL                   | AI if P > 30 bar                       |
+| 15   | Cost (Turton + CEPCI)         | CONDITIONAL                   | AI if cost anomalous vs past           |
+| 16   | Final Validation + Confidence | FULL                          | always called (final sign-off)         |
 
 ### 6.3 Complete Step-by-Step Protocol
 
 #### Step 1: Gather Process Requirements
+
 - **Tier:** FULL AI — Always called
 - **Layer 1:** Extract structured data from request (fluids, temps, flows)
 - **Layer 2:** Check all blocking inputs present (fluid names, 3+ temps, flow rates)
@@ -611,6 +820,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - User provides 4 temperatures that don't satisfy energy balance — flag error
 
 #### Step 2: Calculate Heat Duty
+
 - **Tier:** CONDITIONAL — AI called only if anomaly
 - **Layer 1:** Q = m × Cp × ΔT using thermo library for Cp. Calculate 4th temperature from energy balance.
 - **Layer 2:** Q > 0, energy balance closure |Q_hot − Q_cold|/Q_hot < 1%, T_cold_out > T_cold_in, T_cold_out < T_hot_in
@@ -624,6 +834,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Phase change likely at atmospheric pressure — flag need for higher pressure input
 
 #### Step 3: Collect Fluid Properties
+
 - **Tier:** CONDITIONAL — AI called if property anomaly
 - **Layer 1:** Call thermo/CoolProp/iapws for ρ, μ, k, Cp, σ at bulk average temperature
 - **Layer 2:** All properties > 0, density 500–1500 kg/m³ (liquids), viscosity > 0
@@ -638,6 +849,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Water properties near 0°C or >100°C at atmospheric — check for phase change
 
 #### Step 4: Select TEMA Type and Initial Geometry
+
 - **Tier:** FULL AI — Always called
 - **Layer 1:** Decision tree for TEMA type based on process conditions. Heuristic selection of tube OD, pitch, layout angle, passes, length, baffle cut.
 - **Layer 2:** Selected geometry parameters within TEMA standards
@@ -653,6 +865,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - User specifies a TEMA type that conflicts with service (e.g., BEM with 80°C ΔT) — warn
 
 #### Step 5: Determine LMTD and F-Factor
+
 - **Tier:** CONDITIONAL — AI called if F < 0.85
 - **Layer 1:** LMTD from 4 temperatures. R, P, F-factor from analytical expressions.
 - **Layer 2:** F ≥ 0.75 (hard rule), LMTD > 0, R and P within valid domain
@@ -667,6 +880,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - ΔT1 = ΔT2 exactly — LMTD formula has 0/0. Use arithmetic mean instead.
 
 #### Step 6: Estimate Initial U and Size
+
 - **Tier:** CONDITIONAL — AI called if U outside typical range or past designs available
 - **Layer 1:** Look up typical U for fluid pair. Compute A = Q/(U×F×LMTD). Compute N_tubes = A/(π×d_o×L). Look up shell diameter from TEMA tube count tables.
 - **Layer 2:** U > 0, A > 0, tube count maps to a standard shell size
@@ -678,6 +892,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Estimated area < 5 m² — very small exchanger, consider if shell-and-tube is the right type
 
 #### Step 7: Tube-Side Heat Transfer Coefficient
+
 - **Tier:** CONDITIONAL — AI called if velocity or Re problematic
 - **Layer 1:** Compute velocity, Re, Pr. Select correlation (Gnielinski/Hausen/transition blend). Compute h_i.
 - **Layer 2:** h_i > 0, velocity within physical bounds
@@ -692,6 +907,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Non-circular tubes (e.g., enhanced/finned) — standard correlations don't apply directly
 
 #### Step 8: Shell-Side Heat Transfer Coefficient (Bell-Delaware)
+
 - **Tier:** FULL AI — Always called (most complex calculation)
 - **Layer 1:** Compute all geometric areas (cross-flow, leakage A_sb, A_tb, bypass A_bp). Compute ideal h. Compute 5 J-factors. h_o = h_ideal × J_c × J_l × J_b × J_s × J_r.
 - **Layer 2:** h_o > 0, all J-factors in range (0.2–1.2)
@@ -712,6 +928,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Shell-side Reynolds < 100 — Bell-Delaware correlations may not be valid
 
 #### Step 9: Overall U and Resistance Breakdown
+
 - **Tier:** FULL AI — Always called
 - **Layer 1:** 1/U = 1/h_o + R_f,o + t_w/k_w + R_f,i + (d_o/d_i)/h_i. Compute each resistance as percentage.
 - **Layer 2:** U > 0, all resistances > 0, percentages sum to 100%
@@ -725,6 +942,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Wall resistance > 10% — only happens with very thick walls or low-conductivity materials (titanium)
 
 #### Step 10: Pressure Drops
+
 - **Tier:** CONDITIONAL — AI called if margin < 15%
 - **Layer 1:** Tube-side: Darcy-Weisbach + return losses (4 velocity heads/pass) + nozzle losses. Shell-side: Bell-Delaware dP method with R_l, R_b, R_s corrections.
 - **Layer 2:** dP_tube < limit, dP_shell < limit, nozzle ρv² < 2230 kg/m·s² (liquid). Hard limits: dP_shell < 1.4 bar, dP_tube < 0.7 bar.
@@ -739,6 +957,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Very viscous fluid — dP dominated by friction, return losses negligible
 
 #### Step 11: Area and Overdesign
+
 - **Tier:** CONDITIONAL — AI called if overdesign outside 8–30%
 - **Layer 1:** A_required = Q/(U_calc × F × LMTD). A_available = N_tubes × π × d_o × L_effective. Overdesign = (A_available − A_required)/A_required × 100%.
 - **Layer 2:** Overdesign > −5% (not critically undersized). Hard fail: overdesign < 0%.
@@ -752,6 +971,7 @@ def restore(self, snapshot: dict[str, Any]) -> None:
   - Very high overdesign in rating mode — exchanger is oversized for current duty. Report but don't "fix."
 
 #### Step 12: Geometry Iteration (Convergence Loop)
+
 - **Tier:** NO AI — Pure convergence loop, too fast for AI latency
 - **Layer 1:** Run Steps 7→11 in a tight loop. Adjust geometry based on constraint violations.
 - **Convergence criteria:** |U_calc − U_assumed| ≤ tolerance (ΔU < 1%), overdesign 10–25%, all dP within limits, velocity in range
@@ -781,6 +1001,7 @@ finally:
   - Tube count doesn't match TEMA table exactly — round to nearest table entry
 
 #### Step 13: Vibration Check
+
 - **Tier:** FULL AI — Always called (safety-critical)
 - **Layer 1:** Natural frequency at each span. Cross-flow velocity at each baffle compartment. Check 5 mechanisms: fluidelastic instability (Connors), vortex shedding, turbulent buffeting, acoustic resonance (gas only), fluid-elastic whirling.
 - **Layer 2:** u_cross/u_crit < 0.5 at every span (Connors criterion with safety factor)
@@ -796,6 +1017,7 @@ finally:
   - Two-phase flow — velocity varies dramatically along shell length. Check at every compartment.
 
 #### Step 14: Mechanical Design Check
+
 - **Tier:** CONDITIONAL — AI called if borderline thickness or high expansion
 - **Layer 1:** ASME VIII tube thickness, shell thickness. Thermal expansion differential.
 - **Layer 2:** Actual wall thickness ≥ minimum required. Expansion within tolerance for selected rear head type.
@@ -808,6 +1030,7 @@ finally:
   - Tubesheet thickness not checked in Phase 1 — flag as limitation
 
 #### Step 15: Cost Estimate
+
 - **Tier:** CONDITIONAL — AI called if cost anomalous
 - **Layer 1:** Turton correlations. CEPCI adjustment. Material and pressure correction factors.
 - **Layer 2:** Cost > 0, cost per m² within reasonable range for material
@@ -821,6 +1044,7 @@ finally:
   - CEPCI index must be for the correct year — using old index underestimates cost
 
 #### Step 16: Final Validation and Confidence
+
 - **Tier:** FULL AI — Always called (final sign-off)
 - **Layer 1:** Run all final checks. Compute confidence score.
 - **Confidence Score [CEO-CP2]:**
@@ -846,20 +1070,48 @@ finally:
 
 ## 7. Key Contracts & Data Models
 
-### 7.1 FluidProperties [Decision 3R-4A]
+### 7.1 FluidProperties [UPDATED May 2026]
 
 ```python
 # hx_engine/app/models/design_state.py
 class FluidProperties(BaseModel):
-    name: str
-    density_kg_m3: float          # [50, 2000]
-    viscosity_Pa_s: float         # [1e-6, 1.0]
-    cp_J_kgK: float               # [500, 10000]
-    k_W_mK: float                 # [0.01, 100]
-    Pr: float                     # [0.5, 1000]
-    phase: str = "liquid"         # "liquid" | "gas"
-    mean_temp_C: Optional[float] = None
+    # Core thermophysical properties (all Optional — populated by thermo_adapter)
+    density_kg_m3:  Optional[float] = None  # bounds [0.01, 2000]
+    viscosity_Pa_s: Optional[float] = None  # bounds [1e-7, 1.0]
+    cp_J_kgK:       Optional[float] = None  # bounds [100, 100_000]
+    k_W_mK:         Optional[float] = None  # bounds [0.005, 100]
+    Pr:             Optional[float] = None  # bounds [0.001, 10000]
+
+    # Phase state (new — supports condensation and two-phase service)
+    phase:            Optional[str]   = None  # "liquid" | "vapor" | "two_phase"
+    quality:          Optional[float] = None  # 0.0–1.0, None for single-phase
+    enthalpy_J_kg:    Optional[float] = None
+    latent_heat_J_kg: Optional[float] = None  # h_fg at saturation
+    T_sat_C:          Optional[float] = None
+    P_sat_Pa:         Optional[float] = None
+
+    # Provenance tracking
+    property_source:     Optional[str]   = None  # "iapws"|"coolprop"|"thermo"|"petroleum-named"|etc.
+    property_confidence: Optional[float] = None  # 0.0–1.0
 ```
+
+**Key differences from original plan:**
+
+- `name: str` field **removed** — `FluidProperties` is anonymous. Fluid names are on `DesignState` as `hot_fluid_name: Optional[str]` and `cold_fluid_name: Optional[str]`.
+- All core properties changed from `float` to `Optional[float]` (populated incrementally).
+- Phase-change fields added: `quality`, `enthalpy_J_kg`, `latent_heat_J_kg`, `T_sat_C`, `P_sat_Pa`.
+- Provenance tracking added: `property_source`, `property_confidence`.
+- Bounds updated: Pr range is `[0.001, 10000]` (broader than original `[0.5, 1000]`).
+
+**Thermo adapter priority chain (5 tiers, as implemented):**
+
+```
+iapws (water/steam) → CoolProp → Petroleum correlations (Lee-Kesler/Beggs-Robinson/Cragoe)
+  → Specialty fluids → thermo (Caleb Bell)
+```
+
+`thermo_adapter.get_saturation_props()` and `thermo_adapter.get_cp()` are the public API functions.
+`_strip_phase_suffix()` cleans fluid names before lookup.
 
 ### 7.2 StepRecord [Decision 3R-5A]
 
@@ -875,64 +1127,272 @@ class StepRecord(BaseModel):
     ai_called: bool
 ```
 
-### 7.3 DesignState [Decision 2B + CG3A + CEO Amendments]
+### 7.2a IncrementResult [NEW — Phase-Change Zone Calculations]
+
+```python
+# hx_engine/app/models/design_state.py
+class IncrementResult(BaseModel):
+    """Per-segment (zone) result for incremental condensation/phase-change calculations.
+    Populated in `DesignState.increment_results` when hot_phase or cold_phase is
+    'condensing' or 'evaporating'.
+    """
+    segment_index:    int
+    T_hot_in_C:       Optional[float] = None
+    T_hot_out_C:      Optional[float] = None
+    T_cold_in_C:      Optional[float] = None
+    T_cold_out_C:     Optional[float] = None
+    quality_in:       Optional[float] = None   # vapor quality entering this zone
+    quality_out:      Optional[float] = None   # vapor quality leaving this zone
+    phase:            Optional[str]   = None   # dominant phase in this zone
+    h_tube_W_m2K:     Optional[float] = None
+    h_shell_W_m2K:    Optional[float] = None
+    U_local_W_m2K:    Optional[float] = None
+    dQ_W:             Optional[float] = None   # heat duty for this zone
+    dA_m2:            Optional[float] = None   # area required for this zone
+    LMTD_local_K:     Optional[float] = None
+```
+
+### 7.3 DesignState [UPDATED May 2026 — Extended]
 
 ```python
 # hx_engine/app/models/design_state.py
 class GeometrySpec(BaseModel):
-    shell_diameter_m: Optional[float] = None
-    tube_od_m: Optional[float] = None
-    tube_id_m: Optional[float] = None
-    tube_length_m: Optional[float] = None
-    baffle_spacing_m: Optional[float] = None   # validator: [0.05, 2.0] m
-    pitch_ratio: Optional[float] = None        # validator: [1.2, 1.5]
-    n_tubes: Optional[int] = None
-    n_passes: Optional[int] = None
-    pitch_layout: str = "triangular"
-    # @field_validator on all length/ratio fields — CG3A
+    # Original fields (unchanged)
+    shell_diameter_m:  Optional[float] = None   # validator: [0.1, 3.0]
+    tube_od_m:         Optional[float] = None   # validator: [0.006, 0.10]
+    tube_id_m:         Optional[float] = None
+    tube_length_m:     Optional[float] = None   # validator: [0.5, 12.0]
+    baffle_spacing_m:  Optional[float] = None   # validator: [0.05, 2.0]
+    pitch_ratio:       Optional[float] = None   # validator: [1.2, 1.5]
+    n_tubes:           Optional[int]   = None
+    n_passes:          Optional[int]   = None
+    pitch_layout:      str = "triangular"       # "triangular" | "square"
 
-class DesignState(BaseModel):
-    session_id: str = Field(default_factory=lambda: str(uuid4()))  # CEO Amendment
-    user_id: str
-    org_id: Optional[str] = None        # CEO-CP4: forward compat for team accounts
-    raw_request: str
-    shell_fluid: Optional[FluidProperties] = None
-    tube_fluid: Optional[FluidProperties] = None
-    geometry: GeometrySpec = GeometrySpec()
-    Q_W: Optional[float] = None
-    LMTD_C: Optional[float] = None
-    F_factor: Optional[float] = None
-    U_overall_W_m2K: Optional[float] = None
-    h_tube_W_m2K: Optional[float] = None
-    h_shell_W_m2K: Optional[float] = None
-    area_required_m2: Optional[float] = None
-    area_provided_m2: Optional[float] = None
-    overdesign_pct: Optional[float] = None
-    dP_tube_Pa: Optional[float] = None
-    dP_shell_Pa: Optional[float] = None
-    vibration_safe: Optional[bool] = None
-    cost_usd: Optional[float] = None
-    confidence_score: Optional[float] = None
-    confidence_breakdown: Optional[dict] = None   # CEO-CP2: explainability
-    # confidence_breakdown keys: geometry_convergence, ai_agreement_rate,
-    #   validation_passes — all floats [0.0, 1.0]
-    tema_type: Optional[str] = None
-    warnings: List[str] = []
-    step_records: List[StepRecord] = Field(default_factory=list)  # CEO Amendment: default_factory
-    in_convergence_loop: bool = False    # Decision 3A / CG1A
-    convergence_iteration: int = 0
-    waiting_for_user: bool = False       # True while pipeline is paused at ESCALATE; excludes session from orphan detection
-    review_notes: List[str] = Field(default_factory=list)
-    # review_notes: AI forward-looking observations appended after each step review.
-    # Distinct from warnings (warnings = Layer 2 hard-rule violations).
-    # review_notes = AI's 30-50 token observations for future steps, e.g.:
-    #   "Shell-side Re is low (650). Step 10 pressure drop will be sensitive to baffle spacing."
-    # Passed to subsequent steps in the AI prompt context [§17.2, Eng Review].
+    # NEW fields (added since original plan)
+    tube_pitch_m:           Optional[float] = None  # [0.01, 0.10]; computed from OD × pitch_ratio
+    n_sealing_strip_pairs:  Optional[int]   = 0     # [0, 20]
+    inlet_baffle_spacing_m: Optional[float] = None  # defaults to baffle_spacing_m
+    outlet_baffle_spacing_m:Optional[float] = None  # defaults to baffle_spacing_m
+    n_baffles:              Optional[int]   = None  # [1, 100]
+    pitch_angle_deg:        Optional[int]   = None  # 30 | 45 | 60 | 90
+    baffle_thickness_m:     Optional[float] = None  # [0.003, 0.025]; default 0.00635 (1/4")
+    shell_passes:           Optional[int]   = None  # for multi-shell arrangements
+    n_shells:               Optional[int]   = None  # [1, 4]
+
+    # Methods
+    def get_pitch_angle(self) -> int: ...
+    def get_baffle_thickness(self) -> float: ...
 ```
 
-**Important [CEO Amendment]:** Use `Field(default_factory=list)` for `step_records` and `warnings` to prevent mutable default sharing across instances. Test: `DesignState().step_records is not DesignState().step_records` → True.
+```python
+class DesignState(BaseModel):
+    # Identity (unchanged)
+    session_id:    str = Field(default_factory=lambda: str(uuid4()))
+    user_id:       str
+    org_id:        Optional[str] = None        # CEO-CP4: forward compat for team accounts
+    raw_request:   str
 
-**Note [CEO Review 3]:** `/btw` context injection (BTW-1A/2A/3A) deferred to post-beta. See §20 P2 for post-beta implementation plan. `ContextNote` model removed from build scope.
+    # Fluid identities (names stored here, not inside FluidProperties)
+    hot_fluid_name:  Optional[str] = None
+    cold_fluid_name: Optional[str] = None
+
+    # Fluid properties (anonymous — no name field on FluidProperties)
+    shell_fluid:   Optional[FluidProperties] = None
+    tube_fluid:    Optional[FluidProperties] = None
+
+    # Phase regime [NEW]
+    hot_phase:    Optional[str] = None  # "liquid"|"vapor"|"condensing"|"evaporating"
+    cold_phase:   Optional[str] = None
+    n_increments: Optional[int] = None  # number of zones for incremental calc
+    increment_results: list[IncrementResult] = Field(default_factory=list)
+    viscosity_variation: Optional[dict] = None  # {"hot": {"mu_ratio":...}, "cold":{...}}
+
+    # Geometry
+    geometry:      GeometrySpec = Field(default_factory=GeometrySpec)
+
+    # Multi-shell [NEW]
+    multi_shell_arrangement: Optional[str] = None  # "series"|"parallel"|None
+
+    # Thermal results (original)
+    Q_W:           Optional[float] = None
+    LMTD_C:        Optional[float] = None
+    F_factor:      Optional[float] = None
+    T_mean_hot_C:  Optional[float] = None  # mean temperature for property lookup
+    T_mean_cold_C: Optional[float] = None
+
+    # Operating pressures
+    P_hot_Pa:  Optional[float] = None
+    P_cold_Pa: Optional[float] = None
+
+    # Tube-side results [extended]
+    h_tube_W_m2K:      Optional[float] = None
+    Re_tube:           Optional[float] = None
+    Pr_tube:           Optional[float] = None
+    Nu_tube:           Optional[float] = None
+    flow_regime_tube:  Optional[str]   = None  # "laminar"|"transition_low_turbulent"|"turbulent"
+
+    # Shell-side results [extended]
+    h_shell_W_m2K:       Optional[float] = None
+    Re_shell:            Optional[float] = None
+    shell_side_j_factors:Optional[dict]  = None  # {"J_c":..., "J_l":..., "J_b":..., "J_s":..., "J_r":...}
+    h_shell_ideal_W_m2K: Optional[float] = None
+    h_shell_kern_W_m2K:  Optional[float] = None
+
+    # Overall U [extended]
+    U_clean_W_m2K:             Optional[float] = None
+    U_dirty_W_m2K:             Optional[float] = None
+    U_overall_W_m2K:           Optional[float] = None
+    cleanliness_factor:        Optional[float] = None
+    resistance_breakdown:      Optional[dict]  = None  # each resistance as a fraction
+    controlling_resistance:    Optional[str]   = None
+    U_kern_W_m2K:              Optional[float] = None
+    U_kern_deviation_pct:      Optional[float] = None
+    U_vs_estimated_deviation_pct:  Optional[float] = None
+    cross_method_agreement_weight: Optional[float] = None  # 1.0 normal, 0.85 viscous
+
+    # Tube material [NEW]
+    tube_material:    Optional[str]   = None
+    k_wall_W_mK:      Optional[float] = None
+    k_wall_source:    Optional[str]   = None
+    k_wall_confidence:Optional[float] = None
+
+    # Fouling resistances (correction-loop overrides)
+    R_f_hot_m2KW:  Optional[float] = None
+    R_f_cold_m2KW: Optional[float] = None
+
+    # Area and overdesign [extended]
+    area_required_m2:           Optional[float] = None
+    area_provided_m2:           Optional[float] = None
+    A_required_low_m2:          Optional[float] = None  # uncertainty band low (FE-3)
+    A_required_high_m2:         Optional[float] = None  # uncertainty band high
+    overdesign_pct:             Optional[float] = None
+    A_estimated_vs_required_pct:Optional[float] = None
+    service_classification:     Optional[str]   = None  # "clean_utility"|"phase_change"|"standard_process"|"fouling_service"
+    overdesign_band_low:        Optional[float] = None
+    overdesign_band_high:       Optional[float] = None
+    fouling_paradox_severity:   Optional[str]   = None  # None|"warn"|"escalate"
+
+    # Pressure drops [extensively extended]
+    dP_tube_Pa:                    Optional[float] = None  # total tube-side
+    dP_tube_friction_Pa:           Optional[float] = None
+    dP_tube_minor_Pa:              Optional[float] = None
+    dP_tube_nozzle_Pa:             Optional[float] = None
+    dP_shell_Pa:                   Optional[float] = None  # total shell-side
+    dP_shell_crossflow_Pa:         Optional[float] = None
+    dP_shell_window_Pa:            Optional[float] = None
+    dP_shell_end_Pa:               Optional[float] = None
+    dP_shell_nozzle_Pa:            Optional[float] = None
+    Fb_prime_dP:                   Optional[float] = None  # bypass correction factor
+    FL_prime_dP:                   Optional[float] = None  # leakage correction factor
+    nozzle_id_tube_m:              Optional[float] = None
+    nozzle_id_shell_m:             Optional[float] = None
+    rho_v2_tube_nozzle:            Optional[float] = None  # kg/(m·s²)
+    rho_v2_shell_nozzle:           Optional[float] = None
+    n_nozzles_tube:                int = 1
+    n_nozzles_shell:               int = 1
+    nozzle_auto_corrected_tube:    bool = False
+    nozzle_auto_corrected_shell:   bool = False
+    dP_shell_simplified_delaware_Pa: Optional[float] = None
+    dP_shell_kern_Pa:              Optional[float] = None
+    dP_shell_bell_vs_kern_pct:     Optional[float] = None
+    mu_s_wall_Pa_s:                Optional[float] = None  # shell-side wall viscosity
+    mu_s_wall_basis:               Optional[str]   = None  # "computed"|"approx_bulk"
+    mu_s_wall_fail_reason:         Optional[str]   = None
+
+    # Pressure drop limits (set from DesignRequest / intake constraints)
+    dP_hot_max_Pa:   Optional[float] = None
+    dP_cold_max_Pa:  Optional[float] = None
+    dP_tube_max_Pa:  Optional[float] = None  # set by Step 4 based on side assignment
+    dP_shell_max_Pa: Optional[float] = None
+
+    # Design pressure (ASME)
+    P_hot_design_Pa:  Optional[float] = None
+    P_cold_design_Pa: Optional[float] = None
+
+    # Fouling from intake
+    fouling_hot_m2K_W:  Optional[float] = None
+    fouling_cold_m2K_W: Optional[float] = None
+
+    # Vibration
+    vibration_safe:    Optional[bool] = None
+
+    # Convergence [extended]
+    in_convergence_loop:      bool = False         # Decision 3A / CG1A
+    convergence_iteration:    int = 0
+    convergence_trajectory:   list[dict] = Field(default_factory=list)  # per-iteration log
+    convergence_restart_count:int = 0
+
+    # Mechanical [extended]
+    tube_thickness_ok:   Optional[bool] = None
+    shell_thickness_ok:  Optional[bool] = None
+    expansion_mm:        Optional[float] = None
+    mechanical_details:  Optional[dict]  = None
+    shell_material:      Optional[str]   = None
+
+    # Cost [extended]
+    cost_usd:       Optional[float] = None
+    cost_breakdown: Optional[dict]  = None
+
+    # Confidence
+    confidence_score:     Optional[float] = None
+    confidence_breakdown: Optional[dict]  = None   # CEO-CP2: 3 keys
+
+    # TEMA allocation [extended]
+    tema_type:      Optional[str] = None
+    tema_class:     Optional[str] = None     # "R"|"C"|"B"
+    tema_preference:Optional[str] = None
+    shell_side_fluid:Optional[str]= None
+
+    # Pipeline state [extended]
+    pipeline_status:      str  = "pending"   # "pending"|"running"|"completed"|"error"|"cancelled"|"terminated"|"waiting"
+    is_complete:          bool = False
+    termination_reason:   Optional[str] = None
+    waiting_for_user:     bool = False        # True while paused at ESCALATE; excludes from orphan detection
+
+    # Special flags [NEW]
+    shell_id_finalised:              bool = False
+    requires_double_tubesheet_review:bool = False  # P2-12 highly toxic service
+    ai_disabled_for_run:             bool = False
+
+    # Design output [NEW]
+    design_strengths: list[str] = Field(default_factory=list)
+    design_risks:     list[str] = Field(default_factory=list)
+
+    # Volumetric flow audit [NEW — P2-20]
+    hot_flow_input:    Optional[dict] = None  # {"value": ..., "unit": ..., "density_used": ...}
+    cold_flow_input:   Optional[dict] = None
+    flow_density_drift:Optional[dict] = None  # {"hot": pct, "cold": pct}
+
+    # Correction loop overrides [NEW]
+    applied_corrections: dict[str, Any] = Field(default_factory=dict)
+
+    # Escalation history [NEW]
+    escalation_history:    dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+
+    # Redesign history [NEW]
+    redesign_history:      list[RedesignAttempt] = Field(default_factory=list)
+    redesign_attempt_count:int = 0
+
+    # Review notes and step records (original)
+    warnings:      List[str]       = Field(default_factory=list)
+    review_notes:  List[str]       = Field(default_factory=list)
+    step_records:  List[StepRecord]= Field(default_factory=list)
+
+    # DesignState methods [NEW]
+    def snapshot_fields(self, field_names: list[str]) -> dict[str, Any]:
+        """Deep copy the listed fields. Called before apply_correction()."""
+        ...
+
+    def restore(self, snapshot: dict[str, Any]) -> None:
+        """Write snapshot values back. Called on Layer 2 hard fail."""
+        ...
+```
+
+**Important notes:**
+
+- `Field(default_factory=list)` used on all list fields to prevent mutable default sharing.
+- `CalibrationKey.from_state(state)` uses `hot_fluid_name`/`cold_fluid_name` fields (not `shell_fluid.name` which no longer exists).
+- `RedesignAttempt` is a sub-model from `redesign_loop.py` imported into `design_state.py`.
 
 ### 7.4 StepProtocol [Decision 6A]
 
@@ -1093,6 +1553,7 @@ class BaseStep(ABC):
 ```
 
 Each step's `run_step_N()` in `pipeline_runner.py` is now just:
+
 1. Record `step_start_time = datetime.utcnow()`
 2. Emit `step_started` SSE event (step_id, step_name)
 3. Execute Layer 1 (`self.execute(state)`)
@@ -1125,16 +1586,33 @@ def shell_side_dP(fluid: FluidProperties, geom: GeometrySpec,
     """Returns (dP_Pa, intermediates)"""
 ```
 
-### 7.7 SSE Event Schemas
+### 7.7 SSE Event Schemas [UPDATED May 2026]
 
 ```python
-# hx_engine/app/models/sse_events.py — All 8 SSE event types
+# hx_engine/app/models/sse_events.py — 9 SSE event types
 # step_started, step_approved, step_corrected, step_warning,
-# step_escalated, step_error, iteration_progress, design_complete
+# step_escalated, step_error, iteration_progress,
+# redesign_attempt,   ← NEW: emitted for each RedesignDriver attempt
+# design_complete
 #
 # step_error payload: step, message, observation, recommendation, options
 # Emitted when a step cannot be resolved after 3 user inputs. Pipeline halts.
 # StepHardFailure exception is raised in pipeline_runner after this event.
+#
+# redesign_attempt payload:
+#   attempt_number: int
+#   lever: str        (which parameter was changed)
+#   direction: str    ("increase"|"decrease"|"change")
+#   old_value: Any
+#   new_value: Any
+#   constraint_violated: str
+#   reasoning: str
+#
+# iteration_progress extended payload (new fields added):
+#   iteration_number, current_U,
+#   delta_U_pct, overdesign_pct,
+#   dP_tube_pct_of_limit, dP_shell_pct_of_limit,
+#   velocity_m_s, adjustment_made, constraints_met
 #
 # Note: context_note_ack removed — /btw deferred to post-beta [CEO Review 3]
 ```
@@ -1329,12 +1807,18 @@ def connors_quick_check(state: DesignState) -> bool:
 ```typescript
 // frontend/src/hooks/useHXStream.ts
 eventSource.onerror = () => {
-    eventSource.close();
-    const poll = setInterval(async () => {
-        const status = await hxEngineApi.getStatus(sessionId);
-        if (status.status === 'complete') { clearInterval(poll); setResult(status.result); }
-        if (status.status === 'failed')   { clearInterval(poll); setError(); }
-    }, 2000);
+  eventSource.close();
+  const poll = setInterval(async () => {
+    const status = await hxEngineApi.getStatus(sessionId);
+    if (status.status === "complete") {
+      clearInterval(poll);
+      setResult(status.result);
+    }
+    if (status.status === "failed") {
+      clearInterval(poll);
+      setError();
+    }
+  }, 2000);
 };
 ```
 
@@ -1381,16 +1865,17 @@ HX Engine (pipeline_runner)
 
 ### 9.2 Event Types
 
-| Event | When | Payload |
-|-------|------|---------|
-| `step_started` | Step begins | step_number, step_name, phase |
-| `step_approved` | AI: PROCEED | key_outputs, user_summary, confidence |
-| `step_corrected` | AI: CORRECT | parameter, old_value, new_value, reasoning |
-| `step_warning` | AI: WARN | concern, impact, user_summary |
-| `step_escalated` | AI: ESCALATE or re-escalate | question_for_user, options, observation, recommendation |
-| `step_error` | 3 user inputs fail Layer 2 | step, message, observation, recommendation, options |
-| `iteration_progress` | Step 12 loop | iteration_number, current_U, constraints_met |
-| `design_complete` | All 16 done | final_design_state, confidence, all_events |
+| Event                | When                        | Payload                                                                                                                                               |
+| -------------------- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `step_started`       | Step begins                 | step_number, step_name, phase                                                                                                                         |
+| `step_approved`      | AI: PROCEED                 | key_outputs, user_summary, confidence                                                                                                                 |
+| `step_corrected`     | AI: CORRECT                 | parameter, old_value, new_value, reasoning                                                                                                            |
+| `step_warning`       | AI: WARN                    | concern, impact, user_summary                                                                                                                         |
+| `step_escalated`     | AI: ESCALATE or re-escalate | question_for_user, options, observation, recommendation                                                                                               |
+| `step_error`         | 3 user inputs fail Layer 2  | step, message, observation, recommendation, options                                                                                                   |
+| `iteration_progress` | Step 12 loop                | iteration_number, current_U, delta_U_pct, overdesign_pct, dP_tube_pct_of_limit, dP_shell_pct_of_limit, velocity_m_s, adjustment_made, constraints_met |
+| `redesign_attempt`   | RedesignDriver each attempt | attempt_number, lever, direction, old_value, new_value, constraint_violated, reasoning                                                                |
+| `design_complete`    | All 16 done                 | final_design_state, confidence, all_events                                                                                                            |
 
 ### 9.3 SSE Manager
 
@@ -1448,61 +1933,105 @@ arken-ai/
 │   │   ├── config.py
 │   │   ├── dependencies.py
 │   │   ├── routers/
-│   │   │   ├── design.py        # POST /design, GET /design/{id}/status [CG2A]
-│   │   │   └── stream.py        # GET /design/{id}/stream (SSE) [Decision 1B]
+│   │   │   ├── design.py           # POST /design, GET /design/{id}/status [CG2A]
+│   │   │   ├── stream.py           # GET /design/{id}/stream (SSE) [Decision 1B]
+│   │   │   └── requirements.py     # POST /requirements → validates + returns HMAC token [NEW]
 │   │   ├── models/
-│   │   │   ├── design_state.py  # Pydantic DesignState [Decision 2B + CG3A]
-│   │   │   ├── step_result.py   # StepResult, AIDecision enum
-│   │   │   └── sse_events.py    # All 7 SSE event schemas
+│   │   │   ├── design_state.py     # DesignState + GeometrySpec + FluidProperties + IncrementResult
+│   │   │   ├── requirements.py     # DesignRequest, FlowInput, DesignResponse [EXTENDED]
+│   │   │   ├── step_result.py      # StepResult, AIDecision enum, StepRecord
+│   │   │   └── sse_events.py       # All 9 SSE event schemas (incl. RedesignAttemptEvent) [UPDATED]
 │   │   ├── steps/
-│   │   │   ├── __init__.py      # StepProtocol [Decision 6A]
-│   │   │   ├── base.py          # BaseStep (4-layer template + in_convergence_loop guard)
-│   │   │   ├── step_01_requirements.py    through
-│   │   │   └── step_16_final_validation.py
+│   │   │   ├── __init__.py         # StepProtocol [Decision 6A]
+│   │   │   ├── base.py             # BaseStep (4-layer template + convergence guard)
+│   │   │   ├── step_01_requirements.py    + step_01_rules.py
+│   │   │   ├── step_02_heat_duty.py       + step_02_rules.py
+│   │   │   ├── step_03_fluid_props.py     + step_03_rules.py
+│   │   │   ├── step_04_tema_geometry.py   + step_04_rules.py
+│   │   │   ├── step_05_lmtd.py            + step_05_rules.py
+│   │   │   ├── step_06_initial_u.py       + step_06_rules.py
+│   │   │   ├── step_07_tube_side_h.py     + step_07_rules.py
+│   │   │   ├── step_08_shell_side_h.py    + step_08_rules.py
+│   │   │   ├── step_09_overall_u.py       + step_09_rules.py
+│   │   │   ├── step_10_pressure_drops.py  + step_10_rules.py
+│   │   │   ├── step_11_overdesign.py      + step_11_rules.py
+│   │   │   ├── step_12_convergence.py     + step_12_rules.py
+│   │   │   ├── step_13_vibration.py       + step_13_rules.py
+│   │   │   ├── step_14_mechanical.py      + step_14_rules.py
+│   │   │   ├── step_15_cost.py            + step_15_rules.py
+│   │   │   └── step_16_final_validation.py + step_16_rules.py
 │   │   ├── core/
-│   │   │   ├── ai_engineer.py   # Layer 3: single Anthropic API call per review + retry [CEO-3A]
-│   │   │   ├── review_protocol.py   # Per-step review config: thresholds, triggers, corrections (data-driven)
-│   │   │   ├── calibration.py       # Bias correction factors from benchmark comparisons (Serth, etc.)
-│   │   │   ├── validation_rules.py  # Layer 2: hard rules (AI cannot override)
-│   │   │   ├── pipeline_runner.py   # Runs all 16 steps, manages DesignState
-│   │   │   ├── session_store.py     # Redis: save/load DesignState by session_id
-│   │   │   ├── sse_manager.py       # asyncio.Queue per session, stream_events()
-│   │   │   ├── exceptions.py        # CalculationError(step_id, message, cause)
-│   │   │   └── prompts/
-│   │   │       └── engineer_review.txt  # AI engineer system prompt + injection mitigation
+│   │   │   ├── ai_engineer.py          # Layer 3: single Anthropic call + retry; loads skills/*.md [UPDATED]
+│   │   │   ├── pipeline_runner.py      # All 16 steps + Step 7 velocity restart + DesignConstraintViolation routing
+│   │   │   ├── redesign_loop.py        # RedesignDriver — autonomous geometry mutation [NEW]
+│   │   │   ├── design_intent.py        # is_termination_intent(message) -> bool [NEW]
+│   │   │   ├── review_protocol.py      # Per-step review config: thresholds, triggers, corrections
+│   │   │   ├── calibration.py          # In-memory calibration cache (loaded from MongoDB at startup)
+│   │   │   ├── validation_rules.py     # Layer 2: hard rules (AI cannot override)
+│   │   │   ├── session_store.py        # Redis: save/load/heartbeat/is_orphaned
+│   │   │   ├── sse_manager.py          # asyncio.Queue per session + escalation futures
+│   │   │   ├── exceptions.py           # CalculationError, DesignConstraintViolation, StepHardFailure
+│   │   │   ├── fluid_property_store.py # Fluid property caching [NEW]
+│   │   │   ├── fouling_ai.py           # AI-assisted fouling factor suggestion [NEW]
+│   │   │   ├── fouling_store.py        # Fouling factor store/lookup [NEW]
+│   │   │   ├── volumetric_flow.py      # Volumetric flow unit conversion (P2-20) [NEW]
+│   │   │   ├── requirements_validator.py # Requirements validation logic [NEW]
+│   │   │   └── state_utils.py          # apply_outputs(), clear_state_from_step() [NEW]
+│   │   ├── skills/                     # ★ NEW DIRECTORY — per-step AI prompt files (markdown)
+│   │   │   ├── base.md                 # Shared base prompt (prompt injection mitigation)
+│   │   │   ├── step_02_heat_duty.md
+│   │   │   ├── step_03_fluid_props.md
+│   │   │   ├── step_04_tema_geometry.md
+│   │   │   ├── step_05_lmtd.md
+│   │   │   ├── step_06_initial_u.md
+│   │   │   ├── step_07_tube_side_h.md
+│   │   │   ├── step_08_shell_side_h.md
+│   │   │   ├── step_09_overall_u.md
+│   │   │   ├── step_10_pressure_drops.md
+│   │   │   ├── step_11_overdesign.md
+│   │   │   ├── step_12_convergence.md
+│   │   │   ├── step_13_vibration.md
+│   │   │   ├── step_14_mechanical.md
+│   │   │   ├── step_15_cost.md
+│   │   │   └── step_16_final_validation.md
 │   │   ├── correlations/
-│   │   │   ├── bell_delaware.py  # shell_side_h(), shell_side_dP() [Decision 5]
-│   │   │   ├── kern_method.py    # Kern shell-side h (for cross-validation: deviation < 15%)
-│   │   │   ├── gnielinski.py     # tube_side_h()
-│   │   │   ├── lmtd.py           # LMTD + F-factor
-│   │   │   ├── pressure_drop.py  # Darcy-Weisbach tube-side + Bell-Delaware shell-side dP
-│   │   │   ├── vibration.py      # 5 vibration mechanisms (Connors, vortex, acoustic, buffeting, whirling)
-│   │   │   ├── connors.py        # connors_criterion() [used in Step 13 + autoresearch pre-filter]
-│   │   │   └── turton_cost.py    # cost correlations
+│   │   │   ├── bell_delaware.py         # shell_side_h(), shell_side_dP() [Decision 5]
+│   │   │   ├── kern_method.py           # Kern shell-side h (for cross-validation: deviation < 15%)
+│   │   │   ├── gnielinski.py            # tube_side_h()
+│   │   │   ├── lmtd.py                  # LMTD + F-factor
+│   │   │   ├── pressure_drop.py         # Darcy-Weisbach tube-side + Bell-Delaware shell-side dP
+│   │   │   ├── shah_condensation.py     # Shah condensation correlation [NEW — phase change]
+│   │   │   ├── simplified_delaware_dp.py # Simplified Delaware dP (cross-check) [NEW]
+│   │   │   ├── tema_vibration.py        # TEMA vibration checks [NEW]
+│   │   │   ├── vibration.py             # 5 vibration mechanisms (Connors, vortex, acoustic, buffeting, whirling)
+│   │   │   ├── connors.py               # connors_criterion()
+│   │   │   └── turton_cost.py           # cost correlations
 │   │   ├── adapters/
-│   │   │   ├── thermo_adapter.py  # CoolProp → iapws → thermo, normalizes to SI
-│   │   │   ├── ht_adapter.py      # ht library wrapper (correlation cross-checks, extracted from existing 1,110 lines)
-│   │   │   └── units_adapter.py   # °F→°C, lb/hr→kg/s, in→m, psi→Pa
+│   │   │   ├── thermo_adapter.py        # 5-tier: iapws → CoolProp → Petroleum → Specialty → thermo [UPDATED]
+│   │   │   ├── petroleum_correlations.py # Lee-Kesler, Beggs-Robinson, Cragoe [NEW]
+│   │   │   ├── ht_adapter.py            # ht library wrapper (correlation cross-checks)
+│   │   │   └── units_adapter.py         # °F→°C, lb/hr→kg/s, in→m, psi→Pa
 │   │   ├── memory/
-│   │   │   ├── supermemory_client.py  # search_books(), search_past_designs(), etc.
-│   │   │   └── memory_queries.py      # typed query builders per step
-│   │   ├── autoresearch/
-│   │   │   ├── experiment_runner.py  # 200-variant sweep + Connors pre-filter [10A]
-│   │   │   ├── geometry_proposer.py  # Claude proposes next 10 geometries
-│   │   │   ├── scorer.py             # Multi-objective scoring (cost, U, dP weighting)
-│   │   │   ├── pareto.py             # non-dominated set extraction
-│   │   │   ├── connors_prefilter.py  # connors_quick_check() [Decision 10A]
-│   │   │   └── program.md            # Autoresearch strategy document (experiment protocol)
+│   │   │   ├── supermemory_client.py    # search_books(), search_past_designs(), etc.
+│   │   │   └── memory_queries.py        # typed query builders per step
+│   │   ├── autoresearch/                # POST-BETA (deferred)
+│   │   │   ├── experiment_runner.py
+│   │   │   ├── geometry_proposer.py
+│   │   │   ├── scorer.py
+│   │   │   ├── pareto.py
+│   │   │   └── connors_prefilter.py
 │   │   └── data/
-│   │       ├── tema_tables.py         # Tube count tables (40+ shell IDs)
-│   │       ├── standard_sizes.py      # Standard shell/tube sizes, BWG
-│   │       ├── fouling_factors.py     # Fouling resistance by fluid type
-│   │       ├── u_assumptions.py       # Typical U ranges by fluid pair
-│   │       ├── tube_materials.py      # Material properties, allowable stress
-│   │       └── cost_indices.py        # CEPCI_INDEX with last_updated [CEO Amendment]
+│   │       ├── tema_tables.py           # Tube count tables (40+ shell IDs)
+│   │       ├── standard_sizes.py        # Standard shell/tube sizes, BWG
+│   │       ├── fouling_factors.py       # Fouling resistance by fluid type
+│   │       ├── u_assumptions.py         # Typical U ranges by fluid pair
+│   │       ├── tube_materials.py        # Material properties, allowable stress
+│   │       ├── cost_indices.py          # CEPCI_INDEX with last_updated [CEO Amendment]
+│   │       ├── asme_external_pressure.py # ASME external pressure charts [NEW]
+│   │       └── pipe_schedules.py        # Standard pipe schedules for nozzle sizing [NEW]
 │   ├── tests/
 │   │   ├── unit/
-│   │   │   ├── models/test_design_state.py  # CG3A validator tests (12 tests)
+│   │   │   ├── models/test_design_state.py
 │   │   │   ├── correlations/test_bell_delaware.py  # Serth 5.1 benchmark
 │   │   │   ├── correlations/test_gnielinski.py
 │   │   │   ├── correlations/test_lmtd.py
@@ -1511,12 +2040,10 @@ arken-ai/
 │   │   │   ├── test_pipeline_e2e.py
 │   │   │   ├── test_sse_stream.py
 │   │   │   └── test_convergence_loop.py
+│   │   ├── fixtures/
+│   │   │   └── bd_ref_002.json          # PENDING (BD-REF-002 TODO)
 │   │   └── ai/
-│   │       └── test_step08_reproducibility.py  # 10× run, 9/10 same decision [8A]
-│   ├── scripts/
-│   │   ├── ingest_books.py        # one-time Supermemory book ingestion
-│   │   ├── seed_designs.py        # one-time: pre-seed 100–200 synthetic designs from textbook examples
-│   │   └── audit_past_designs.py  # quarterly: re-evaluate stored designs, flag > 20% deviation
+│   │       └── test_step08_reproducibility.py
 │   ├── pyproject.toml
 │   └── Dockerfile
 │
@@ -1528,28 +2055,44 @@ arken-ai/
     └── create_user.py    # Admin CLI for user creation [CEO-CP5]
 ```
 
-### 10.2 API Endpoints
+### 10.2 API Endpoints [UPDATED May 2026]
 
-| Method | Path | Response | Purpose |
-|--------|------|----------|---------|
-| GET | `/health` | JSON | Health check |
-| GET | `/api/v1/hx/tools` | JSON | Tool manifest for auto-discovery |
-| POST | `/api/v1/hx/design` | JSON | Trigger design, returns {session_id, stream_url, token} |
-| GET | `/api/v1/hx/design/{id}/stream` | SSE stream | Live 16-step events |
-| GET | `/api/v1/hx/design/{id}/status` | JSON | Poll fallback [CG2A] |
-| POST | `/api/v1/hx/design/{id}/respond` | JSON | Submit user response to ESCALATED step. Body: `{type: "accept"\|"override"\|"skip", values: dict\|null}`. Response 200/404/422. |
-| POST | `/api/v1/hx/rate` | SSE stream | Rate existing geometry |
-| POST | `/api/v1/hx/properties` | JSON | Fluid property lookup |
-| POST | `/api/v1/hx/geometry` | JSON | Suggest initial TEMA type + geometry (heuristics only) |
-| POST | `/api/v1/hx/optimize` | SSE stream | Autoresearch optimization |
+| Method   | Path                             | Response   | Purpose                                                                                                                         |
+| -------- | -------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| GET      | `/health`                        | JSON       | Health check                                                                                                                    |
+| GET      | `/api/v1/hx/tools`               | JSON       | Tool manifest for auto-discovery                                                                                                |
+| **POST** | **`/api/v1/hx/requirements`**    | **JSON**   | **[NEW] Validate design requirements; returns HMAC-signed token for /design**                                                   |
+| POST     | `/api/v1/hx/design`              | JSON       | Trigger design, returns {session_id, stream_url, token}. Optionally accepts `token` from /requirements.                         |
+| GET      | `/api/v1/hx/design/{id}/stream`  | SSE stream | Live 16-step events                                                                                                             |
+| GET      | `/api/v1/hx/design/{id}/status`  | JSON       | Poll fallback [CG2A]                                                                                                            |
+| POST     | `/api/v1/hx/design/{id}/respond` | JSON       | Submit user response to ESCALATED step. Body: `{type: "accept"\|"override"\|"skip", values: dict\|null}`. Response 200/404/422. |
+| POST     | `/api/v1/hx/rate`                | SSE stream | Rate existing geometry                                                                                                          |
+| POST     | `/api/v1/hx/properties`          | JSON       | Fluid property lookup                                                                                                           |
+| POST     | `/api/v1/hx/geometry`            | JSON       | Suggest initial TEMA type + geometry (heuristics only)                                                                          |
+| POST     | `/api/v1/hx/optimize`            | SSE stream | Autoresearch optimization — **POST-BETA**                                                                                       |
 
-### 10.3 Dependencies (pyproject.toml — hx_engine)
+**Two-step validation flow (`/requirements` → `/design`):**
+
+```
+POST /api/v1/hx/requirements
+  Body: {fluid_hot, fluid_cold, T_hot_in_C, T_hot_out_C, T_cold_in_C, ...}
+  Response: {valid: true, token: "<HMAC>", warnings: [...]}
+    OR     {valid: false, errors: [...]}
+
+POST /api/v1/hx/design
+  Body: {...same fields..., token: "<HMAC>"}  ← token is optional
+  Response: {session_id, stream_url, token}
+```
+
+The HMAC token is signed with `HX_ENGINE_SECRET`. If provided on `/design`, the engine skips re-validation. If omitted, validation runs again inline.
+
+### 10.3 Dependencies (pyproject.toml — hx_engine) [UPDATED May 2026]
 
 ```toml
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.27.0",
-    "anthropic>=0.40.0",
+    "anthropic>=0.40.0",          # claude-sonnet-4-6
     "pydantic>=2.6.0",
     "pydantic-settings>=2.1.0",
     "redis[hiredis]>=5.0.0",
@@ -1560,10 +2103,13 @@ dependencies = [
     "CoolProp>=6.6.0",
     "iapws>=1.5.0",
     "thermo>=0.3.0",
-    "ht>=0.2.0",                            # correlation cross-checks (Nusselt, friction factor)
-    "fluids>=1.0.0",                        # fluid dynamics utilities (pipe friction, fittings)
+    "ht>=0.2.0",                           # correlation cross-checks
+    "fluids>=1.0.0",                       # fluid dynamics utilities
     "supermemory>=3.27.0",
 ]
+# Note: petroleum_correlations.py uses no extra deps (pure Python math)
+# Note: shah_condensation.py uses no extra deps
+# Note: asme_external_pressure.py uses no extra deps (table lookup)
 ```
 
 ---
@@ -1574,26 +2120,26 @@ dependencies = [
 
 **Entire directories to delete** (after HX Engine is working end-to-end, Checkpoint 6 passed):
 
-| Directory/File | Reason |
-|---------------|--------|
-| `mcp_process_server/` | MCP server — removed entirely |
-| `mcp_calculation_engine_server/` | MCP wrapper — removed entirely |
-| `calculation_engine/` | Generic engine — replaced by `hx_engine/` |
-| `backend/app/core/mcp_client.py` | Replaced by `engine_client.py` |
-| `backend/app/services/tool_registry.py` | Tools auto-discovered from engine manifests |
-| `backend/app/models/tool_metadata.py` | Replaced by EngineToolDefinition |
-| `backend/app/core/policy_engine.py` | MCP-era policy gating — removed |
-| `backend/app/services/context_manager.py` | MCP-era context tracking — removed |
-| `backend/app/services/narrative_generator.py` | MCP-era narrative — removed |
+| Directory/File                                | Reason                                      |
+| --------------------------------------------- | ------------------------------------------- |
+| `mcp_process_server/`                         | MCP server — removed entirely               |
+| `mcp_calculation_engine_server/`              | MCP wrapper — removed entirely              |
+| `calculation_engine/`                         | Generic engine — replaced by `hx_engine/`   |
+| `backend/app/core/mcp_client.py`              | Replaced by `engine_client.py`              |
+| `backend/app/services/tool_registry.py`       | Tools auto-discovered from engine manifests |
+| `backend/app/models/tool_metadata.py`         | Replaced by EngineToolDefinition            |
+| `backend/app/core/policy_engine.py`           | MCP-era policy gating — removed             |
+| `backend/app/services/context_manager.py`     | MCP-era context tracking — removed          |
+| `backend/app/services/narrative_generator.py` | MCP-era narrative — removed                 |
 
 **Extract before deleting `calculation_engine/`:**
 
-| Source File | Lines | Destination | Notes |
-|-------------|-------|-------------|-------|
+| Source File                               | Lines | Destination                                      | Notes                                                                          |
+| ----------------------------------------- | ----- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
 | `core/equipment/simple/heat_exchanger.py` | 4,361 | `hx_engine/app/correlations/*.py` + `steps/*.py` | Split monolith into focused modules. Use line 1408+ as Bell-Delaware scaffold. |
-| `core/data/hx_reference.py` | ~500 | `hx_engine/app/data/*.py` | Split into tema_tables, fouling_factors, u_assumptions, tube_materials |
-| `core/equipment/simple/hx_ht_adapter.py` | 1,110 | `hx_engine/app/adapters/ht_adapter.py` | Remove EquipmentBase dependency, keep ht library wrappers |
-| HX-related tests | ~300 | `hx_engine/tests/` | Adapt imports to new module structure |
+| `core/data/hx_reference.py`               | ~500  | `hx_engine/app/data/*.py`                        | Split into tema_tables, fouling_factors, u_assumptions, tube_materials         |
+| `core/equipment/simple/hx_ht_adapter.py`  | 1,110 | `hx_engine/app/adapters/ht_adapter.py`           | Remove EquipmentBase dependency, keep ht library wrappers                      |
+| HX-related tests                          | ~300  | `hx_engine/tests/`                               | Adapt imports to new module structure                                          |
 
 **Blocking dependency:** `calculation_engine/` code must be extracted to `correlations/*.py` + `steps/*.py` BEFORE Steps 6–9 can be built (Week 3). Do not delete originals until Checkpoint 6 passed.
 
@@ -1623,20 +2169,20 @@ class EquipmentEngineRegistry:
 
 **Status as of 2026-03-26:** MCP is already gone. The backend is a clean FastAPI app (chat, auth, stream). The table below reflects what's already done vs what Week 6 must do.
 
-| File | Status | Week 6 Change |
-|------|--------|---------------|
-| `app/core/mcp_client.py` | ✅ Already deleted | — |
-| `app/services/tool_registry.py` | ✅ Already deleted | — |
-| `app/models/tool_metadata.py` | ✅ Already deleted | — |
-| `app/core/engine_client.py` | ✅ EXISTS — `HXEngineClient` with `start_design()`, `connect()`, `close()` | Add `rate()`, `get_fluid_properties()`, `poll_status()` |
-| `app/config.py` | ✅ Has `hx_engine_url`, `hx_engine_secret` | — |
-| `app/dependencies.py` | ✅ Has `get_engine_client()` + `close_engine_client()` | — |
-| `app/api/hx.py` | ✅ EXISTS — `POST /api/v1/hx/start` with `min_length=1` validation, returns relative `stream_url` | Do not change — called by tool executor only |
-| `app/services/orchestration_service.py` | ⚠️ Plain streaming — no tools yet. Comment says "tools coming" | **Upgrade to agentic loop** — register `hx_design` tool, add tool executor, return `tool_calls` |
-| `app/core/llm_provider.py` | ✅ Already has `create_message_stream(tools=...)` support | — |
-| `frontend/src/pages/ChatPage.jsx` | ✅ Clean slate — no HX wiring yet | Add `useHXStream`, scan `tool_executions` after chat response, call `connectStream` |
-| `frontend/src/components/chat/ChatPanel.jsx` | ✅ Clean — no HX props | Do NOT add `onHXStart` — HX wiring stays in ChatPage only |
-| `frontend/src/components/chat/ChatContainer.jsx` | ✅ Clean — no HX props | Do NOT add HX intent detection — LLM is the intent detector |
+| File                                             | Status                                                                                            | Week 6 Change                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `app/core/mcp_client.py`                         | ✅ Already deleted                                                                                | —                                                                                               |
+| `app/services/tool_registry.py`                  | ✅ Already deleted                                                                                | —                                                                                               |
+| `app/models/tool_metadata.py`                    | ✅ Already deleted                                                                                | —                                                                                               |
+| `app/core/engine_client.py`                      | ✅ EXISTS — `HXEngineClient` with `start_design()`, `connect()`, `close()`                        | Add `rate()`, `get_fluid_properties()`, `poll_status()`                                         |
+| `app/config.py`                                  | ✅ Has `hx_engine_url`, `hx_engine_secret`                                                        | —                                                                                               |
+| `app/dependencies.py`                            | ✅ Has `get_engine_client()` + `close_engine_client()`                                            | —                                                                                               |
+| `app/api/hx.py`                                  | ✅ EXISTS — `POST /api/v1/hx/start` with `min_length=1` validation, returns relative `stream_url` | Do not change — called by tool executor only                                                    |
+| `app/services/orchestration_service.py`          | ⚠️ Plain streaming — no tools yet. Comment says "tools coming"                                    | **Upgrade to agentic loop** — register `hx_design` tool, add tool executor, return `tool_calls` |
+| `app/core/llm_provider.py`                       | ✅ Already has `create_message_stream(tools=...)` support                                         | —                                                                                               |
+| `frontend/src/pages/ChatPage.jsx`                | ✅ Clean slate — no HX wiring yet                                                                 | Add `useHXStream`, scan `tool_executions` after chat response, call `connectStream`             |
+| `frontend/src/components/chat/ChatPanel.jsx`     | ✅ Clean — no HX props                                                                            | Do NOT add `onHXStart` — HX wiring stays in ChatPage only                                       |
+| `frontend/src/components/chat/ChatContainer.jsx` | ✅ Clean — no HX props                                                                            | Do NOT add HX intent detection — LLM is the intent detector                                     |
 
 ### 11.3 Auth System [CEO-CP5]
 
@@ -1738,16 +2284,19 @@ Claude is called ~5–10 times total, not 200 times.
 ### 13.2 Progress Bar
 
 Slim bar at top of HX Progress panel, visible only while a design is running:
+
 ```
 Step 3 / 16 — Computing fluid properties
 ████████▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒  18%  est. ~20s
 ```
+
 - Disappears on completion; DesignSummary card takes its place.
 - Time estimate: `(steps_remaining × avg_step_duration)`.
 
 ### 13.3 MessageBubble Style (Engineering Terminal Aesthetic)
 
 No rounded bubbles, no avatar icons. Precision terminal aesthetic:
+
 - **User message:** right-aligned block, right-border accent line in `amber-500`.
 - **AI response:** left-aligned block, left-border accent line in `blue-500`, starts with `▶ ARKEN —` label in muted text.
 - Data values inline (temperatures, flows, coefficients) rendered in JetBrains Mono with backtick-style highlight: `` `342 W/m²K` ``
@@ -1756,6 +2305,7 @@ No rounded bubbles, no avatar icons. Precision terminal aesthetic:
 ### 13.4 DesignSummary Card (Engineering Data Sheet)
 
 Appears in HX Progress panel after Step 16 completes, above StepCards:
+
 ```
 ┌─ DESIGN COMPLETE ─────────────────────────────────┐
 │ Confidence        ████████░░  78%                 │
@@ -1772,6 +2322,7 @@ Appears in HX Progress panel after Step 16 completes, above StepCards:
 │ [↓ Export PDF]               [Optimize for cost →]│
 └───────────────────────────────────────────────────┘
 ```
+
 - All numeric values in JetBrains Mono.
 - Confidence score as a filled bar (not a percentage circle).
 - **Confidence breakdown expandable [CEO Amendment]** — shows the 4 components.
@@ -1808,10 +2359,12 @@ ERROR       │ ✗ (cross)      │ bold + strike  │ error message + retry   
 ### 13.7 IterationBadge (Step 12)
 
 When Step 12 is RUNNING, the StepCard body shows:
+
 ```
   Convergence iteration  7 / 20
   ████████░░░░░░░░░░░░   ΔU = 2.3%  (target: < 1%)
 ```
+
 Badge animates each iteration. On converge: "✓ Converged in 9 iterations"
 
 ### 13.8 ParetoChart (Autoresearch)
@@ -1828,11 +2381,13 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 ### 13.9 Design System
 
 **Typography:**
+
 - UI text: Inter (sans-serif), sizes: 12/14/16/20px
 - Data values (temperatures, pressures, U, dP): JetBrains Mono (monospace) — signals precision
 - Font weights: 400 (body), 500 (labels), 700 (step names, completion)
 
 **Color Palette (engineering precision):**
+
 - Background: `#0f1117` (near-black)
 - Surface: `#1a1d27` (card background)
 - Border: `#2a2d3a`
@@ -1869,6 +2424,7 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 ### Week 1 — Foundation (Day-by-day order matters)
 
 **Day 1 — Contracts (build nothing else until these are right)**
+
 - `hx_engine/app/models/design_state.py` — DesignState + GeometrySpec with CG3A validators + default_factory for lists + `waiting_for_user: bool = False` field [CEO Review 3]
 - `hx_engine/app/models/step_result.py` — StepResult, AIDecision enum, AIModeEnum
 - `hx_engine/app/models/sse_events.py` — All 8 event types (not 9 — /btw deferred [CEO Review 3])
@@ -1876,12 +2432,14 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 - `frontend/src/types/hxEvents.ts` — Mirror of sse_events.py
 
 **Day 2 — Infrastructure**
+
 - `hx_engine/app/config.py` — pydantic-settings + `PIPELINE_ORPHAN_THRESHOLD_SECONDS = 120` [CEO Review 3]
 - `hx_engine/app/core/session_store.py` — Redis save/load DesignState + `heartbeat()` + `is_orphaned()` [CEO Review 3]
 - `hx_engine/app/core/sse_manager.py` — asyncio.Queue per session + refcount cleanup + escalation future management [CEO Review 3 §7.12]
 - `hx_engine/app/main.py` — FastAPI + /health
 
 **Day 3 — Base step infrastructure**
+
 - `hx_engine/app/steps/base.py` — BaseStep with 4-layer template + Decision 3A guard + AIModeEnum
 - `hx_engine/app/core/validation_rules.py` — Framework (rules populated Weeks 2–5)
 - `hx_engine/app/core/ai_engineer.py` — With retry logic [Decision CEO-3A] (stub AI in Week 1, real in Week 3)
@@ -1889,11 +2447,13 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 - `hx_engine/app/core/exceptions.py` — CalculationError(step_id, message, cause)
 
 **Day 4 — API endpoints**
+
 - `hx_engine/app/routers/design.py` — POST /design → {session_id, stream_url (relative path), token}; GET /design/{id}/status [CG2A] + orphan detection; POST /design/{id}/respond [CEO Review 3 §7.12]
 - `hx_engine/app/routers/stream.py` — GET /design/{id}/stream SSE [Decision 1B]
 - `hx_engine/app/core/pipeline_runner.py` — Skeleton (runs 0 steps, just scaffolding) + `wait_for_user()` impl [CEO Review 3 §7.12]
 
 **Day 5 — Backend + Frontend + Docker + nginx**
+
 - `backend/app/core/engine_client.py` — Stub (real in Week 6)
 - `backend/engines.yaml` — HX engine config
 - `backend/app/config.py` — Add hx_engine_url
@@ -1903,6 +2463,7 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 - `.env.example` — All secret placeholders [Decision CEO-2A]
 
 **Week 1 Tests (must pass before Week 2)**
+
 - `tests/unit/models/test_design_state.py` — 12 tests for CG3A validators (all geometry fields: valid boundary, below-min raises ValueError, above-max raises ValueError, None accepted) + default_factory isolation test
 - `tests/unit/test_step_protocol.py` — Protocol compliance check
 
@@ -1913,11 +2474,13 @@ Component not built in 7-week beta. "Optimize for cost" button disabled with too
 Build adapters FIRST (steps depend on them):
 
 > **Pre-requisite:** Week 1 contracts (DesignState, StepResult, SSE events) must be finalized and passing 12 CG3A validator tests before starting Week 2. Adapter tests depend on FluidProperties schema from Day 1.
+
 - `hx_engine/app/adapters/thermo_adapter.py` — Priority: iapws (water) → CoolProp → thermo. Returns FluidProperties in SI.
 - `hx_engine/app/adapters/units_adapter.py` — All unit conversions to SI.
 - `hx_engine/app/correlations/lmtd.py` — LMTD, F-factor (Bowman 1940 analytical)
 
 Then steps:
+
 - `step_01_requirements.py` — ai_mode=FULL. Parse raw_request → FluidProperties stubs.
 - `step_02_heat_duty.py` — ai_mode=CONDITIONAL. Q = m_dot × cp × ΔT. Validation: Q > 0, < 500 MW.
 - `step_03_fluid_props.py` — ai_mode=CONDITIONAL. ThermoAdapter for both fluids at mean T. Trigger AI if Pr outside [0.5, 1000].
@@ -1925,6 +2488,7 @@ Then steps:
 - `step_05_lmtd.py` — ai_mode=CONDITIONAL (F < 0.85). Hard fail F < 0.75 → retry with more passes.
 
 **Week 2 Tests**
+
 - `tests/unit/correlations/test_lmtd.py` — 6 cases incl. temperature cross detection, ΔT1=ΔT2 edge case
 - `tests/unit/steps/test_step_02.py` through `test_step_05.py` — execute() + validation + conditional trigger
 - `tests/unit/adapters/test_thermo_adapter.py` — Water at 25°C vs NIST
@@ -1935,11 +2499,13 @@ Then steps:
 ### Week 3 — Steps 6–9: Bell-Delaware Core (GATE WEEK)
 
 **DO THIS FIRST before Steps 6–9:**
+
 - `hx_engine/app/correlations/bell_delaware.py` — Implement in isolation. Wrap in try/except for CalculationError.
 - `tests/unit/correlations/test_bell_delaware.py` — Serth 5.1 benchmark test
 - **Note:** Use existing `calculation_engine/core/equipment/simple/heat_exchanger.py:1408` as scaffold — extend J-factor rigour, don't start from scratch.
 
 **Serth Example 5.1 reference geometry (must pass < 5% deviation):**
+
 ```
 shell_diameter=0.5906m, tube_od=0.01905m, tube_id=0.01575m
 tube_length=4.877m, baffle_spacing=0.127m, pitch_ratio=1.333
@@ -1953,6 +2519,7 @@ Expected: J_b, J_c, J_l each within 10% of Serth values
 
 **Bell-Delaware vs Kern auto-conservative rule [Decision 3R-7B, resolved CEO Review 3]:**
 Add to `hx_engine/app/core/validation_rules.py` (used in Step 8 Layer 2):
+
 ```python
 def check_bd_kern_divergence(bd_h: float, kern_h: float) -> AutoCorrectResult | None:
     """If BD/Kern divergence > 20%, return lower value as auto-correction. Layer 2 only."""
@@ -1964,16 +2531,19 @@ def check_bd_kern_divergence(bd_h: float, kern_h: float) -> AutoCorrectResult | 
         )
     return None
 ```
+
 Step 8 AI prompt receives both values + the override reason. AI annotates reasoning (which method likely under-predicts and why) — does not override the conservative choice.
 
 Then:
+
 - `hx_engine/app/correlations/gnielinski.py` — tube_side_h (turbulent, laminar, transition blend)
-- `step_06_initial_u.py` — asyncio.gather books + past [9A] via _safe_memory_call [CEO-4A]
+- `step_06_initial_u.py` — asyncio.gather books + past [9A] via \_safe_memory_call [CEO-4A]
 - `step_07_tube_side_h.py` — ai_mode=CONDITIONAL, convergence-loop aware
 - `step_08_shell_side_h.py` — ai_mode=FULL, calls bell_delaware.shell_side_h()
-- `step_09_overall_u.py` — ai_mode=FULL, asyncio.gather books + past [9A] via _safe_memory_call. **Calibration correction point [Decision OH-4A]:** After computing U_calculated, query `calibration_records` for CalibrationKey = (fluid_pair, tema_type, shell_diameter_class). If ≥ 5 comparisons exist, apply correction: `U_corrected = U_calculated × (1 - avg_delta_U_pct/100)`. Pass both U_calculated and U_corrected to AI review. AI reasoning shows: "Calibration factor applied: −8.2% from 7 HTRI comparisons (crude_oil/water, BEM, medium)." If < 5 comparisons, proceed without correction and note in AI reasoning.
+- `step_09_overall_u.py` — ai_mode=FULL, asyncio.gather books + past [9A] via \_safe_memory_call. **Calibration correction point [Decision OH-4A]:** After computing U_calculated, query `calibration_records` for CalibrationKey = (fluid_pair, tema_type, shell_diameter_class). If ≥ 5 comparisons exist, apply correction: `U_corrected = U_calculated × (1 - avg_delta_U_pct/100)`. Pass both U_calculated and U_corrected to AI review. AI reasoning shows: "Calibration factor applied: −8.2% from 7 HTRI comparisons (crude_oil/water, BEM, medium)." If < 5 comparisons, proceed without correction and note in AI reasoning.
 
 **Week 3 Tests**
+
 - `tests/ai/test_step08_reproducibility.py` [Decision 8A] — 10× identical Step 8 inputs, assert ≥ 9/10 same decision. Tagged `@pytest.mark.nightly`.
 - `tests/unit/correlations/test_gnielinski.py` — 5 cases incl. turbulent water vs Dittus-Boelter crosscheck
 - `tests/unit/steps/test_step_07.py` — verify AI skipped when in_convergence_loop=True
@@ -1987,6 +2557,7 @@ Then:
 - `step_12_convergence.py` — CG1A try/finally. Runs Steps 7–11 × max 20 iterations. Emits `iteration_progress` SSE. Convergence criterion: ΔU < 1%.
 
 **Week 4 Tests**
+
 - `tests/integration/test_convergence_loop.py`:
   1. Normal convergence → verify in_convergence_loop=False after
   2. Exception in iteration 5 → verify in_convergence_loop=False (finally works)
@@ -2008,18 +2579,21 @@ Then:
 > **Trust-Calibration-First insertion [Decision OH-1A]:** The HTRI Comparison workflow (previously deferred to post-beta) is built in Week 5, immediately after the pipeline is complete. Recruit 1–2 beta users with HTRI access before this week. Their comparison runs validate ARKEN's accuracy mid-build, not after launch.
 
 Pre-build:
+
 - `hx_engine/app/correlations/connors.py` — connors_criterion() for Step 13
 - `hx_engine/app/correlations/turton_cost.py` — Turton (2013) + CEPCI correction
 - `hx_engine/app/data/cost_indices.py` — CEPCI_INDEX = {"value": 816.0, "year": 2026, "last_updated": "2026-03-01"} [CEO Amendment]
 
 Then steps:
+
 - `step_13_vibration.py` — ai_mode=FULL (safety). 5 mechanisms: Connors, vortex shedding, acoustic resonance, turbulent buffeting, jet impingement. Sets vibration_safe.
 - `step_14_mechanical.py` — ASME VIII Div. 1 min wall thickness. ai_mode=CONDITIONAL (P > 30 bar).
 - `step_15_cost.py` — Turton + CEPCI. ai_mode=CONDITIONAL. Check CEPCI last_updated, warn if > 90 days old.
-- `step_16_final_validation.py` — ai_mode=FULL + asyncio.gather all 3 Supermemory sources via _safe_memory_call. CONFIDENCE_WEIGHTS constant (equal 0.25 each) [CEO-7A]. Save to past_designs if score ≥ 0.75.
+- `step_16_final_validation.py` — ai_mode=FULL + asyncio.gather all 3 Supermemory sources via \_safe_memory_call. CONFIDENCE_WEIGHTS constant (equal 0.25 each) [CEO-7A]. Save to past_designs if score ≥ 0.75.
 
 **HTRI Comparison Workflow (moved from post-beta — [Decision OH-1A]):**
 **MongoDB indexes (add at FastAPI lifespan startup, before any endpoint serves traffic) [CEO Review 3]:**
+
 ```python
 # hx_engine/app/main.py — lifespan startup
 await db.calibration_records.create_index(
@@ -2040,6 +2614,7 @@ await db.users.create_index([("email", 1)], unique=True)
   FastAPI returns 422 with field-level errors on invalid values. No bad data reaches the comparator.
 - `hx_engine/app/services/htri_parser.py` — **CSV only in Week 5** [Decision CEO Review 3 — Open Q3]. Use `csv.reader()` (stdlib, no extra deps). Extract U_overall, dP_shell, dP_tube by column name (use mapping table from pre-Week 5 sample validation). 2MB file size enforced at endpoint before parser is called. Build after manual entry path is working. `.xrf` XML parser deferred to post-beta; when built, use `defusedxml` library (XXE mitigation).
 - `hx_engine/app/services/htri_comparator.py` — Compute deviations (ARKEN vs HTRI): `delta_U = (U_arken - U_htri) / U_htri × 100%`. Store per CalibrationKey in `calibration_records` MongoDB collection [OH-7A]. Do not apply correction factor until ≥ 5 comparisons for that key. On successful store: update in-memory calibration cache [Critical Gap A — startup cache pattern, see below]. **Deviation sanity check before MongoDB write [Critical Gap B — second layer]:**
+
   ```python
   MAX_ALLOWED_DEVIATION_PCT = 50.0  # >50% means geometry mismatch or bug, not a calibration signal
 
@@ -2051,8 +2626,11 @@ await db.users.create_index([("email", 1)], unique=True)
           detail=f"Deviation {delta_U_pct:.1f}% exceeds 50% — verify inputs or contact support"
       )
   ```
+
   Pydantic catches format/range errors at the endpoint (layer 1). This check catches semantic errors inside the comparator — both U values in-range individually but deviation implausible, e.g. geometry inputs don't match the HTRI case (layer 2). Neither record reaches MongoDB.
+
 - `hx_engine/app/data/calibration.py` — Calibration cache module. Loaded from MongoDB at HX Engine startup. Step 9 reads from this in-memory dict — MongoDB is never in the critical path during a live design run [Critical Gap A]:
+
   ```python
   # calibration.py — loaded once at startup, refreshed on each /compare submission
   CURRENT_MODEL_VERSION = "1.0"  # bump when Bell-Delaware implementation changes significantly
@@ -2079,9 +2657,11 @@ await db.users.create_index([("email", 1)], unique=True)
       Only called for non-archived records — bad data rejected before this point."""
       _cache[key] = record
   ```
+
   **Failure behaviour:** If MongoDB is down at startup, `_cache` stays empty → Step 9 proceeds without correction (logs WARNING). MongoDB going down mid-pipeline has zero impact on running designs.
 
   **CalibrationRecord schema (MongoDB document):**
+
   ```python
   # CalibrationKey — defined in hx_engine/app/data/calibration.py [Decision OH-6A, Eng Review]
   class CalibrationKey(BaseModel):
@@ -2116,13 +2696,16 @@ await db.users.create_index([("email", 1)], unique=True)
       archived_reason:   str | None = None
       archived_at:       datetime | None = None
   ```
+
   Hard deletion is never used on calibration records. Soft archive (`archived: true`) is set via an admin endpoint when process conditions change or a Bell-Delaware bug fix makes old comparisons unrepresentative. TTL index (30 days) applied only to temporary design session documents, not to calibration records [Decision OH-9A].
+
 - Frontend: HTRI comparison form on DesignSummary card (enabled only after Step 16 completes). Two input modes:
   - **Primary — Manual entry:** `U_htri`, `dP_shell_htri`, `dP_tube_htri` input fields. No file handling. Build this first. Fastest path to first calibration run.
   - **Secondary — File upload:** `.xrf` (XML) or CSV, 2MB hard limit (`File(..., max_size=2_000_000)`). Error message: "Export a single exchanger only — max 2MB." Build after manual entry is working.
   - Both modes show the same deviation table output: U, dP_shell, dP_tube, geometry fields side-by-side.
 
 **Week 5 Tests**
+
 - `tests/unit/correlations/test_connors.py` — safe, unsafe, near-threshold, missing fields
 - `tests/unit/steps/test_step_13.py` — all 5 mechanisms; vibration_safe=False if any fails
 - `tests/integration/test_pipeline_e2e.py` (first full run with mock AI):
@@ -2166,12 +2749,14 @@ useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
 ```
 
 **What this means for the codebase:**
+
 - `ChatPage.jsx` owns HX state (`useHXStream`). After each chat response, it scans `tool_executions` for `hx_design` and calls `connectStream`. No `onHXStart` prop, no parallel fetch, no frontend intent detection.
 - `ChatPanel` / `ChatContainer` — no HX awareness at all. They only send chat messages and render responses.
 - `backend/app/api/hx.py` — `POST /api/v1/hx/start` stays but is called only by the tool executor inside `orchestration_service.py`, never by the frontend.
 - `stream_url` returned as a relative path (`/api/v1/hx/design/{id}/stream`). `useHXStream` prepends `window.location.origin`; nginx routes to HX Engine.
 
 **Auth (CEO-CP5 — add first, everything else depends on it):**
+
 - `backend/app/models/user.py` — User Pydantic model: id, email, hashed_password, org_id (nullable), created_at
 - `backend/app/routers/auth.py` — POST /auth/login (email + password → JWT), GET /auth/me
 - `backend/app/core/auth.py` — JWT issue/verify, `get_current_user` FastAPI dependency
@@ -2182,6 +2767,7 @@ useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
 - All backend endpoints except `/health` and `POST /auth/login` require `Authorization: Bearer <token>`.
 
 **Backend:**
+
 - `backend/app/core/engine_client.py` — Full implementation (was stub). HXEngineClient with `start_design()`, `rate()`, `optimize()`, `get_fluid_properties()`, `poll_status()`.
 - `backend/app/api/hx.py` — `POST /api/v1/hx/start` endpoint. Called by the tool executor in `orchestration_service.py`. Returns `{ session_id, stream_url (relative path) }`. `raw_request` validated `min_length=1, max_length=5000`. Frontend never calls this directly.
 - `backend/app/services/orchestration_service.py` — Upgraded from plain streaming to agentic loop with tool support. Registers `hx_design` (and later `hx_rate`, `hx_get_fluid_properties`) as Claude tools. Tool executor calls `engine_client.start_design()` when Claude invokes `hx_design`. Returns `tool_calls` list in the process_message result so `chat.py` can populate `tool_executions` in the response.
@@ -2189,6 +2775,7 @@ useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
 - HX Engine webhook handler: `POST /internal/design-complete` → store result in MongoDB.
 
 **Frontend:**
+
 - `frontend/src/pages/ChatPage.jsx` — Owns `useHXStream`. After every `handleSendMessage` response, checks `response.tool_executions` for `tool_name === "hx_design"`. If found, calls `connectStream(execution.result.stream_url)`. Passes `error` from `useHXStream` to `HXPanel`. No `onHXStart` prop anywhere.
 - `frontend/src/hooks/useHXStream.js` — Full SSE + 2s poll fallback [CG2A]. 8 event types. Exposes `error` state for SSE connection failures.
 - `frontend/src/components/hx/HXPanel.jsx` — Accepts `error` prop; shows red banner when set.
@@ -2197,10 +2784,12 @@ useHXStream → EventSource → nginx → HX Engine → HXPanel streams live
 - `frontend/src/components/hx/DesignSummary.jsx` — With confidence_breakdown expandable.
 
 **HX Engine — token security [Decision 3R-6A + CEO-5A]:**
+
 - POST /design generates short-lived JWT (1hr, HX_ENGINE_SECRET). Payload includes user_id + session_id.
 - GET /stream validates JWT: signature, expiry, user_id, session_id match. Unauthorized → 401.
 
 **Week 6 Tests**
+
 - `backend/tests/test_orchestration.py` [Decision 7A] — 5 golden cases (VCR cassettes for determinism):
   1. "Design crude oil cooler" → hx_get_fluid_properties → hx_design → tool_executions contains stream_url
   2. "Rate this exchanger [+geometry]" → hx_rate
@@ -2392,7 +2981,8 @@ def mock_supermemory():
 - **Bell-Delaware auto-conservative rule [CEO Review 3 — Decision 3R-7B resolved]:** test `check_bd_kern_divergence()` in isolation: (a) 10% divergence → None returned (no correction); (b) 25% divergence → AutoCorrectResult with `use_value = min(bd_h, kern_h)`; (c) Step 8 integration test: inject mock Kern result 30% below BD result → verify `h_o` in DesignState uses the lower Kern value + reason logged.
 
 **Contingency path [Decision CEO-R-1A]:** If Serth 5.1 U misses ±5% after 3 days of iteration:
-1. Activate Kern fallback — use simplified Kern correlation (Kern, *Process Heat Transfer*, 1950) for shell-side h in Step 8. Document the deviation in `bell_delaware.py` with a `# KERN_FALLBACK_ACTIVE` comment.
+
+1. Activate Kern fallback — use simplified Kern correlation (Kern, _Process Heat Transfer_, 1950) for shell-side h in Step 8. Document the deviation in `bell_delaware.py` with a `# KERN_FALLBACK_ACTIVE` comment.
 2. Proceed to Weeks 4-5 with Kern fallback active. Continue debugging Bell-Delaware in parallel as a background track.
 3. Escalation: if Bell-Delaware remains unresolved after 3 days, ring-fence a week-long deep dive during Weeks 4-5 (does not block frontend/HTRI comparison work on separate tracks).
 4. Do not proceed past Week 6 with Kern fallback active, as post-beta autoresearch will require accurate shell-side h.
@@ -2445,6 +3035,7 @@ def mock_supermemory():
 - AOF file written in docker volume (verify redis-data volume exists after restart)
 
 **Orphan detection [CEO Review 3 + Eng Review]:**
+
 - `is_orphaned()` — heartbeat < 120s ago → False
 - `is_orphaned()` — heartbeat > 120s ago, `waiting_for_user=False` → True (normal orphan case)
 - `is_orphaned()` — heartbeat > 200s ago, `waiting_for_user=True` → **False** (ESCALATED pipeline must NOT be marked dead; this is the critical regression guard)
@@ -2484,21 +3075,27 @@ def mock_supermemory():
 ## 16. Benchmark Validation Points (Hard Gates)
 
 ### Gate 1 — Week 3 Day 1: Serth Example 5.1 (Bell-Delaware)
+
 Do not proceed to Steps 6–9 until all pass:
+
 - h_shell within 5% of textbook answer
 - J_b, J_c, J_l each within 10%
 - dP_shell within 10%
 
 ### Gate 2 — Week 3: Gnielinski
+
 - Turbulent water (Re=50000, Pr=7): Nu within 2% of analytical
 
 ### Gate 3 — Week 2: LMTD
+
 - Counter-current equal ΔT: LMTD = ΔT (exact)
 - Temperature cross: F < 1.0 and detectable
 
 ### Gate 4 — Week 5 End-to-End Envelope Check (crude oil cooling)
+
 Input: 50 kg/s crude oil, 150°C → 90°C, cooling water at 30°C
 Expected envelope:
+
 - Q ≈ 6–7 MW
 - shell_diameter: 0.6–1.2 m
 - U_overall: 200–400 W/m²K
@@ -2507,28 +3104,28 @@ Expected envelope:
 
 ### Integration Checkpoints
 
-| Checkpoint | When | Pass Criteria |
-|---|---|---|
-| 1 | End Week 1 | All 3 services start, /health 200, docker-compose clean, 12 validator tests pass |
-| 2 | End Week 2 | Steps 1–5 run with mock AI; water properties within 1% of NIST |
-| 3 (GATE) | End Week 3 | Serth 5.1 within 5%; Step 8 reproducibility ≥ 9/10 |
-| 4 | End Week 4 | Convergence loop: standard case converges ≤ 15 iterations; CG1A try/finally verified |
-| 5 | End Week 5 | All 16 steps complete; crude oil design envelope check passes; all 7 SSE types emitted |
-| 6 (SYSTEM) | End Week 6 | Frontend types → Backend Loop 1 → HX Engine 16 steps → live StepCards; 5 orchestration tests pass |
-| 7 (POST-BETA) | End Week 7 | **Deferred.** Autoresearch / Loop 3. See §20 P2. |
+| Checkpoint    | When       | Pass Criteria                                                                                     |
+| ------------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| 1             | End Week 1 | All 3 services start, /health 200, docker-compose clean, 12 validator tests pass                  |
+| 2             | End Week 2 | Steps 1–5 run with mock AI; water properties within 1% of NIST                                    |
+| 3 (GATE)      | End Week 3 | Serth 5.1 within 5%; Step 8 reproducibility ≥ 9/10                                                |
+| 4             | End Week 4 | Convergence loop: standard case converges ≤ 15 iterations; CG1A try/finally verified              |
+| 5             | End Week 5 | All 16 steps complete; crude oil design envelope check passes; all 7 SSE types emitted            |
+| 6 (SYSTEM)    | End Week 6 | Frontend types → Backend Loop 1 → HX Engine 16 steps → live StepCards; 5 orchestration tests pass |
+| 7 (POST-BETA) | End Week 7 | **Deferred.** Autoresearch / Loop 3. See §20 P2.                                                  |
 
 ### Benchmark Targets Summary
 
-| Benchmark | Target | Measured Against |
-|-----------|--------|-----------------|
-| Serth Example 5.1 U value | Within 5% | Published textbook |
-| Serth Example 5.1 dP (both sides) | Within 10% | Published textbook |
-| All 5 J-factors vs Serth | Within 10% each | Published textbook |
-| Design from scratch convergence | < 20 iterations | Iteration count |
-| Full design wall time (with AI) | < 30 seconds | Wall clock |
-| Step event latency | < 500ms per event | Frontend timestamp delta |
-| Optimization (200 experiments) | < 30 seconds | Wall clock |
-| AI review reproducibility | > 90% same decision | 10 identical runs |
+| Benchmark                         | Target              | Measured Against         |
+| --------------------------------- | ------------------- | ------------------------ |
+| Serth Example 5.1 U value         | Within 5%           | Published textbook       |
+| Serth Example 5.1 dP (both sides) | Within 10%          | Published textbook       |
+| All 5 J-factors vs Serth          | Within 10% each     | Published textbook       |
+| Design from scratch convergence   | < 20 iterations     | Iteration count          |
+| Full design wall time (with AI)   | < 30 seconds        | Wall clock               |
+| Step event latency                | < 500ms per event   | Frontend timestamp delta |
+| Optimization (200 experiments)    | < 30 seconds        | Wall clock               |
+| AI review reproducibility         | > 90% same decision | 10 identical runs        |
 
 ---
 
@@ -2558,6 +3155,7 @@ STEP_8_CHECKS = {
 
 **Problem:** Open-literature correlations may have systematic bias.
 **Solution:**
+
 1. **Cross-method:** Run Kern parallel with Bell-Delaware. Flag if deviation > 20%.
 2. **Calibration factors:** Run 20–50 textbook examples, compute bias per correlation. Store in `calibration.py`.
 3. **HTRI comparison:** Let users upload HTRI results. Accumulate correction factors per fluid pair. (Post-beta — see Section 20.)
@@ -2571,6 +3169,7 @@ STEP_8_CHECKS = {
 
 **Problem:** Incorrect designs pollute Supermemory.
 **Solution:**
+
 1. Only store designs with confidence ≥ 0.75
 2. Store confidence as metadata, AI weights results accordingly
 3. Quarterly audit: re-evaluate old designs, flag > 20% deviation
@@ -2591,70 +3190,70 @@ STEP_8_CHECKS = {
 
 ### 18.1 API and Infrastructure Failures
 
-| Failure | Behavior | User Impact |
-|---------|----------|-------------|
-| Anthropic API down | Retry 2× [CEO-3A], then WARN+proceed (ai_called=False) | Design completes but with reduced confidence. Flag: "AI review unavailable, manual review recommended." |
-| Supermemory API down | _safe_memory_call timeout 5s [CEO-4A], returns empty | AI reviewer falls back to training knowledge. Flag: "Reference data unavailable." |
-| HX Engine crashes mid-design | Backend receives HTTP error | "Design calculation failed at Step N. Please retry." |
-| Step 12 doesn't converge | After 20 iterations, return best result | Flag: "Did not fully converge. Best result shown. Consider different TEMA type." |
-| User disconnects during design | Design continues, result stored | User can retrieve result from conversation history on reconnect |
-| Redis down mid-pipeline | Catch ConnectionError, emit warning SSE, continue in memory | "Download your results now — session may not be recoverable" |
-| Internal webhook fails 3× | CRITICAL log, result in Redis for 24h | Retrievable via GET /status |
-| MongoDB down at startup | Exponential backoff 1s/2s/4s, then CRITICAL + re-raise → container restart via healthcheck | Container restart (5 services, calibration cache empty but safe — Step 9 proceeds without correction) |
-| MongoDB down during session | /auth/login + all protected endpoints return 503. Running pipelines continue (Redis only). Calibration cache (loaded at startup) still works from memory. | 503 on new logins; active sessions unaffected. |
-| Pipeline orphan (HX Engine OOM mid-pipeline) | GET /status after 120s of no heartbeat + `waiting_for_user=False` → returns `{"status": "failed"}` | "Pipeline timeout — please retry." |
+| Failure                                      | Behavior                                                                                                                                                  | User Impact                                                                                             |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Anthropic API down                           | Retry 2× [CEO-3A], then WARN+proceed (ai_called=False)                                                                                                    | Design completes but with reduced confidence. Flag: "AI review unavailable, manual review recommended." |
+| Supermemory API down                         | \_safe_memory_call timeout 5s [CEO-4A], returns empty                                                                                                     | AI reviewer falls back to training knowledge. Flag: "Reference data unavailable."                       |
+| HX Engine crashes mid-design                 | Backend receives HTTP error                                                                                                                               | "Design calculation failed at Step N. Please retry."                                                    |
+| Step 12 doesn't converge                     | After 20 iterations, return best result                                                                                                                   | Flag: "Did not fully converge. Best result shown. Consider different TEMA type."                        |
+| User disconnects during design               | Design continues, result stored                                                                                                                           | User can retrieve result from conversation history on reconnect                                         |
+| Redis down mid-pipeline                      | Catch ConnectionError, emit warning SSE, continue in memory                                                                                               | "Download your results now — session may not be recoverable"                                            |
+| Internal webhook fails 3×                    | CRITICAL log, result in Redis for 24h                                                                                                                     | Retrievable via GET /status                                                                             |
+| MongoDB down at startup                      | Exponential backoff 1s/2s/4s, then CRITICAL + re-raise → container restart via healthcheck                                                                | Container restart (5 services, calibration cache empty but safe — Step 9 proceeds without correction)   |
+| MongoDB down during session                  | /auth/login + all protected endpoints return 503. Running pipelines continue (Redis only). Calibration cache (loaded at startup) still works from memory. | 503 on new logins; active sessions unaffected.                                                          |
+| Pipeline orphan (HX Engine OOM mid-pipeline) | GET /status after 120s of no heartbeat + `waiting_for_user=False` → returns `{"status": "failed"}`                                                        | "Pipeline timeout — please retry."                                                                      |
 
 ### 18.2 Input Edge Cases
 
-| Input | Handling |
-|-------|----------|
-| Same fluid both sides (water/water) | Valid — common in HVAC. Process normally. |
-| Very high viscosity (> 100 mPa·s) | Laminar flow likely. Warn about poor heat transfer. Consider enhanced tubes. |
-| Very low flow rate (< 0.1 kg/s) | Tiny exchanger. May not be practical as shell-and-tube. Suggest plate HX. |
-| Very high flow rate (> 500 kg/s) | Multiple shells likely needed. Flag in Step 6. |
-| Temperatures in different units | Detect and convert. Always work in SI internally. |
-| Negative gauge pressure (vacuum) | External pressure on tubes. Different ASME formula. |
-| Supercritical fluid | Properties change dramatically. CoolProp handles but warn about uncertainty. |
-| User specifies impossible conditions (T_cold_out > T_hot_in) | Reject at Step 2 with clear explanation. |
-| User specifies 0 flow rate on one side | Reject at Step 1 — cannot design without flow on both sides. |
+| Input                                                        | Handling                                                                     |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| Same fluid both sides (water/water)                          | Valid — common in HVAC. Process normally.                                    |
+| Very high viscosity (> 100 mPa·s)                            | Laminar flow likely. Warn about poor heat transfer. Consider enhanced tubes. |
+| Very low flow rate (< 0.1 kg/s)                              | Tiny exchanger. May not be practical as shell-and-tube. Suggest plate HX.    |
+| Very high flow rate (> 500 kg/s)                             | Multiple shells likely needed. Flag in Step 6.                               |
+| Temperatures in different units                              | Detect and convert. Always work in SI internally.                            |
+| Negative gauge pressure (vacuum)                             | External pressure on tubes. Different ASME formula.                          |
+| Supercritical fluid                                          | Properties change dramatically. CoolProp handles but warn about uncertainty. |
+| User specifies impossible conditions (T_cold_out > T_hot_in) | Reject at Step 2 with clear explanation.                                     |
+| User specifies 0 flow rate on one side                       | Reject at Step 1 — cannot design without flow on both sides.                 |
 
 ### 18.3 Calculation Edge Cases
 
-| Case | Handling |
-|------|----------|
-| LMTD formula ΔT1 = ΔT2 | Use arithmetic mean (L'Hôpital's rule). Both code and tests must handle this. |
-| F-factor formula R = 1.0 | Special case — simplified formula. Must detect and use alternate expression. |
-| Re exactly 2300 or 10000 | Transition boundary. Use blending function, not if/else discontinuity. |
-| Tube count not in TEMA table | Interpolate between nearest entries. Never extrapolate beyond table range. |
-| Zero fouling factor | Valid (clean service). R_f = 0 means no fouling resistance in series sum. |
-| Wall conductivity very high (copper: 385 W/mK) | Wall resistance ≈ 0%. Valid but unusual for process HX. |
-| Shell diameter < smallest in tube count table | Design is too small for standard S&T. Suggest hairpin or plate. |
-| Degenerate geometry in autoresearch (n_tubes=0) | CalculationError caught, experiment skipped [CalculationError wrapper] |
+| Case                                            | Handling                                                                      |
+| ----------------------------------------------- | ----------------------------------------------------------------------------- |
+| LMTD formula ΔT1 = ΔT2                          | Use arithmetic mean (L'Hôpital's rule). Both code and tests must handle this. |
+| F-factor formula R = 1.0                        | Special case — simplified formula. Must detect and use alternate expression.  |
+| Re exactly 2300 or 10000                        | Transition boundary. Use blending function, not if/else discontinuity.        |
+| Tube count not in TEMA table                    | Interpolate between nearest entries. Never extrapolate beyond table range.    |
+| Zero fouling factor                             | Valid (clean service). R_f = 0 means no fouling resistance in series sum.     |
+| Wall conductivity very high (copper: 385 W/mK)  | Wall resistance ≈ 0%. Valid but unusual for process HX.                       |
+| Shell diameter < smallest in tube count table   | Design is too small for standard S&T. Suggest hairpin or plate.               |
+| Degenerate geometry in autoresearch (n_tubes=0) | CalculationError caught, experiment skipped [CalculationError wrapper]        |
 
 ### 18.4 AI Review Edge Cases
 
-| Case | Handling |
-|------|----------|
-| AI returns invalid JSON | Retry 2× [CEO-3A]. If still invalid, proceed with hard rules only. Log error. |
-| AI returns decision not in {proceed, correct, warn, escalate} | Treat as "proceed" with warning logged. |
-| AI suggests correction that violates hard rules | Reject correction. Proceed without it. |
-| AI takes > 10 seconds to respond | Timeout → retry [CEO-3A]. After 3 attempts, proceed with hard rules. |
-| AI suggests correcting a parameter that doesn't exist | Ignore correction. Log error. Proceed. |
-| AI confidence < 0.70 | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`. |
-| User doesn't respond to escalation | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
-| Layer 2 still fails after user response (re-escalation) | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts. |
+| Case                                                          | Handling                                                                                                                                                                                                                           |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AI returns invalid JSON                                       | Retry 2× [CEO-3A]. If still invalid, proceed with hard rules only. Log error.                                                                                                                                                      |
+| AI returns decision not in {proceed, correct, warn, escalate} | Treat as "proceed" with warning logged.                                                                                                                                                                                            |
+| AI suggests correction that violates hard rules               | Reject correction. Proceed without it.                                                                                                                                                                                             |
+| AI takes > 10 seconds to respond                              | Timeout → retry [CEO-3A]. After 3 attempts, proceed with hard rules.                                                                                                                                                               |
+| AI suggests correcting a parameter that doesn't exist         | Ignore correction. Log error. Proceed.                                                                                                                                                                                             |
+| AI confidence < 0.70                                          | Confidence gate triggered [Decision ENG-1B]. Override decision to `escalate` regardless of what AI returned. Log `confidence_gate_triggered=True`.                                                                                 |
+| User doesn't respond to escalation                            | Pipeline waits indefinitely (`waiting_for_user=True`). No timeout — engineering decisions require deliberate input. Session excluded from orphan detection while waiting. Resume when user submits via POST /respond. [Eng Review] |
+| Layer 2 still fails after user response (re-escalation)       | Re-escalate to user with same observation + recommendation + options (up to 2 more times). After 3 total user attempts, emit `step_error` and raise `StepHardFailure` — pipeline halts.                                            |
 
 ### 18.5 Autoresearch Edge Cases
 
-| Case | Handling |
-|------|----------|
-| All 200 experiments worse than base | Return base design as optimal. |
-| Pareto front has > 20 members | Cluster by similarity, return representative 5–10. |
+| Case                                                       | Handling                                                              |
+| ---------------------------------------------------------- | --------------------------------------------------------------------- |
+| All 200 experiments worse than base                        | Return base design as optimal.                                        |
+| Pareto front has > 20 members                              | Cluster by similarity, return representative 5–10.                    |
 | Optimization violates constraint not checked in Steps 7–11 | Run Step 13 (vibration) on all Pareto front members before returning. |
-| Claude proposes geometry outside TEMA standard sizes | Reject proposal. Ask Claude to use standard sizes only. |
-| Claude proposes same geometry it already tried | Skip duplicate. Count against budget. |
-| User cancels mid-optimization | Return current Pareto front (partial results). |
-| Claude returns malformed proposals | Fallback to _random_perturbations(best, n=10) [Eng Decision 4]. |
+| Claude proposes geometry outside TEMA standard sizes       | Reject proposal. Ask Claude to use standard sizes only.               |
+| Claude proposes same geometry it already tried             | Skip duplicate. Count against budget.                                 |
+| User cancels mid-optimization                              | Return current Pareto front (partial results).                        |
+| Claude returns malformed proposals                         | Fallback to \_random_perturbations(best, n=10) [Eng Decision 4].      |
 
 ---
 
@@ -2670,6 +3269,7 @@ STEP_8_CHECKS = {
 ### 19.2 Engine Contract
 
 Every engine must implement:
+
 ```
 GET  /health              → {"status": "ok", "engine": "...", "version": "..."}
 GET  /api/v1/{prefix}/tools → {"engine_id": "...", "tools": [...]}
@@ -2691,18 +3291,21 @@ Items flagged during CEO review, eng review, and development planning that are *
 ### P1 — Before Public Launch
 
 #### JWT httpOnly Cookie Migration
+
 **What:** Migrate frontend JWT storage from `localStorage` to an `httpOnly` cookie set by the backend on `POST /auth/login`. The browser never reads the cookie via JavaScript — it's sent automatically on each request.
 **Why:** `localStorage` is readable by any JavaScript on the page, including third-party scripts and XSS payloads. An `httpOnly` cookie is immune to XSS token theft. For beta with 5 trusted engineers this is acceptable risk; for public launch it is not.
 **Depends on:** Week 6 JWT auth complete.
 **Context:** Backend: `response.set_cookie('access_token', token, httponly=True, secure=True, samesite='lax')`. Frontend: remove `Authorization: Bearer` header injection, rely on cookie. All backend endpoints check cookie OR header during transition period.
 
 #### Regulatory / Liability Stance
+
 **What:** One-page internal document clarifying ARKEN's position on liability when designs are used in fabricated equipment. Determines disclaimer language and product positioning.
 **Why:** Process engineers stamp and seal drawings. If ARKEN-designed equipment fails in service, the company needs a clear, intentional position. Decision needed before first paying customer.
 **Depends on:** Legal counsel.
 **Context:** If "decision support," results labeled "FOR REVIEW ONLY — verify with licensed engineer" and confidence score is a suggestion. If "fabrication-ready," higher accuracy bar with different exposure. This decision affects Step 16 output formatting, marketing, UX copy.
 
 #### Pricing Model Decision
+
 **What:** Decide the pricing model before building billing: usage-based (per design run), monthly seat, or annual seat.
 **Why:** The auth layer (Week 6) will need billing hooks. Usage-based requires `design_count` field in user document + check in Step 16. Seat license requires `subscription_active` check at login.
 **Depends on:** Ideally one conversation with a potential customer.
@@ -2712,22 +3315,26 @@ Items flagged during CEO review, eng review, and development planning that are *
 ### P2 — Post-Beta
 
 #### HTRI Comparison Workflow
+
 **Status: MOVED TO WEEK 5 [Decision OH-1A, 2026-03-19]**
 **Why moved:** Originally deferred as post-beta. Office Hours session identified this as the single most important trust-building mechanism. Moving it to Week 5 means accuracy is validated by real engineers mid-build, not after launch. See §14 Week 5 for full implementation details.
 **What remains post-beta:** Calibration factor dashboard (deviation trend over time). After ≥ 5 comparisons per fluid pair, correction factors are automatically applied in `calibration.py`.
 
 #### PDF Export Report
+
 **What:** "Export PDF" button on the DesignSummary card that generates a formatted engineering report: all 16 step outputs, AI reasoning, final geometry spec, confidence justification, disclaimer footer.
 **Why:** Process engineers need to share designs with their team and file them in project records. A plain screen is not a deliverable.
 **Depends on:** Step 16 complete (Week 5). Use `weasyprint` or `reportlab`.
 **Details:** Font: use a serif body font (e.g. Noto Serif) for print readability, monospace for data tables. PDF bookmarks for each of the 16 steps so engineers can jump directly to a section. Footer: ARKEN logo + disclaimer + confidence_score + date. Page size: A4 (international standard for engineering docs).
 
 #### CI/CD Pipeline
+
 **What:** GitHub Actions CI with two jobs: (1) unit tests on every push, (2) nightly job running `@pytest.mark.nightly` tests (Step 8 AI reproducibility, Serth 5.1).
 **Why:** Without CI, the Serth 5.1 hard gate is only enforced when someone remembers to run pytest manually.
 **Depends on:** Week 1 complete.
 **Priority:** Add before Week 3 Bell-Delaware gate.
 **Commands:**
+
 ```bash
 # Job 1 — on every push (fast, no AI calls)
 pytest hx_engine/tests/ -m "not nightly" --tb=short -q
@@ -2736,10 +3343,12 @@ pytest hx_engine/tests/ -m nightly --tb=long -v
 ```
 
 #### TypeScript Type Generation from Pydantic Models
+
 **What:** Auto-generate `frontend/src/types/hxEvents.ts` from `hx_engine/app/models/sse_events.py` using `datamodel-codegen` or `pydantic2ts`.
 **Why:** `hxEvents.ts` manually mirrors `sse_events.py`. Every schema change must be updated by hand. Drift is silent.
 **Depends on:** `sse_events.py` finalized (Day 1, Week 1). Run setup before Week 6.
 **Command:**
+
 ```bash
 # Using datamodel-codegen (preferred — handles Pydantic v2 natively)
 datamodel-codegen --input hx_engine/app/models/sse_events.py --output frontend/src/types/hxEvents.ts --output-model-type typescript
@@ -2747,33 +3356,39 @@ datamodel-codegen --input hx_engine/app/models/sse_events.py --output frontend/s
 ```
 
 #### Delete Decommissioned Code
+
 **What:** Remove all MCP-era code: `mcp_calculation_engine_server/`, `mcp_process_server/`, `calculation_engine/` (sugar/adsorption/distillation modules), `backend/app/core/policy_engine.py`, `backend/app/services/context_manager.py`, `backend/app/services/narrative_generator.py`.
 **Why:** Dead code accumulates confusion.
 **Depends on:** Week 8 Checkpoint 6 passed (full system working). Run pytest after deletion.
 
 #### Bell-Delaware CalculationError Wrapper
+
 **What:** Add `CalculationError(step_id, message, cause)` exception class. Wrap `bell_delaware.shell_side_h()` and `shell_side_dP()` in try/except for ZeroDivisionError and ValueError from degenerate geometry inputs.
 **Why:** CG3A validators prevent most degenerate geometries, but autoresearch proposes 200 variants including edge cases.
 **Priority:** Build inline with Week 3 Bell-Delaware implementation.
 **Test guidance:** Unit test with degenerate inputs (n_tubes=0, baffle_spacing=0, tube_od=tube_id) → verify CalculationError raised with correct step_id. Integration test in autoresearch: inject 1 degenerate geometry in 20 → verify it’s caught and excluded, other 19 complete.
 
 #### Redis Mid-Pipeline Save Failure Handling
+
 **What:** If Redis goes down mid-pipeline, emit WARN SSE event so user knows reconnect won't work. Catch `redis.ConnectionError` in `session_store.save()`.
 **Why:** Without the WARN, user sees design_complete but gets 404 on reconnect.
 **Priority:** Add after Week 2 infrastructure complete.
 **Test methodology:** Use `fakeredis` or mock `session_store.save()` to raise `redis.ConnectionError` at Step 8. Verify: (1) WARN SSE event emitted with message containing "session may not be recoverable", (2) pipeline continues to Step 16, (3) design_complete event still fires.
 
 #### CEPCI Index Maintenance
+
 **What:** Staleness warning when CEPCI `last_updated` > 90 days old. Config constant in `data/cost_indices.py`.
 **Why:** A 2-year-old index underestimates cost by 10–20%.
 **Priority:** Build inline with Step 15 (Week 5). Update takes 2 minutes per quarter.
 **Source:** Chemical Engineering Plant Cost Index, published monthly in _Chemical Engineering_ magazine. Use official annual average. 2025 estimate: ~816. Fallback: interpolate from last 3 years if current year unavailable.
 
 #### Autoresearch — Loop 3 [Eng Review — Deferred from Beta]
+
 **Status: Post-beta [Eng Review, 2026-03-21]**
 **Why deferred:** Core value is Loop 2 accuracy. Autoresearch adds optimization on top — only useful once engineers trust the base calculation (validated via HTRI comparison in Week 5). GIL/parallelism question also deferred until we have real Bell-Delaware timing data.
 
 **Build sequence when ready:**
+
 1. Measure a single Bell-Delaware + Gnielinski + dP calculation time on target hardware. If > 30ms, use `ProcessPoolExecutor(8)` for true CPU parallelism (not ThreadPoolExecutor). If < 30ms, ThreadPoolExecutor or sequential is fine (200 × 30ms = 6s).
 2. `hx_engine/app/correlations/connors_prefilter.py` — `connors_quick_check()`: simplified natural frequency + gap velocity, ~10ms, returns False if stability_ratio < 0.8. Pre-screen variants before running full Steps 7–11.
 3. `hx_engine/app/autoresearch/experiment_runner.py` — 200-variant sweep. Per variant: validate CG3A, run connors_quick_check(), run Steps 7–11 (no AI). Memory only — no Redis saves during sweep.
@@ -2787,12 +3402,14 @@ datamodel-codegen --input hx_engine/app/models/sse_events.py --output frontend/s
 **Depends on:** Beta complete + HTRI comparison validation showing Loop 2 accuracy is trusted.
 
 #### /btw Context Injection [CEO Review 3 — Deferred from Beta]
+
 **Status: Post-beta [CEO-R-7A, 2026-03-21]**
 **Root cause for deferral:** Forward-only /btw creates designs with internal inconsistency — `confidence_score` does not degrade when a context note contradicts already-completed steps. Injecting "fouling factor = 0.0003" at Step 12 means Steps 1–11 are now calculated with the wrong fouling assumption, but their confidence scores remain untouched. This is a silent correctness gap.
 
 **Post-beta build sequence (two phases):**
 
 **Phase 1 — Pre-run notes only (no pipeline changes needed)**
+
 - Scope: `/btw` only accepted before `POST /api/v1/hx/design` is called (i.e., before the pipeline starts).
 - Notes stored as `applied_from_step=1` — injected at every step from the beginning.
 - No confidence gap: all 16 steps see the note from the start. Internal consistency maintained.
@@ -2802,6 +3419,7 @@ datamodel-codegen --input hx_engine/app/models/sse_events.py --output frontend/s
 - Prompt injection mitigation: strip lines beginning with "Ignore", "Disregard", "System:", "Assistant:" before injection.
 
 **Phase 2 — Mid-pipeline injection (v2, requires parameter dependency graph)**
+
 - Scope: `/btw` accepted at any point, including mid-pipeline.
 - Requires: parameter dependency graph (which steps depend on which DesignState fields). When a note changes a field touched by already-completed steps, those steps are flagged for re-run. confidence_score degraded for affected steps.
 - Alternative to full re-run: emit `step_warning` SSE with message "Context note may affect steps 3, 7, 9 — confidence adjusted" and degrade those steps' scores by a fixed factor (e.g., 0.85× per contradicted step).
@@ -2818,81 +3436,81 @@ All architecture decisions from CEO review, engineering review, and convergence 
 
 ### Engineering Review Decisions
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| ENG-1A | Try-first + 3-correction limit | AI must attempt resolution before escalating. Max 3 correction attempts per step. After 3 failures, force escalate with all attempts in payload. `escalate` JSON includes `attempts`, `observation`, `recommendation`, `options`. |
-| ENG-1B | Confidence gate (threshold 0.70) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record. |
-| 1B | Direct SSE | Frontend connects directly to HX Engine for SSE (via nginx proxy per CEO-1A) |
-| 2B | Pydantic DesignState | Single Pydantic model, not a dict |
-| 3A | Convergence loop AI skip | `in_convergence_loop` flag skips conditional AI in Steps 7/10/11 |
-| 4A | Engine registry | `engines.yaml` config + `engine_client.py` replaces MCP |
-| 5 | Bell-Delaware | Shell-side h via Bell-Delaware method (not Kern alone) |
-| 6A | StepProtocol | `@runtime_checkable Protocol` for all 16 steps |
-| 7A | 5 golden orchestration tests | VCR cassette determinism |
-| 8A | AI reproducibility test | 10× identical inputs → ≥ 9/10 same decision (nightly) |
-| 10A | Connors pre-filter | Quick vibration check before full autoresearch experiment |
-| CG1A | try/finally flag reset | `in_convergence_loop` always cleared, even on exception |
-| CG2A | Poll fallback | GET /status endpoint for SSE disconnect recovery |
-| CG3A | GeometrySpec validators | Field validators on all length/ratio fields |
+| ID     | Decision                         | Description                                                                                                                                                                                                                       |
+| ------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ENG-1A | Try-first + 3-correction limit   | AI must attempt resolution before escalating. Max 3 correction attempts per step. After 3 failures, force escalate with all attempts in payload. `escalate` JSON includes `attempts`, `observation`, `recommendation`, `options`. |
+| ENG-1B | Confidence gate (threshold 0.70) | After every AI review (initial + each correction re-review), check `confidence`. If `confidence < 0.70`, override decision to `escalate`. Log `confidence_gate_triggered=True` in step record.                                    |
+| 1B     | Direct SSE                       | Frontend connects directly to HX Engine for SSE (via nginx proxy per CEO-1A)                                                                                                                                                      |
+| 2B     | Pydantic DesignState             | Single Pydantic model, not a dict                                                                                                                                                                                                 |
+| 3A     | Convergence loop AI skip         | `in_convergence_loop` flag skips conditional AI in Steps 7/10/11                                                                                                                                                                  |
+| 4A     | Engine registry                  | `engines.yaml` config + `engine_client.py` replaces MCP                                                                                                                                                                           |
+| 5      | Bell-Delaware                    | Shell-side h via Bell-Delaware method (not Kern alone)                                                                                                                                                                            |
+| 6A     | StepProtocol                     | `@runtime_checkable Protocol` for all 16 steps                                                                                                                                                                                    |
+| 7A     | 5 golden orchestration tests     | VCR cassette determinism                                                                                                                                                                                                          |
+| 8A     | AI reproducibility test          | 10× identical inputs → ≥ 9/10 same decision (nightly)                                                                                                                                                                             |
+| 10A    | Connors pre-filter               | Quick vibration check before full autoresearch experiment                                                                                                                                                                         |
+| CG1A   | try/finally flag reset           | `in_convergence_loop` always cleared, even on exception                                                                                                                                                                           |
+| CG2A   | Poll fallback                    | GET /status endpoint for SSE disconnect recovery                                                                                                                                                                                  |
+| CG3A   | GeometrySpec validators          | Field validators on all length/ratio fields                                                                                                                                                                                       |
 
 ### Third Engineering Review Pass
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| 3R-1A | Internal webhook auth | `X-Internal-Token` header between HX Engine → Backend |
-| 3R-2A | Redis AOF persistence | `redis-server --appendonly yes` + redis-data volume, 24h TTL |
+| ID    | Decision                 | Description                                                    |
+| ----- | ------------------------ | -------------------------------------------------------------- |
+| 3R-1A | Internal webhook auth    | `X-Internal-Token` header between HX Engine → Backend          |
+| 3R-2A | Redis AOF persistence    | `redis-server --appendonly yes` + redis-data volume, 24h TTL   |
 | 3R-3A | Autoresearch parallelism | `ThreadPoolExecutor(max_workers=16)` for CPU-bound experiments |
-| 3R-4A | FluidProperties schema | Explicit fields with validators (not a generic dict) |
-| 3R-5A | StepRecord schema | Audit log entry with `ai_called` flag and `duration_ms` |
-| 3R-6A | Stream JWT auth | Short-lived JWT for SSE stream access |
+| 3R-4A | FluidProperties schema   | Explicit fields with validators (not a generic dict)           |
+| 3R-5A | StepRecord schema        | Audit log entry with `ai_called` flag and `duration_ms`        |
+| 3R-6A | Stream JWT auth          | Short-lived JWT for SSE stream access                          |
 
 ### CEO Review Decisions
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| CEO-1A | nginx reverse proxy | One public origin, routes /api/v1/hx/ → HX Engine |
-| CEO-2A | Secrets management | `.env` + `.env.example` + `.gitignore` |
-| CEO-3A | AI retry logic | Retry 2× with backoff, then WARN+proceed (ai_called=False) |
-| CEO-5A | user_id in stream JWT | Stream JWT payload includes user_id for session authorization |
-| CEO-6A | InputBar disable on ESCALATE | Prevent concurrent input while any step is ESCALATED |
-| CEO-7A | Confidence weights | Equal weights 1/3 each via CONFIDENCE_WEIGHTS constant (3 components) |
-| CEO-CP2 | Confidence breakdown | `confidence_breakdown` dict in DesignState (3 keys: geometry_convergence, ai_agreement_rate, validation_passes) |
-| CEO-CP4 | org_id field | `org_id: Optional[str] = None` in DesignState for future team accounts |
-| CEO-CP5 | JWT auth in Week 6 | Full auth flow: login, JWT, admin create_user.py, no self-signup |
+| ID      | Decision                     | Description                                                                                                     |
+| ------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| CEO-1A  | nginx reverse proxy          | One public origin, routes /api/v1/hx/ → HX Engine                                                               |
+| CEO-2A  | Secrets management           | `.env` + `.env.example` + `.gitignore`                                                                          |
+| CEO-3A  | AI retry logic               | Retry 2× with backoff, then WARN+proceed (ai_called=False)                                                      |
+| CEO-5A  | user_id in stream JWT        | Stream JWT payload includes user_id for session authorization                                                   |
+| CEO-6A  | InputBar disable on ESCALATE | Prevent concurrent input while any step is ESCALATED                                                            |
+| CEO-7A  | Confidence weights           | Equal weights 1/3 each via CONFIDENCE_WEIGHTS constant (3 components)                                           |
+| CEO-CP2 | Confidence breakdown         | `confidence_breakdown` dict in DesignState (3 keys: geometry_convergence, ai_agreement_rate, validation_passes) |
+| CEO-CP4 | org_id field                 | `org_id: Optional[str] = None` in DesignState for future team accounts                                          |
+| CEO-CP5 | JWT auth in Week 6           | Full auth flow: login, JWT, admin create_user.py, no self-signup                                                |
 
 ### Office Hours Session (2026-03-19)
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| OH-1A | Trust-Calibration-First | HTRI Comparison workflow moved from post-beta → Week 5. Build Steps 1–8, then HTRI comparison, then Steps 9–16. Rationale: validates accuracy with real engineers mid-build, not after launch. |
-| OH-2A | Target user refined | Both junior engineers (no HTRI seat) and senior engineers (15+ designs/year, HTRI too slow for first-pass) are primary users. Senior engineer has purchasing authority. |
-| OH-3A | Org-level sale | Initial customer is a firm (team license), not an individual. HTRI bottleneck is structural — org-level pain needs org-level purchase. Shapes pricing model decision. |
-| OH-4A | Calibration feedback point | Correction factors from HTRI comparisons applied in Step 9 (Overall U) only. Single application point: U_corrected = U_calculated × (1 − avg_delta_U_pct/100). Applied only when ≥ 5 comparisons exist for the CalibrationKey. Shown in AI reasoning. |
-| OH-5A | HTRI compare auth (Week 5) | Static `X-Compare-Token` bearer token on POST /api/v1/hx/compare during Week 5. Value in `.env` as `HTRI_COMPARE_TOKEN`. **Week 6 cutover:** Replace with JWT (same auth as all other protected endpoints). No dual-auth transition needed for beta (2–3 known engineers). Notify beta engineers directly when Week 6 ships. Add test: old X-Compare-Token on /compare → 401 after JWT cutover. [Eng Review] |
-| OH-6A | CalibrationKey schema | Compound key: (fluid_pair: tuple[str,str] sorted, tema_type: str, shell_diameter_class: 'small'\|'medium'\|'large'). Small < 0.5m, medium 0.5–1.0m, large > 1.0m. All fields available from DesignState after Step 4. |
-| OH-7A | Calibration persistence | `calibration_records` MongoDB collection. Schema: {key: CalibrationKey, delta_U_pct: float, delta_dP_shell_pct: float, delta_dP_tube_pct: float, comparison_count: int, last_updated: datetime, archived: bool, archived_reason: str\|None, archived_at: datetime\|None, model_version: str}. `calibration.py` is a query module, not a data store. Startup cache only loads `archived: false` records matching `CURRENT_MODEL_VERSION`. |
+| ID    | Decision                   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OH-1A | Trust-Calibration-First    | HTRI Comparison workflow moved from post-beta → Week 5. Build Steps 1–8, then HTRI comparison, then Steps 9–16. Rationale: validates accuracy with real engineers mid-build, not after launch.                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| OH-2A | Target user refined        | Both junior engineers (no HTRI seat) and senior engineers (15+ designs/year, HTRI too slow for first-pass) are primary users. Senior engineer has purchasing authority.                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| OH-3A | Org-level sale             | Initial customer is a firm (team license), not an individual. HTRI bottleneck is structural — org-level pain needs org-level purchase. Shapes pricing model decision.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| OH-4A | Calibration feedback point | Correction factors from HTRI comparisons applied in Step 9 (Overall U) only. Single application point: U_corrected = U_calculated × (1 − avg_delta_U_pct/100). Applied only when ≥ 5 comparisons exist for the CalibrationKey. Shown in AI reasoning.                                                                                                                                                                                                                                                                                                                                                                   |
+| OH-5A | HTRI compare auth (Week 5) | Static `X-Compare-Token` bearer token on POST /api/v1/hx/compare during Week 5. Value in `.env` as `HTRI_COMPARE_TOKEN`. **Week 6 cutover:** Replace with JWT (same auth as all other protected endpoints). No dual-auth transition needed for beta (2–3 known engineers). Notify beta engineers directly when Week 6 ships. Add test: old X-Compare-Token on /compare → 401 after JWT cutover. [Eng Review]                                                                                                                                                                                                            |
+| OH-6A | CalibrationKey schema      | Compound key: (fluid_pair: tuple[str,str] sorted, tema_type: str, shell_diameter_class: 'small'\|'medium'\|'large'). Small < 0.5m, medium 0.5–1.0m, large > 1.0m. All fields available from DesignState after Step 4.                                                                                                                                                                                                                                                                                                                                                                                                   |
+| OH-7A | Calibration persistence    | `calibration_records` MongoDB collection. Schema: {key: CalibrationKey, delta_U_pct: float, delta_dP_shell_pct: float, delta_dP_tube_pct: float, comparison_count: int, last_updated: datetime, archived: bool, archived_reason: str\|None, archived_at: datetime\|None, model_version: str}. `calibration.py` is a query module, not a data store. Startup cache only loads `archived: false` records matching `CURRENT_MODEL_VERSION`.                                                                                                                                                                                |
 | OH-9A | Calibration data lifecycle | Three mechanisms: (1) Soft archive — never hard-delete calibration records; set `archived: true` via admin endpoint when process conditions change or a Bell-Delaware bug is fixed. Step 9 and startup cache ignore archived records. (2) Model version tag — bump `CURRENT_MODEL_VERSION` constant when Bell-Delaware implementation changes significantly; old records excluded from correction factor automatically. (3) TTL on session data — 30-day TTL index on any temporary design session documents in MongoDB (not calibration records). Hard deletion only for throwaway data, never for comparison records. |
-| OH-8A | HTRI compare input modes | Two input paths: (1) Manual entry — U_htri, dP_shell_htri, dP_tube_htri fields (primary, build first); (2) File upload — .xrf XML or CSV, 2MB hard limit (secondary, build after manual). |
+| OH-8A | HTRI compare input modes   | Two input paths: (1) Manual entry — U_htri, dP_shell_htri, dP_tube_htri fields (primary, build first); (2) File upload — .xrf XML or CSV, 2MB hard limit (secondary, build after manual).                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ### CEO Review 2 — SELECTIVE EXPANSION (2026-03-20)
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| CEO-R-1A | Bell-Delaware contingency | If Serth 5.1 misses ±5% after 3-day debug budget: activate Kern fallback (Kern, *Process Heat Transfer*, 1950) for shell-side h in Step 8. Proceed to Weeks 4-5 with Kern active. Escalate to week-long parallel deep dive if unresolved after 3 days. Bell-Delaware must pass before Week 7 autoresearch gate. |
-| CEO-R-2A | Regulatory/liability stance | "Decision support" for beta. All Step 16 output and frontend copy labeled `FOR REVIEW ONLY — verify with licensed engineer`. Confidence score is a suggestion, not a certification. Revisit "fabrication-ready" post first 10+ HTRI comparisons. |
-| CEO-R-3A | Pricing model | Org/team seat license. Week 6 auth builds `subscription_active` per `org_id`; returns `True` for all beta users. If Week 6 slips, beta users default to `subscription_active=True` — no blocking. |
-| CEO-R-4A | Post-beta GTM path | Three-step path: (1) first HTRI comparison < 10% deviation → ask engineer to show a colleague, (2) 2–3 engineers at one firm → org-level demo, (3) firm asks for > 2 seats → paid conversion trigger. |
+| ID       | Decision                    | Description                                                                                                                                                                                                                                                                                                     |
+| -------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEO-R-1A | Bell-Delaware contingency   | If Serth 5.1 misses ±5% after 3-day debug budget: activate Kern fallback (Kern, _Process Heat Transfer_, 1950) for shell-side h in Step 8. Proceed to Weeks 4-5 with Kern active. Escalate to week-long parallel deep dive if unresolved after 3 days. Bell-Delaware must pass before Week 7 autoresearch gate. |
+| CEO-R-2A | Regulatory/liability stance | "Decision support" for beta. All Step 16 output and frontend copy labeled `FOR REVIEW ONLY — verify with licensed engineer`. Confidence score is a suggestion, not a certification. Revisit "fabrication-ready" post first 10+ HTRI comparisons.                                                                |
+| CEO-R-3A | Pricing model               | Org/team seat license. Week 6 auth builds `subscription_active` per `org_id`; returns `True` for all beta users. If Week 6 slips, beta users default to `subscription_active=True` — no blocking.                                                                                                               |
+| CEO-R-4A | Post-beta GTM path          | Three-step path: (1) first HTRI comparison < 10% deviation → ask engineer to show a colleague, (2) 2–3 engineers at one firm → org-level demo, (3) firm asks for > 2 seats → paid conversion trigger.                                                                                                           |
 
 ### CEO Review 3 — HOLD SCOPE (2026-03-21)
 
-| ID | Decision | Description |
-|----|----------|-------------|
-| CEO-R-5A | HTRI file format: CSV first | `htri_parser.py` Week 5 uses `csv.reader()` (stdlib). Pre-Week 5: obtain 3 sample CSV exports from beta engineer. `.xrf` XML parser deferred post-beta; use `defusedxml` when built. Resolves Open Question 3. |
-| CEO-R-6A | Bell-Delaware vs Kern auto-conservative | If \|BD − Kern\| / BD > 20%, use lower h_o value (Layer 2 rule in `validation_rules.py`). Step 8 AI prompt includes both values and override reason. Resolves Open Question 6 (Decision 3R-7B). |
-| CEO-R-7A | /btw deferred to post-beta | BTW-1A/2A/3A deferred. Root cause: forward-only /btw creates designs with internal inconsistency (confidence_score doesn't degrade when notes contradict completed steps). Post-beta: implement pre-run notes only first (applied_from_step=1, no confidence gap), then full mid-pipeline with parameter dependency tracking in v2. |
-| CEO-R-8A | wait_for_user() + /respond endpoint | Specified async pattern: asyncio.Future per session in sse_manager.py, resolved by POST /api/v1/hx/design/{id}/respond. Timeout 300s + future cleanup + waiting_for_user flag. |
-| CEO-R-9A | Pipeline orphan detection | heartbeat() + is_orphaned() in session_store.py. PIPELINE_ORPHAN_THRESHOLD_SECONDS=120. waiting_for_user=True excludes session from orphan detection. GET /status returns "failed" for orphaned sessions. |
-| CEO-R-10A | MongoDB indexes at startup | Compound index on calibration_records, unique index on users.email. Created at FastAPI lifespan. Idempotent. Failure: exponential backoff 1s/2s/4s then CRITICAL + re-raise. |
+| ID        | Decision                                | Description                                                                                                                                                                                                                                                                                                                         |
+| --------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CEO-R-5A  | HTRI file format: CSV first             | `htri_parser.py` Week 5 uses `csv.reader()` (stdlib). Pre-Week 5: obtain 3 sample CSV exports from beta engineer. `.xrf` XML parser deferred post-beta; use `defusedxml` when built. Resolves Open Question 3.                                                                                                                      |
+| CEO-R-6A  | Bell-Delaware vs Kern auto-conservative | If \|BD − Kern\| / BD > 20%, use lower h_o value (Layer 2 rule in `validation_rules.py`). Step 8 AI prompt includes both values and override reason. Resolves Open Question 6 (Decision 3R-7B).                                                                                                                                     |
+| CEO-R-7A  | /btw deferred to post-beta              | BTW-1A/2A/3A deferred. Root cause: forward-only /btw creates designs with internal inconsistency (confidence_score doesn't degrade when notes contradict completed steps). Post-beta: implement pre-run notes only first (applied_from_step=1, no confidence gap), then full mid-pipeline with parameter dependency tracking in v2. |
+| CEO-R-8A  | wait_for_user() + /respond endpoint     | Specified async pattern: asyncio.Future per session in sse_manager.py, resolved by POST /api/v1/hx/design/{id}/respond. Timeout 300s + future cleanup + waiting_for_user flag.                                                                                                                                                      |
+| CEO-R-9A  | Pipeline orphan detection               | heartbeat() + is_orphaned() in session_store.py. PIPELINE_ORPHAN_THRESHOLD_SECONDS=120. waiting_for_user=True excludes session from orphan detection. GET /status returns "failed" for orphaned sessions.                                                                                                                           |
+| CEO-R-10A | MongoDB indexes at startup              | Compound index on calibration_records, unique index on users.email. Created at FastAPI lifespan. Idempotent. Failure: exponential backoff 1s/2s/4s then CRITICAL + re-raise.                                                                                                                                                        |
 
 ### CEO Plan Amendments (applied to build sequence)
 
@@ -2906,6 +3524,22 @@ All architecture decisions from CEO review, engineering review, and convergence 
 - Frontend: ChatWindow error state, ParetoChart loading state, confidence_breakdown expandable in DesignSummary
 - Autoresearch: experiments run in memory only — no Redis saves during sweep
 
+### Implementation Decisions (May 2026) — Post-Build Audit
+
+These decisions were made during implementation and are NOT reflected in the original architecture sessions above. All are fully implemented.
+
+| ID      | Decision                       | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IMPL-1A | Skills-based AI prompt system  | Step-specific prompts moved from inline Python strings to `hx_engine/app/skills/step_XX_*.md` files. `_build_system_prompt(step_id, step_name)` in `ai_engineer.py` loads `base.md` + the step-specific file at runtime. `core/prompts/engineer_review.txt` is deprecated.                                                                                                                                                                                                                |
+| IMPL-2A | RedesignDriver                 | Autonomous geometry redesign loop in `core/redesign_loop.py`. Triggered when Steps 10/11 raise `DesignConstraintViolation`. `MAX_REDESIGN_ATTEMPTS=8`, `MAX_FALLBACK_ATTEMPTS=2`. 9 legal levers (tube OD, tube length, n_passes, baffle_cut, n_baffles, n_tubes, pitch_ratio, shell_ID, tema_type). AI selects lever; deterministic `_FALLBACK_SEQUENCE` engages when AI lever selection fails. Users are NEVER prompted for internal geometry decisions — all mutations are autonomous. |
+| IMPL-3A | Step 7 velocity auto-restart   | Before RedesignDriver activates, the pipeline tries adjusting `n_passes` (double for low velocity, halve for high velocity) and re-runs Steps 5–6 inline. `MAX_VELOCITY_RESTARTS=3`. Counter is separate from RedesignDriver's `redesign_attempt` counter.                                                                                                                                                                                                                                |
+| IMPL-4A | Condensation support           | Shah condensation correlation (`correlations/shah_condensation.py`) added. `FluidProperties` extended with `phase`, `quality`, `latent_heat_J_kg`, `T_sat_C`, `P_sat_Pa`. `IncrementResult` model added for zone-based calculations. `DesignState` carries `hot_phase`/`cold_phase` and `increment_results`. Evaporation/boiling still deferred post-beta.                                                                                                                                |
+| IMPL-5A | Volumetric flow input (P2-20)  | `DesignRequest` accepts `hot_flow`/`cold_flow` as `FlowInput(value, unit)` objects instead of bare float kg/s. `volumetric_flow.py` converts to mass flow. `DesignState` carries `hot_flow_input`, `cold_flow_input`, `flow_density_drift` for audit.                                                                                                                                                                                                                                     |
+| IMPL-6A | Requirements token flow        | Two-step validation: `POST /api/v1/hx/requirements` validates request → returns HMAC-signed token → `POST /api/v1/hx/design` accepts token. Token is optional; /design works without it (runs validation inline). Token is signed with `HX_ENGINE_SECRET`.                                                                                                                                                                                                                                |
+| IMPL-7A | FluidProperties.name removed   | `FluidProperties` model is now anonymous — the `name` field was removed. Fluid names live on `DesignState` as `hot_fluid_name: Optional[str]` and `cold_fluid_name: Optional[str]`. Any code using `state.shell_fluid.name` or `state.tube_fluid.name` must be updated to use `state.hot_fluid_name`/`state.cold_fluid_name`. `CalibrationKey.from_state()` must use these fields.                                                                                                        |
+| IMPL-8A | Thermo 5-tier chain            | `thermo_adapter.py` priority chain extended to 5 tiers: iapws → CoolProp → Petroleum correlations (`petroleum_correlations.py` — Lee-Kesler/Beggs-Robinson/Cragoe) → Specialty → thermo (Caleb Bell). New public API: `get_saturation_props()` and `get_cp()`. `property_source` and `property_confidence` track which tier was used.                                                                                                                                                     |
+| IMPL-9A | USER_RESPONSE_TIMEOUT extended | `USER_RESPONSE_TIMEOUT = 3600` (1 hour) in `pipeline_runner.py`. See Open Question 7 — RESOLVED.                                                                                                                                                                                                                                                                                                                                                                                          |
+
 ---
 
 ## 22. Open Questions
@@ -2916,28 +3550,28 @@ All architecture decisions from CEO review, engineering review, and convergence 
 4. ~~**Regulatory/liability positioning:**~~ **RESOLVED (2026-03-20)** — **"Decision support"** for beta. All Step 16 output and frontend copy labeled `FOR REVIEW ONLY — verify with licensed engineer`. Confidence score displayed as a suggestion, not a certification. Revisit "fabrication-ready" after first 10+ HTRI comparisons and accuracy data. See §21 Decision CEO-R-2A.
 5. ~~**Pricing model:**~~ **RESOLVED (2026-03-20)** — **Org/team seat license** selected. Week 6 auth builds `subscription_active` check per `org_id`; returns `True` for all beta users. If Week 6 auth slips, beta users default to `subscription_active=True` — no one is blocked. See §21 Decision CEO-R-3A.
 6. ~~**Decision 3R-7B (Bell-Delaware vs. Kern cross-check divergence):**~~ **RESOLVED (2026-03-21)** — **Auto-conservative.** When |BD − Kern| / BD > 20%, use the lower of the two h_o values (Layer 2 rule in `validation_rules.py`). AI sees both values and the override reason in Step 8 prompt. See §21 Decision CEO-R-6A and §14 Week 3.
-7. **ESCALATED step timeout policy:** When a step enters ESCALATED state (waiting for user input), the pipeline blocks indefinitely. No timeout is currently defined. Decide: (a) how long before the session expires (e.g., 24h?), (b) whether to send a reminder notification, (c) what happens to orphaned sessions if the user never responds (cleanup cron? auto-cancel?). This affects both the HX Engine (`run_with_review_loop` in BaseStep) and the frontend (StepCard ESCALATED state). Added during eng review of Steps 1–5 plan (2026-03-21).
+7. ~~**ESCALATED step timeout policy:**~~ **RESOLVED (2026-05)** — `USER_RESPONSE_TIMEOUT = 3600` (1 hour) implemented in `pipeline_runner.py`. After 1 hour with no `/respond` call, the session is treated as abandoned and the pipeline raises a timeout error. Orphan detection (`is_orphaned()` in `session_store.py`) excludes sessions with `waiting_for_user=True` for the full 1-hour window. See §21 Decision IMPL-9A.
 
 ---
 
 ## 23. Success Criteria
 
-| Milestone | Metric |
-|-----------|--------|
-| Week 3 engineering accuracy | Serth Example 5.1: U within 5%, dP within 10%, all J-factors within 10% |
-| Week 5 end-to-end | Full 16-step design runs in < 30 seconds, all SSE events stream correctly |
-| Week 5 HTRI validation | One real engineer runs the HTRI comparison and deviation is < 10% on U [Decision OH-1A]. First session run together on a call (see §24). |
-| Week 8 complete | Autoresearch returns Pareto front in < 30s |
-| First user trust signal | The first beta user describes the product as "an audit trail" — not "a calculator." The reasoning layer is the differentiator, not the number. |
-| First user validation | One process engineer runs a real design and says the result is trustworthy |
+| Milestone                   | Metric                                                                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Week 3 engineering accuracy | Serth Example 5.1: U within 5%, dP within 10%, all J-factors within 10%                                                                        |
+| Week 5 end-to-end           | Full 16-step design runs in < 30 seconds, all SSE events stream correctly                                                                      |
+| Week 5 HTRI validation      | One real engineer runs the HTRI comparison and deviation is < 10% on U [Decision OH-1A]. First session run together on a call (see §24).       |
+| Week 8 complete             | Autoresearch returns Pareto front in < 30s                                                                                                     |
+| First user trust signal     | The first beta user describes the product as "an audit trail" — not "a calculator." The reasoning layer is the differentiator, not the number. |
+| First user validation       | One process engineer runs a real design and says the result is trustworthy                                                                     |
 
 **Post-beta GTM path [Decision CEO-R-4A]:**
 
-| Trigger | Next Action |
-|---------|-------------|
-| First HTRI comparison < 10% deviation on U | Ask the engineer if he'd show it to one colleague at his firm |
-| 2–3 engineers at one firm using ARKEN | The wedge is open — prepare an org-level demo |
-| Firm asks for more than 2 seats | Trigger paid conversion (org/team seat license, see Decision CEO-R-3A) |
+| Trigger                                    | Next Action                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| First HTRI comparison < 10% deviation on U | Ask the engineer if he'd show it to one colleague at his firm          |
+| 2–3 engineers at one firm using ARKEN      | The wedge is open — prepare an org-level demo                          |
+| Firm asks for more than 2 seats            | Trigger paid conversion (org/team seat license, see Decision CEO-R-3A) |
 
 These are the three steps from first successful comparison to first revenue. The org-level pain (1–2 HTRI seats for 15 engineers) means conversion follows naturally once the product proves its accuracy within one firm.
 
@@ -2956,8 +3590,9 @@ These are the three steps from first successful comparison to first revenue. The
 1. **Agree on test case** — Confirm a single-phase liquid case: crude oil cooling is the preferred test (matches ARKEN Phase 1 scope and Serth 5.1 benchmark). Provide the engineer with the input format: fluid identities, flow rates (kg/s), inlet/outlet temperatures, pressure if known. Do NOT use a two-phase, condensing, or boiling case — ARKEN Phase 1 is single-phase liquids only.
 
 2. **Share the disclaimer** — Before the engineer sees any ARKEN output, send him the following copy:
-   > *"ARKEN AI is a first-pass design decision support tool. All outputs are labeled FOR REVIEW ONLY and must be verified by a licensed process engineer before use in fabrication or procurement. This is not a substitute for HTRI Xchanger Suite or a stamped design."*
-   This sets the right expectation. He is not evaluating a finished product — he is helping validate accuracy at the Step 8 (overall U) and Step 10 (pressure drop) level.
+
+   > _"ARKEN AI is a first-pass design decision support tool. All outputs are labeled FOR REVIEW ONLY and must be verified by a licensed process engineer before use in fabrication or procurement. This is not a substitute for HTRI Xchanger Suite or a stamped design."_
+   > This sets the right expectation. He is not evaluating a finished product — he is helping validate accuracy at the Step 8 (overall U) and Step 10 (pressure drop) level.
 
 3. **Get HTRI values before the call** — Ask the engineer to run the same case in HTRI and note: `U_overall` (W/m²K), `dP_shell` (bar), `dP_tube` (bar). These are the three fields in the manual entry comparison form. He does not need to share the full `.xrf` file (though that is also accepted).
 
@@ -2982,5 +3617,5 @@ These are the three steps from first successful comparison to first revenue. The
 
 ---
 
-*End of Document | ARKEN AI | March 2026 | Version 8.0*
-*Consolidates: DEVELOPMENT_PLAN.md v6.0, End-to-End Build Plan, CEO Review, Engineering Reviews (3 passes), Test Plans (4 passes), Office Hours Design Doc, TODOS.md, Office Hours Session (2026-03-19, Trust-Calibration-First)*
+_End of Document | ARKEN AI | March 2026 | Version 8.0_
+_Consolidates: DEVELOPMENT_PLAN.md v6.0, End-to-End Build Plan, CEO Review, Engineering Reviews (3 passes), Test Plans (4 passes), Office Hours Design Doc, TODOS.md, Office Hours Session (2026-03-19, Trust-Calibration-First)_
