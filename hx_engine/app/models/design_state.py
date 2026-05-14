@@ -554,7 +554,7 @@ class DesignState(BaseModel):
     # --- pipeline state ---
     current_step: int = 0
     completed_steps: list[int] = Field(default_factory=list)
-    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "error" | "cancelled" | "terminated"
+    pipeline_status: str = "pending"  # "pending" | "running" | "completed" | "error" | "cancelled" | "terminated" | "waiting"
     step_records: list[StepRecord] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -597,6 +597,20 @@ class DesignState(BaseModel):
     # breaking the correction loop caused by unresolvable fouling uncertainty.
     R_f_hot_m2KW: Optional[float] = None   # m²·K/W, hot-side fouling resistance
     R_f_cold_m2KW: Optional[float] = None  # m²·K/W, cold-side fouling resistance
+
+    # --- User-supplied intake constraints (hot/cold = fluid-stream perspective) ---
+    # Stored at intake; dP limits are remapped to side-aware fields by Step 4.
+    dP_hot_max_Pa:      Optional[float] = None   # max hot-side ΔP (Pa)
+    dP_cold_max_Pa:     Optional[float] = None   # max cold-side ΔP (Pa)
+    P_hot_design_Pa:    Optional[float] = None   # hot-side design pressure for Step 14 (Pa)
+    P_cold_design_Pa:   Optional[float] = None   # cold-side design pressure for Step 14 (Pa)
+    fouling_hot_m2K_W:  Optional[float] = None   # hot-side fouling override (m²·K/W)
+    fouling_cold_m2K_W: Optional[float] = None   # cold-side fouling override (m²·K/W)
+
+    # --- Side-aware ΔP limits (written by Step 4 after fluid allocation) ---
+    # Step 10 reads ONLY these fields; the hot/cold fields above are intake only.
+    dP_tube_max_Pa:     Optional[float] = None   # tube-side ΔP limit (Pa) — set by Step 4
+    dP_shell_max_Pa:    Optional[float] = None   # shell-side ΔP limit (Pa) — set by Step 4
 
     # --- TEMA type & allocation (populated by Step 4) ---
     tema_type: Optional[str] = None

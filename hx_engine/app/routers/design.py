@@ -26,7 +26,7 @@ from hx_engine.app.dependencies import (
     get_session_store,
     get_sse_manager,
 )
-from hx_engine.app.models.design_state import DesignState
+from hx_engine.app.models.design_state import DesignState, GeometrySpec
 from hx_engine.app.models.requirements import DesignRequest
 from pydantic import BaseModel, Field
 
@@ -173,7 +173,39 @@ async def start_design(
         tema_preference=req.tema_preference,
         hot_flow_input=_flow_audit(hot_res),
         cold_flow_input=_flow_audit(cold_res),
+        # --- Engineering constraint intake fields ---
+        dP_hot_max_Pa=req.dP_hot_max_Pa,
+        dP_cold_max_Pa=req.dP_cold_max_Pa,
+        P_hot_design_Pa=req.P_hot_design_Pa,
+        P_cold_design_Pa=req.P_cold_design_Pa,
+        tube_material=req.tube_material,
+        fouling_hot_m2K_W=req.fouling_hot_m2K_W,
+        fouling_cold_m2K_W=req.fouling_cold_m2K_W,
     )
+
+    # Fouling overrides — set R_f_* immediately so Step 4 skips the TEMA
+    # table lookup and uses the user-supplied values directly.
+    if req.fouling_hot_m2K_W is not None:
+        state.R_f_hot_m2KW = req.fouling_hot_m2K_W
+    if req.fouling_cold_m2K_W is not None:
+        state.R_f_cold_m2KW = req.fouling_cold_m2K_W
+
+    # Geometry pre-population — seed GeometrySpec with user hints so Step 4
+    # starts from the preferred values instead of computing them from scratch.
+    _geo_hints = {
+        "baffle_cut":       req.baffle_cut,
+        "shell_diameter_m": req.shell_diameter_m,
+        "tube_od_m":        req.tube_od_m,
+        "n_passes":         req.n_passes,
+    }
+    if any(v is not None for v in _geo_hints.values()):
+        if state.geometry is None:
+            state.geometry = GeometrySpec(**{k: v for k, v in _geo_hints.items() if v is not None})
+        else:
+            for k, v in _geo_hints.items():
+                if v is not None and getattr(state.geometry, k) is None:
+                    setattr(state.geometry, k, v)
+
     session_id = state.session_id
 
     # Pre-create SSE queue so the client can connect before the first event

@@ -1089,6 +1089,18 @@ class Step04TEMAGeometry(BaseStep):
         shell_side, alloc_warnings = _allocate_fluids(state)
         all_warnings.extend(alloc_warnings)
 
+        # --- Remap user-supplied ΔP limits to side-aware fields ---
+        # After fluid allocation we know which stream is tube-side vs shell-side.
+        # Step 10 reads only dP_tube_max_Pa / dP_shell_max_Pa (never hot/cold directly).
+        hot_is_tube_side = (shell_side == "cold")
+        if state.dP_hot_max_Pa is not None or state.dP_cold_max_Pa is not None:
+            if hot_is_tube_side:
+                state.dP_tube_max_Pa = state.dP_hot_max_Pa
+                state.dP_shell_max_Pa = state.dP_cold_max_Pa
+            else:
+                state.dP_tube_max_Pa = state.dP_cold_max_Pa
+                state.dP_shell_max_Pa = state.dP_hot_max_Pa
+
         # --- P2-14: tubesheet differential (post-allocation, exposed to UI) ---
         delta_T_tubesheet_K, stream_temperature_span_K, expansion_decision_basis = (
             _compute_tubesheet_differential(state, shell_side)

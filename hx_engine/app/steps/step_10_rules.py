@@ -9,7 +9,7 @@ from __future__ import annotations
 from hx_engine.app.core.validation_rules import register_rule
 from hx_engine.app.models.step_result import StepResult
 
-# Hard limits
+# Hard limits (fallbacks for R3/R4 when outputs lack the effective-limit keys)
 _DP_TUBE_LIMIT_PA = 70_000.0   # 0.7 bar
 _DP_SHELL_LIMIT_PA = 140_000.0  # 1.4 bar
 _RHO_V2_LIMIT = 2230.0          # TEMA erosion limit
@@ -53,10 +53,11 @@ def _rule_dp_tube_within_limit(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("dP_tube_Pa")
-    if val is not None and val > _DP_TUBE_LIMIT_PA:
+    limit = result.outputs.get("dP_tube_limit_Pa", _DP_TUBE_LIMIT_PA)
+    if val is not None and val > limit:
         return False, (
-            f"Tube-side ΔP {val:.0f} Pa exceeds 0.7 bar "
-            f"({_DP_TUBE_LIMIT_PA:.0f} Pa) limit"
+            f"Tube-side ΔP {val:.0f} Pa exceeds "
+            f"{limit:.0f} Pa limit"
         )
     return True, None
 
@@ -69,10 +70,11 @@ def _rule_dp_shell_within_limit(
     step_id: int, result: StepResult,
 ) -> tuple[bool, str | None]:
     val = result.outputs.get("dP_shell_Pa")
-    if val is not None and val > _DP_SHELL_LIMIT_PA:
+    limit = result.outputs.get("dP_shell_limit_Pa", _DP_SHELL_LIMIT_PA)
+    if val is not None and val > limit:
         return False, (
-            f"Shell-side ΔP {val:.0f} Pa exceeds 1.4 bar "
-            f"({_DP_SHELL_LIMIT_PA:.0f} Pa) limit"
+            f"Shell-side ΔP {val:.0f} Pa exceeds "
+            f"{limit:.0f} Pa limit"
         )
     return True, None
 

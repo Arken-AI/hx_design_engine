@@ -14,6 +14,8 @@ See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +34,29 @@ if TYPE_CHECKING:
     from hx_engine.app.steps.base import BaseStep
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Anthropic client — imported lazily to keep startup fast when no key is set
+# ---------------------------------------------------------------------------
+try:
+    from anthropic import (
+        AsyncAnthropic,
+        AuthenticationError,
+        PermissionDeniedError,
+        RateLimitError,
+        InternalServerError,
+        APIConnectionError,
+        APITimeoutError,
+    )
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    _ANTHROPIC_AVAILABLE = False
+
+from hx_engine.app.config import settings
+
+_MODEL = "claude-sonnet-4-6"
+_MAX_TOKENS = 1024
+_TEMPERATURE = 0.1
 
 # Confidence threshold: >= this → auto-proceed, < this → escalate to user
 CONFIDENCE_THRESHOLD = 0.7
@@ -917,22 +942,118 @@ def _build_system_prompt(step_id: int, step_name: str) -> str:
     return base + "\n\n" + step_prompt
 
 
-class AIEngineer:
-    """Permanent stub — always returns PROCEED without calling the API.
+# ---------------------------------------------------------------------------
+# AlternativeGenerator — deterministic recipes for budget-exhausted recoveries
+# ---------------------------------------------------------------------------
 
-    The class shell is preserved so that all 16 step files, base.py,
-    pipeline_runner.py, redesign_loop.py, and all integration tests
-    compile and pass without modification.
+class AlternativeGenerator:
+    """Produces deterministic geometry alternatives when Claude is unavailable.
+
+    Recipes are tried in order; those not applicable to the current state are
+    skipped.  The caller should pick the first N that apply.
     """
 
-    def __init__(self, *, stub_mode: bool = True):
-        self._stub_mode = True
-        self._client = None
+    RECIPES: list[dict[str, Any]] = [
+        {
+            "field": "n_shells",
+            "action": "set_2_series",
+            "description": (
+                "Split into 2 shells in series — halves shell-side velocity and "
+                "reduces shell-side ΔP by ~75% while maintaining duty."
+            ),
+            "rating": 9,
+        },
+        {
+            "field": "shell_diameter_m",
+            "action": "step_up_one_tema",
+            "description": (
+                "Increase shell diameter by one TEMA standard step (~50 mm) — "
+                "reduces shell-side cross-flow velocity and ΔP."
+            ),
+            "rating": 8,
+        },
+        {
+            "field": "n_passes",
+            "action": "halve",
+            "description": (
+                "Reduce tube passes by half (minimum 1) — directly cuts tube-side "
+                "velocity and ΔP while keeping surface area."
+            ),
+            "rating": 7,
+        },
+        {
+            "field": "baffle_cut",
+            "action": "set_35_pct",
+            "description": (
+                "Increase baffle cut to 35 % — reduces shell-side cross-flow "
+                "resistance by opening more bypass area."
+            ),
+            "rating": 6,
+        },
+        {
+            "field": "pitch_layout",
+            "action": "switch_to_square",
+            "description": (
+                "Switch tube pitch layout to square (90°) — reduces shell-side "
+                "ΔP by ~15 % compared to triangular pitch."
+            ),
+            "rating": 5,
+        },
+    ]
+
+    def generate(
+        self,
+        state: "DesignState",
+        violation: str,
+        n: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return up to *n* applicable recipes as structured option dicts."""
+        options: list[dict[str, Any]] = []
+        for recipe in self.RECIPES:
+            if len(options) >= n:
+                break
+            # Skip recipes that can't improve the current state
+            if recipe["action"] == "halve":
+                n_passes = getattr(
+                    getattr(state, "geometry", None), "n_passes", None
+                )
+                if n_passes is not None and n_passes < 2:
+                    continue
+            if recipe["action"] == "set_35_pct":
+                baffle_cut = getattr(
+                    getattr(state, "geometry", None), "baffle_cut", None
+                )
+                if baffle_cut is not None and baffle_cut >= 0.35:
+                    continue
+            options.append(recipe)
+        return options
+
+
+
+class AIEngineer:
+    """Layer 3 AI reviewer.
+
+    When ``HX_ANTHROPIC_API_KEY`` is set, makes live Claude calls for step
+    reviews and redesign recommendations. Falls back gracefully to stub mode
+    (auto-PROCEED / AlternativeGenerator) when the key is absent or when
+    ``stub_mode=True`` is passed explicitly.
+    """
+
+    def __init__(self, *, stub_mode: bool = False):
+        key = settings.anthropic_api_key
+        if stub_mode or not key or not _ANTHROPIC_AVAILABLE:
+            # No key, explicit stub, or Anthropic package missing — stub mode
+            self._stub_mode = True
+            self._client = None
+        else:
+            self._stub_mode = False
+            self._client = AsyncAnthropic(api_key=key)
+        self._auth_disabled = False
 
     @property
     def is_available(self) -> bool:
-        """Always False — live API is permanently disabled."""
-        return False
+        """True only when a live Anthropic client is configured and not auth-disabled."""
+        return not self._stub_mode and not self._auth_disabled
 
     async def review(
         self,
@@ -1391,3 +1512,92 @@ class AIEngineer:
     ) -> dict[str, Any] | None:
         """Always returns None — redesign driver uses deterministic round-robin."""
         return None
+
+    async def propose_budget_exhausted_options(
+        self,
+        state: "DesignState",
+        violation: str,
+    ) -> list[dict[str, Any]]:
+        """Return 3 geometry alternatives when the redesign budget is exhausted.
+
+        In live mode, calls Claude with the violation context and redesign
+        history to get AI-generated alternatives.  In stub mode (or when the
+        API call fails), delegates to :class:`AlternativeGenerator` for
+        deterministic fallback options.
+
+        Returns a list of dicts, each with keys:
+            ``description`` (str), ``rating`` (int 1-10).
+        """
+        generator = AlternativeGenerator()
+
+        if not self.is_available:
+            recipes = generator.generate(state, violation, n=3)
+            return [
+                {"description": r["description"], "rating": r["rating"]}
+                for r in recipes
+            ]
+
+        # --- Live Claude path ---
+        try:
+            # Build prompt inside the try-block so any future serialization
+            # mismatch on RedesignAttempt falls through to the deterministic
+            # AlternativeGenerator instead of escaping the BackgroundTask
+            # driving _surface_budget_exhausted.
+            history_snippets = []
+            redesign_history = getattr(state, "redesign_history", None) or []
+            for entry in redesign_history[-5:]:  # last 5 attempts
+                # entry is a RedesignAttempt Pydantic model — use attribute access.
+                # The model exposes `outcome: str` with values
+                # "pending" | "succeeded" | "failed" | "violation"; only
+                # "succeeded" means the lever change resolved the violation.
+                resolved = getattr(entry, "outcome", "") == "succeeded"
+                history_snippets.append(
+                    f"- Attempt: changed {entry.lever} to {entry.new_value} "
+                    f"→ {'resolved' if resolved else 'still violated'}"
+                )
+            history_text = "\n".join(history_snippets) if history_snippets else "None"
+
+            prompt = (
+                f"A shell-and-tube heat exchanger design has exhausted its redesign budget.\n\n"
+                f"Violation: {violation}\n\n"
+                f"Previous attempts:\n{history_text}\n\n"
+                f"Propose exactly 3 geometry modifications that could resolve the violation. "
+                f"Each option must be actionable (specify the parameter to change and the "
+                f"direction/magnitude). Return JSON only:\n"
+                f'{{"options": ['
+                f'{{"description": "...", "rating": <1-10>}}, '
+                f'{{"description": "...", "rating": <1-10>}}, '
+                f'{{"description": "...", "rating": <1-10>}}'
+                f']}}'
+            )
+
+            response_text = await self._anthropic_request_with_retry(
+                system_prompt="You are a senior heat exchanger process engineer.",
+                user_prompt=prompt,
+                label="budget_exhausted_options",
+            )
+            if response_text is None:
+                raise ValueError("empty response")
+            data = json.loads(response_text)
+            raw_options = data.get("options", [])
+            if isinstance(raw_options, list) and len(raw_options) >= 3:
+                return [
+                    {
+                        "description": str(o.get("description", "")),
+                        "rating": int(o.get("rating", 5)),
+                    }
+                    for o in raw_options[:3]
+                ]
+        except Exception as exc:
+            logger.warning(
+                "propose_budget_exhausted_options: Claude call failed (%s), "
+                "falling back to deterministic generator.",
+                exc,
+            )
+
+        # Fallback to deterministic generator on any Claude failure
+        recipes = generator.generate(state, violation, n=3)
+        return [
+            {"description": r["description"], "rating": r["rating"]}
+            for r in recipes
+        ]

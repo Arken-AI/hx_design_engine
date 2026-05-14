@@ -203,6 +203,70 @@ def _classify_step10_mechanical_failure(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Step 11 area / overdesign Layer 2 classifier
+# ---------------------------------------------------------------------------
+
+# Levers the RedesignDriver may vary to resolve a negative-overdesign
+# (undersized exchanger) failure detected in Step 11. Ordered so the
+# AI / fallback prefer the highest-leverage area changes first.
+_AREA_LEVERS: list[str] = [
+    "n_shells",
+    "tube_length_m",
+    "tube_od_m",
+    "n_passes",
+    "shell_passes",
+    "baffle_spacing_m",
+    "pitch_layout",
+    "multi_shell_arrangement",
+]
+
+# Matches Step 11 R3 (_rule_overdesign_not_negative) message:
+#   "Overdesign is -54.2% — exchanger is undersized. Need more area or higher U."
+_OVERDESIGN_NEG_RE = re.compile(r"exchanger is undersized", re.IGNORECASE)
+
+
+def _classify_step11_overdesign_failure(
+    step_id: int,
+    errors: list[str],
+) -> "DesignConstraintViolation | None":
+    """Return a DesignConstraintViolation for the Step 11 R3 negative-overdesign
+    pattern ("exchanger is undersized"); None otherwise.
+
+    Safe to call for any step_id — non-step-11 calls always return None.
+    Contract / missing-output errors and the fouling-paradox ESCALATE rule
+    return None (the latter is intentionally engineer-facing, not
+    redesign-routable).
+    """
+    if step_id != 11 or not errors:
+        return None
+    for msg in errors:
+        if _OVERDESIGN_NEG_RE.search(msg):
+            return DesignConstraintViolation(
+                step_id=11,
+                constraint="overdesign_negative",
+                message=msg,
+                suggested_levers=_AREA_LEVERS,
+            )
+    return None
+
+
+def _classify_redesignable_layer2_failure(
+    step_id: int,
+    errors: list[str],
+) -> "DesignConstraintViolation | None":
+    """Combined classifier for any Layer 2 failure that should be handed off
+    to the RedesignDriver instead of the user-facing escalation path.
+
+    Currently routes Step 10 mechanical (ΔP / nozzle ρv²) and Step 11
+    negative-overdesign violations.
+    """
+    return (
+        _classify_step10_mechanical_failure(step_id, errors)
+        or _classify_step11_overdesign_failure(step_id, errors)
+    )
+
+
 class PipelineRunner:
     """Runs the 5-step HX design pipeline for a single session."""
 
@@ -319,18 +383,19 @@ class PipelineRunner:
                             step.step_id, vr.errors,
                         )
 
-                        # --- Step 10 mechanical-design routing (autonomous) ---
-                        # ΔP / nozzle ρv² hard-rule failures cannot be fixed by
-                        # re-running Step 10 — they require an upstream geometry
-                        # change. Hand off to the RedesignDriver instead of the
-                        # user-facing escalation path so the user is never
-                        # prompted about internal mechanical choices.
-                        mech_violation = _classify_step10_mechanical_failure(
+                        # --- Autonomous redesign routing ---
+                        # Step 10 mechanical (ΔP / nozzle ρv²) and Step 11
+                        # negative-overdesign hard-rule failures cannot be fixed
+                        # by re-running the same step — they require an upstream
+                        # geometry change. Hand off to the RedesignDriver instead
+                        # of the user-facing escalation path so the user is never
+                        # prompted about internal geometry choices.
+                        mech_violation = _classify_redesignable_layer2_failure(
                             step.step_id, vr.errors,
                         )
                         if mech_violation is not None:
                             logger.info(
-                                "[PIPELINE] Step %d mechanical Layer 2 violation "
+                                "[PIPELINE] Step %d Layer 2 violation "
                                 "(%s) — handing off to RedesignDriver: %s",
                                 step.step_id, mech_violation.constraint, vr.errors,
                             )
@@ -693,19 +758,19 @@ class PipelineRunner:
                         and result.ai_review.decision == AIDecisionEnum.ESCALATE
                     ):
                         # If the residual unresolved escalation is still a
-                        # mechanical-design Step 10 issue (e.g. user feedback
-                        # didn't resolve it), hand off to the RedesignDriver
-                        # rather than surfacing internal escalation accounting
-                        # to the user.
+                        # redesign-routable Layer 2 issue (Step 10 mechanical or
+                        # Step 11 negative-overdesign that user feedback did not
+                        # resolve), hand off to the RedesignDriver rather than
+                        # surfacing internal escalation accounting to the user.
                         post_vr = check_validation_rules(step.step_id, result)
-                        mech_violation = _classify_step10_mechanical_failure(
+                        mech_violation = _classify_redesignable_layer2_failure(
                             step.step_id, post_vr.errors,
                         )
                         if mech_violation is not None:
                             logger.info(
                                 "[PIPELINE] Step %d residual escalation is a "
-                                "mechanical Layer 2 violation (%s) — handing off "
-                                "to RedesignDriver instead of erroring",
+                                "redesign-routable Layer 2 violation (%s) — handing "
+                                "off to RedesignDriver instead of erroring",
                                 step.step_id, mech_violation.constraint,
                             )
                             state.step_records = [
