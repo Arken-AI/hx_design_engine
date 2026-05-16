@@ -44,8 +44,12 @@ class FluidProperties(BaseModel):
     P_sat_Pa: Optional[float] = None           # saturation pressure at operating temperature (Pa)
 
     # --- Property provenance (populated by thermo adapter) ---
-    property_source: Optional[str] = None      # e.g. "iapws", "coolprop", "thermo", "petroleum-named", "petroleum-generic", "specialty"
+    property_source: Optional[str] = None      # e.g. "iapws", "coolprop", "thermo", "petroleum-named", "petroleum-generic", "specialty", "user_provided", "user_approved_estimate"
     property_confidence: Optional[float] = None  # 0.0–1.0; None = not assessed
+
+    # --- Approval / user-provided provenance (EPIC-XSTACK-2026-007) ---
+    approval_timestamp: Optional[str] = None   # ISO-8601; set when user approves an AI estimate
+    property_provided_at: Optional[str] = None # ISO-8601; set when user provides own values (Slice 2)
 
     @field_validator("phase")
     @classmethod

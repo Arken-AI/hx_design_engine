@@ -130,6 +130,12 @@ class AIReview(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
     user_summary: Optional[str] = None
 
+    # --- EPIC-XSTACK-2026-007-S1: Property escalation extras ---
+    # Set when decision == ESCALATE and the reason is a fluid property
+    # resolution failure (low-confidence AI estimate or no estimate at all).
+    event_subtype: Optional[str] = None                    # e.g. "property_request"
+    property_request_payload: Optional[dict] = None        # structured payload for frontend PropertyRequestCard
+
 
 # ---------------------------------------------------------------------------
 # StepResult

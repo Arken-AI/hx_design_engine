@@ -70,6 +70,9 @@ class StepEscalatedEvent(SSEBaseEvent):
     options: list[str] = Field(default_factory=list)
     option_ratings: list[int] = Field(default_factory=list)
     recommendation: Optional[str] = None
+    # EPIC-XSTACK-2026-007-S1: property-request escalation extras
+    event_subtype: Optional[str] = None               # "property_request" | None
+    property_request_payload: Optional[dict] = None   # structured AI estimate + metadata for PropertyRequestCard
 
 
 class StepCorrectedEvent(SSEBaseEvent):
