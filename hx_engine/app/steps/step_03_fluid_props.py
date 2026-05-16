@@ -14,6 +14,7 @@ ai_mode = CONDITIONAL — AI is only called when property anomalies are detected
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from hx_engine.app.adapters.thermo_adapter import (
@@ -21,10 +22,10 @@ from hx_engine.app.adapters.thermo_adapter import (
     get_freezing_or_pour_point,
     get_saturation_props,
 )
-from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.core.exceptions import CalculationError, PropertyResolutionRequired
 from hx_engine.app.models.design_state import FluidProperties
 from pydantic import ValidationError as PydanticValidationError
-from hx_engine.app.models.step_result import AIModeEnum, StepResult
+from hx_engine.app.models.step_result import AIDecisionEnum, AIReview, AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
 
 if TYPE_CHECKING:
@@ -104,6 +105,10 @@ class Step03FluidProperties(BaseStep):
 
         try:
             return await get_fluid_properties(fluid_name, T_mean_C, pressure_Pa)
+        except PropertyResolutionRequired:
+            # Let the confidence gate bubble up to execute() for structured
+            # escalation — do NOT wrap in CalculationError.
+            raise
         except CalculationError as exc:
             raise CalculationError(
                 3,
@@ -187,14 +192,54 @@ class Step03FluidProperties(BaseStep):
                 )
 
         # --- Resolve hot fluid properties ---
-        hot_props = await self._resolve_fluid(
-            state.hot_fluid_name, T_mean_hot, state.P_hot_Pa,
+        # Re-run detection: if the engineer already approved an AI estimate
+        # (Slice 1) or provided values manually (Slice 2), skip the adapter.
+        _HOT_APPROVED = (
+            state.hot_fluid_props is not None
+            and state.hot_fluid_props.property_source in (
+                "user_approved_estimate", "user_provided",
+            )
+        )
+        _COLD_APPROVED = (
+            state.cold_fluid_props is not None
+            and state.cold_fluid_props.property_source in (
+                "user_approved_estimate", "user_provided",
+            )
         )
 
+        hot_pres_exc: PropertyResolutionRequired | None = None
+        cold_pres_exc: PropertyResolutionRequired | None = None
+
+        if _HOT_APPROVED:
+            hot_props = state.hot_fluid_props
+        else:
+            try:
+                hot_props = await self._resolve_fluid(
+                    state.hot_fluid_name, T_mean_hot, state.P_hot_Pa,
+                )
+            except PropertyResolutionRequired as exc:
+                hot_pres_exc = exc
+                hot_props = None
+
         # --- Resolve cold fluid properties ---
-        cold_props = await self._resolve_fluid(
-            state.cold_fluid_name, T_mean_cold, state.P_cold_Pa,
-        )
+        if _COLD_APPROVED:
+            cold_props = state.cold_fluid_props
+        else:
+            try:
+                cold_props = await self._resolve_fluid(
+                    state.cold_fluid_name, T_mean_cold, state.P_cold_Pa,
+                )
+            except PropertyResolutionRequired as exc:
+                cold_pres_exc = exc
+                cold_props = None
+
+        # --- Gate: if either side failed confidence check, escalate ---
+        if hot_pres_exc is not None or cold_pres_exc is not None:
+            return self._build_property_escalation(
+                state,
+                hot_pres_exc=hot_pres_exc,
+                cold_pres_exc=cold_pres_exc,
+            )
 
         # Store for conditional AI trigger (Piece 4)
         self._hot_props = hot_props
@@ -330,6 +375,161 @@ class Step03FluidProperties(BaseStep):
             validation_passed=True,
             warnings=warnings,
         )
+
+    # ------------------------------------------------------------------
+    # EPIC-XSTACK-2026-007-S1: Property escalation helpers
+    # ------------------------------------------------------------------
+
+    def _build_property_escalation(
+        self,
+        state: "DesignState",
+        *,
+        hot_pres_exc: PropertyResolutionRequired | None,
+        cold_pres_exc: PropertyResolutionRequired | None,
+    ) -> StepResult:
+        """Build a StepResult(ESCALATE) when fluid properties need review.
+
+        Stores the pending exceptions on the step instance so
+        ``apply_user_override()`` can access the AI estimates.
+        """
+        self._pending_hot_request = hot_pres_exc
+        self._pending_cold_request = cold_pres_exc
+
+        fluids_payload: list[dict] = []
+        reasoning_parts: list[str] = []
+
+        for exc, side in [(hot_pres_exc, "hot"), (cold_pres_exc, "cold")]:
+            if exc is None:
+                continue
+            fluid_entry: dict = {
+                "fluid_name": exc.fluid_name,
+                "side": side,
+                "temperature_C": exc.temperature_C,
+                "confidence": exc.confidence,
+                "ai_estimate": None,
+            }
+            if exc.ai_estimate is not None:
+                est = exc.ai_estimate
+                fluid_entry["ai_estimate"] = {
+                    "density_kg_m3": est.density_kg_m3,
+                    "viscosity_Pa_s": est.viscosity_Pa_s,
+                    "cp_J_kgK": est.cp_J_kgK,
+                    "k_W_mK": est.k_W_mK,
+                    "Pr": est.Pr,
+                    "property_source": est.property_source,
+                    "property_confidence": est.property_confidence,
+                }
+                reasoning_parts.append(
+                    f"'{exc.fluid_name}' ({side}) at T={exc.temperature_C:.1f}°C — "
+                    f"AI confidence {exc.confidence:.0%} (threshold {exc.threshold:.0%}). "
+                    f"Please review the AI estimate before proceeding."
+                )
+            else:
+                reasoning_parts.append(
+                    f"'{exc.fluid_name}' ({side}) at T={exc.temperature_C:.1f}°C — "
+                    f"no AI estimate available (no API key or AI call failed). "
+                    f"Please provide fluid properties manually."
+                )
+            fluids_payload.append(fluid_entry)
+
+        threshold = (hot_pres_exc or cold_pres_exc).threshold  # type: ignore[union-attr]
+
+        property_request_payload = {
+            "fluids": fluids_payload,
+            "required_properties": [
+                "density_kg_m3",
+                "viscosity_Pa_s",
+                "cp_J_kgK",
+                "k_W_mK",
+            ],
+            "threshold": threshold,
+        }
+
+        reasoning = " | ".join(reasoning_parts)
+
+        review = AIReview(
+            decision=AIDecisionEnum.ESCALATE,
+            reasoning=reasoning,
+            options=[
+                "Approve the AI estimate and continue",
+                "I will provide values manually (coming soon)",
+                "Use a substitute fluid (coming soon)",
+            ],
+            option_ratings=[7, 3, 3],
+            recommendation=(
+                "Review the AI-estimated fluid properties in the table below. "
+                "If they look reasonable for your application, approve them to continue. "
+                "For critical designs, supply measured values."
+            ),
+            event_subtype="property_request",
+            property_request_payload=property_request_payload,
+        )
+
+        return StepResult(
+            step_id=self.step_id,
+            step_name=self.step_name,
+            outputs={
+                "_event_subtype": "property_request",
+                "_property_request_payload": property_request_payload,
+            },
+            validation_passed=False,
+            warnings=[],
+            ai_review=review,
+        )
+
+    def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str = "",
+    ) -> None:
+        """Handle engineer's response to a property escalation.
+
+        Option 0 — "Approve the AI estimate":
+            Stamps ``property_source = "user_approved_estimate"`` and
+            ``approval_timestamp`` on the AI estimate, then writes it to
+            ``state.hot_fluid_props`` / ``state.cold_fluid_props``.
+
+        Returns None to signal "re-run this step" (``pipeline_runner``
+        convention for ``apply_user_override``).
+        """
+        if option_index == 0 or "approve" in (text or "").lower():
+            now_iso = datetime.now(tz=timezone.utc).isoformat()
+
+            for exc, attr in [
+                (self._pending_hot_request, "hot_fluid_props"),
+                (self._pending_cold_request, "cold_fluid_props"),
+            ]:
+                if exc is None:
+                    continue
+                estimate = exc.ai_estimate
+                if estimate is None:
+                    logger.warning(
+                        "Engineer approved property estimate for '%s' (%s side) "
+                        "but no AI estimate was available — skipping.",
+                        exc.fluid_name,
+                        attr.split("_")[0],
+                    )
+                    continue
+                # Stamp approved provenance
+                estimate = estimate.model_copy(update={
+                    "property_source": "user_approved_estimate",
+                    "approval_timestamp": now_iso,
+                })
+                setattr(state, attr, estimate)
+                logger.info(
+                    "Engineer approved AI estimate for '%s' (%s) — "
+                    "approval_timestamp=%s, confidence=%.2f",
+                    exc.fluid_name, attr, now_iso, exc.confidence,
+                )
+        else:
+            logger.info(
+                "Engineer chose option %d for property escalation — "
+                "Slice 2 handler not yet implemented; step will re-run.",
+                option_index,
+            )
+
+        return None  # signal: re-run step 3
 
     # ------------------------------------------------------------------
     # Piece 4: Conditional AI trigger
