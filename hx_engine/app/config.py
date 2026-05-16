@@ -30,6 +30,13 @@ class HXEngineSettings(BaseSettings):
     # escalation loop.
     max_internal_escalations: int = 4
 
+    # EPIC-XSTACK-2026-007-S1: Fluid Property Validation Gate
+    # When the AI is the only available source for a fluid's thermophysical
+    # properties, the pipeline pauses and asks the engineer to review the
+    # estimate if its confidence score is below this threshold.
+    # Override via HX_FLUID_PROPERTY_CONFIDENCE_THRESHOLD.
+    fluid_property_confidence_threshold: float = 0.70
+
     ai_model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # HX_ANTHROPIC_API_KEY — enables live AI reviews when set
 
