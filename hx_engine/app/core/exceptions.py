@@ -2,7 +2,60 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from hx_engine.app.models.design_state import FluidProperties
+
+
+class PropertyResolutionRequired(Exception):
+    """Raised when fluid properties cannot be resolved from validated sources
+    and the AI confidence is below the configurable threshold.
+
+    Instead of silently applying a low-confidence estimate, this exception
+    signals that the pipeline must pause and ask the engineer to:
+      (a) approve the AI estimate as-is
+      (b) provide their own measured / datasheet values  (Slice 2)
+      (c) specify a substitute fluid                     (future)
+
+    Attributes
+    ----------
+    fluid_name:
+        The normalised fluid name the lookup was attempted with.
+    temperature_C:
+        The mean temperature at which properties were requested.
+    ai_estimate:
+        The ``FluidProperties`` returned by the AI, if available.
+        ``None`` when no API key is present or the AI call failed.
+    confidence:
+        AI confidence score 0–1 (0.0 when no estimate is available).
+    threshold:
+        The configured threshold that triggered this exception.
+    side:
+        ``"hot"`` or ``"cold"`` — identifies which fluid stream needs data.
+    """
+
+    def __init__(
+        self,
+        fluid_name: str,
+        temperature_C: float,
+        *,
+        ai_estimate: Optional["FluidProperties"] = None,
+        confidence: float = 0.0,
+        threshold: float = 0.70,
+        side: str = "hot",
+    ) -> None:
+        self.fluid_name = fluid_name
+        self.temperature_C = temperature_C
+        self.ai_estimate = ai_estimate
+        self.confidence = confidence
+        self.threshold = threshold
+        self.side = side
+        super().__init__(
+            f"Fluid '{fluid_name}' at T={temperature_C:.1f}°C: "
+            f"AI confidence {confidence:.0%} is below the threshold {threshold:.0%}. "
+            f"Engineer input required before the pipeline can continue."
+        )
 
 
 class CalculationError(Exception):
