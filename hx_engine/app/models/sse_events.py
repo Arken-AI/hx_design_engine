@@ -71,8 +71,13 @@ class StepEscalatedEvent(SSEBaseEvent):
     option_ratings: list[int] = Field(default_factory=list)
     recommendation: Optional[str] = None
     # EPIC-XSTACK-2026-007-S1: property-request escalation extras
-    event_subtype: Optional[str] = None               # "property_request" | None
+    event_subtype: Optional[str] = None               # "property_request" | "ai_property_suggestion" | None
     property_request_payload: Optional[dict] = None   # structured AI estimate + metadata for PropertyRequestCard
+    # EPIC-XSTACK-2026-007-S2: AI property suggestion transparency fields
+    reason: Optional[str] = None               # why the AI is suggesting this value
+    engineering_impact: Optional[str] = None   # what is affected by this property
+    proposed_value: Optional[float] = None     # AI-suggested value
+    current_value: Optional[float] = None      # current value in use
 
 
 class StepCorrectedEvent(SSEBaseEvent):

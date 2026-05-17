@@ -425,6 +425,16 @@ class DesignState(BaseModel):
     hot_fluid_props: Optional[FluidProperties] = None
     cold_fluid_props: Optional[FluidProperties] = None
 
+    # --- User-provided fluid properties (EPIC-XSTACK-2026-007-S2) ---
+    # Populated when an engineer supplies manual datasheet or measured values.
+    # First-priority lookup in Step 3 — never overwritten by adapter, AI estimate,
+    # or AI correction without an explicit new user action.
+    user_provided_hot_props: Optional[FluidProperties] = None
+    user_provided_cold_props: Optional[FluidProperties] = None
+    # Mean temperature (°C) at which user provided properties, for drift detection.
+    user_property_temp_hot_C: Optional[float] = None
+    user_property_temp_cold_C: Optional[float] = None
+
     # --- phase regime (populated by Step 3) ---
     # Declared phase regime for each stream
     hot_phase: Optional[str] = None    # "liquid" | "vapor" | "condensing" | "evaporating"
