@@ -161,3 +161,73 @@ class TestDesignState:
         s = DesignState()
         assert s.design_strengths == []
         assert s.design_risks == []
+
+
+# ---------------------------------------------------------------------------
+# EPIC-XSTACK-2026-007-S2: user-provided property fields
+# ---------------------------------------------------------------------------
+
+class TestDesignStateUserProvided:
+    """Tests for user_provided_hot_props / cold_props / temp fields added in Slice 2."""
+
+    def test_user_provided_hot_props_defaults_none(self):
+        s = DesignState()
+        assert s.user_provided_hot_props is None
+
+    def test_user_provided_cold_props_defaults_none(self):
+        s = DesignState()
+        assert s.user_provided_cold_props is None
+
+    def test_user_property_temp_hot_C_defaults_none(self):
+        s = DesignState()
+        assert s.user_property_temp_hot_C is None
+
+    def test_user_property_temp_cold_C_defaults_none(self):
+        s = DesignState()
+        assert s.user_property_temp_cold_C is None
+
+    def test_assign_user_provided_hot_props(self):
+        s = DesignState()
+        fp = FluidProperties(
+            density_kg_m3=850.0,
+            viscosity_Pa_s=0.002,
+            property_source="user_provided",
+        )
+        s.user_provided_hot_props = fp
+        assert s.user_provided_hot_props.density_kg_m3 == pytest.approx(850.0)
+        assert s.user_provided_hot_props.property_source == "user_provided"
+
+    def test_assign_user_provided_cold_props(self):
+        s = DesignState()
+        fp = FluidProperties(density_kg_m3=920.0, property_source="user_provided")
+        s.user_provided_cold_props = fp
+        assert s.user_provided_cold_props.density_kg_m3 == pytest.approx(920.0)
+
+    def test_user_property_temps_assignable(self):
+        s = DesignState()
+        s.user_property_temp_hot_C = 120.0
+        s.user_property_temp_cold_C = 45.0
+        assert s.user_property_temp_hot_C == pytest.approx(120.0)
+        assert s.user_property_temp_cold_C == pytest.approx(45.0)
+
+    def test_user_provided_props_round_trip_json(self):
+        fp = FluidProperties(
+            density_kg_m3=860.0,
+            viscosity_Pa_s=0.003,
+            cp_J_kgK=2050.0,
+            k_W_mK=0.13,
+            property_source="user_provided",
+        )
+        s = DesignState(
+            user_provided_hot_props=fp,
+            user_property_temp_hot_C=120.0,
+        )
+        json_str = s.model_dump_json()
+        s2 = DesignState.model_validate_json(json_str)
+
+        assert s2.user_provided_hot_props is not None
+        assert s2.user_provided_hot_props.density_kg_m3 == pytest.approx(860.0)
+        assert s2.user_provided_hot_props.property_source == "user_provided"
+        assert s2.user_property_temp_hot_C == pytest.approx(120.0)
+        assert s2.user_provided_cold_props is None
+
