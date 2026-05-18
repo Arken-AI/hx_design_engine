@@ -29,6 +29,7 @@ from hx_engine.app.core.validation_rules import check as check_validation_rules
 from hx_engine.app.adapters.thermo_adapter import get_fluid_properties
 from hx_engine.app.config import settings as _engine_settings
 from hx_engine.app.models.design_state import DesignState
+from hx_engine.app.services.property_provenance import PropertyProvenanceBuilder
 from hx_engine.app.models.sse_events import (
     DesignCompleteEvent,
     IterationProgressEvent,
@@ -866,6 +867,7 @@ class PipelineRunner:
                 )
                 state.pipeline_status = "completed"
                 state.is_complete = True
+                state.property_provenance = PropertyProvenanceBuilder.build(state)
                 await self.session_store.save(session_id, state)
                 await self.sse_manager.emit(
                     session_id,
@@ -1478,4 +1480,5 @@ class PipelineRunner:
             "overdesign_pct": state.overdesign_pct,
             "design_strengths": state.design_strengths,
             "design_risks": state.design_risks,
+            "property_provenance": state.property_provenance,
         }

@@ -435,6 +435,9 @@ class DesignState(BaseModel):
     user_property_temp_hot_C: Optional[float] = None
     user_property_temp_cold_C: Optional[float] = None
 
+    # --- Property Provenance (EPIC-XSTACK-2026-007-S3) ---
+    property_provenance: Optional[dict] = None  # populated at pipeline completion
+
     # --- phase regime (populated by Step 3) ---
     # Declared phase regime for each stream
     hot_phase: Optional[str] = None    # "liquid" | "vapor" | "condensing" | "evaporating"

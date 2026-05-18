@@ -231,3 +231,21 @@ class TestDesignStateUserProvided:
         assert s2.user_property_temp_hot_C == pytest.approx(120.0)
         assert s2.user_provided_cold_props is None
 
+
+class TestDesignStatePropertyProvenance:
+    """Tests for property_provenance field added in Slice 3."""
+
+    def test_property_provenance_defaults_none(self):
+        s = DesignState()
+        assert s.property_provenance is None
+
+    def test_property_provenance_can_be_set(self):
+        s = DesignState()
+        provenance = {
+            "hot_fluid": {"fluid_name": "Steam", "source": "iapws", "label": "IAPWS-IF97 Reference", "confidence": None, "properties": {}},
+            "cold_fluid": {"fluid_name": "Water", "source": "iapws", "label": "IAPWS-IF97 Reference", "confidence": None, "properties": {}},
+        }
+        s.property_provenance = provenance
+        assert s.property_provenance is not None
+        assert s.property_provenance["hot_fluid"]["source"] == "iapws"
+
