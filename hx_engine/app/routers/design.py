@@ -8,7 +8,7 @@ POST /api/v1/hx/design/{id}/respond  → user response to ESCALATED step
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
@@ -56,6 +56,7 @@ class DesignStatusResponse(BaseModel):
     warnings: list[str]
     notes: list[str]
     escalation_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    property_provenance: Optional[dict[str, Any]] = None
 
 
 class UserResponse(BaseModel):
@@ -248,6 +249,7 @@ async def get_design_status(
         warnings=state.warnings,
         notes=state.notes,
         escalation_history=state.escalation_history,
+        property_provenance=state.property_provenance,
     )
 
 
