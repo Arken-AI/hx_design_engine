@@ -14,17 +14,18 @@ ai_mode = CONDITIONAL — AI is only called when property anomalies are detected
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from hx_engine.app.adapters.thermo_adapter import (
     get_fluid_properties,
     get_freezing_or_pour_point,
     get_saturation_props,
 )
-from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.core.exceptions import CalculationError, PropertyResolutionRequired
 from hx_engine.app.models.design_state import FluidProperties
 from pydantic import ValidationError as PydanticValidationError
-from hx_engine.app.models.step_result import AIModeEnum, StepResult
+from hx_engine.app.models.step_result import AIDecisionEnum, AIReview, AIModeEnum, StepResult
 from hx_engine.app.steps.base import BaseStep
 
 if TYPE_CHECKING:
@@ -46,6 +47,15 @@ _MU_VARIATION_ESCALATE = 10.0 # rule failure → ESCALATE (correctable=False)
 
 # ── P2-19: freezing-point soft-margin band (T_min - T_freeze) ──────────
 _FREEZE_MARGIN_WARN_K = 5.0
+
+# Engineering impact text for AI property suggestion escalation cards.
+# Rendered verbatim in the frontend — use plain prose, no markdown.
+IMPACT_TEXT: dict[str, str] = {
+    "density_kg_m3":  "Density affects mass flow rates, velocity calculations, and Reynolds number.",
+    "viscosity_Pa_s": "Viscosity strongly affects Reynolds number, heat-transfer coefficients, and pressure drop.",
+    "cp_J_kgK":       "Specific heat affects required duty and NTU calculations.",
+    "k_W_mK":         "Thermal conductivity affects the Prandtl number and convective heat-transfer coefficient.",
+}
 
 
 class Step03FluidProperties(BaseStep):
@@ -104,6 +114,10 @@ class Step03FluidProperties(BaseStep):
 
         try:
             return await get_fluid_properties(fluid_name, T_mean_C, pressure_Pa)
+        except PropertyResolutionRequired:
+            # Let the confidence gate bubble up to execute() for structured
+            # escalation — do NOT wrap in CalculationError.
+            raise
         except CalculationError as exc:
             raise CalculationError(
                 3,
@@ -187,14 +201,95 @@ class Step03FluidProperties(BaseStep):
                 )
 
         # --- Resolve hot fluid properties ---
-        hot_props = await self._resolve_fluid(
-            state.hot_fluid_name, T_mean_hot, state.P_hot_Pa,
-        )
+        # Three-level lookup priority (EPIC-XSTACK-2026-007-S2):
+        # Level 1: user_provided_* (engineer manual entry) — absolute priority
+        # Level 2: approved AI estimate (Slice 1)
+        # Level 3: adapter chain
+        hot_pres_exc: PropertyResolutionRequired | None = None
+        cold_pres_exc: PropertyResolutionRequired | None = None
+
+        # Level 1 (new, Slice 2): user_provided_* takes absolute priority
+        if state.user_provided_hot_props is not None:
+            hot_props = state.user_provided_hot_props
+            state.hot_fluid_props = hot_props  # ensure downstream steps see user values
+            if state.user_property_temp_hot_C is not None:
+                delta_T = abs(T_mean_hot - state.user_property_temp_hot_C)
+                if delta_T > 15.0:
+                    warnings.append(
+                        f"Hot fluid: user-provided properties were measured at "
+                        f"{state.user_property_temp_hot_C:.1f}\u00b0C but the current mean "
+                        f"temperature is {T_mean_hot:.1f}\u00b0C (\u0394T = {delta_T:.1f}\u00b0C > 15\u00b0C). "
+                        f"Temperature-sensitive properties (viscosity, k) may have drifted "
+                        f"\u2014 consider providing updated values."
+                    )
+                else:
+                    state.notes.append(
+                        f"Hot fluid: re-using engineer-provided properties "
+                        f"(\u0394T from reference = {delta_T:.1f}\u00b0C < 15\u00b0C \u2014 within acceptable range)."
+                    )
+        # Level 2 (existing, Slice 1): approved AI estimate
+        elif (
+            state.hot_fluid_props is not None
+            and state.hot_fluid_props.property_source in (
+                "user_approved_estimate", "user_provided",
+            )
+        ):
+            hot_props = state.hot_fluid_props
+        # Level 3: adapter chain
+        else:
+            try:
+                hot_props = await self._resolve_fluid(
+                    state.hot_fluid_name, T_mean_hot, state.P_hot_Pa,
+                )
+            except PropertyResolutionRequired as exc:
+                hot_pres_exc = exc
+                hot_props = None
 
         # --- Resolve cold fluid properties ---
-        cold_props = await self._resolve_fluid(
-            state.cold_fluid_name, T_mean_cold, state.P_cold_Pa,
-        )
+        # Level 1 (new, Slice 2): user_provided_* takes absolute priority
+        if state.user_provided_cold_props is not None:
+            cold_props = state.user_provided_cold_props
+            state.cold_fluid_props = cold_props  # ensure downstream steps see user values
+            if state.user_property_temp_cold_C is not None:
+                delta_T = abs(T_mean_cold - state.user_property_temp_cold_C)
+                if delta_T > 15.0:
+                    warnings.append(
+                        f"Cold fluid: user-provided properties were measured at "
+                        f"{state.user_property_temp_cold_C:.1f}\u00b0C but the current mean "
+                        f"temperature is {T_mean_cold:.1f}\u00b0C (\u0394T = {delta_T:.1f}\u00b0C > 15\u00b0C). "
+                        f"Temperature-sensitive properties (viscosity, k) may have drifted "
+                        f"\u2014 consider providing updated values."
+                    )
+                else:
+                    state.notes.append(
+                        f"Cold fluid: re-using engineer-provided properties "
+                        f"(\u0394T from reference = {delta_T:.1f}\u00b0C < 15\u00b0C \u2014 within acceptable range)."
+                    )
+        # Level 2 (existing, Slice 1): approved AI estimate
+        elif (
+            state.cold_fluid_props is not None
+            and state.cold_fluid_props.property_source in (
+                "user_approved_estimate", "user_provided",
+            )
+        ):
+            cold_props = state.cold_fluid_props
+        # Level 3: adapter chain
+        else:
+            try:
+                cold_props = await self._resolve_fluid(
+                    state.cold_fluid_name, T_mean_cold, state.P_cold_Pa,
+                )
+            except PropertyResolutionRequired as exc:
+                cold_pres_exc = exc
+                cold_props = None
+
+        # --- Gate: if either side failed confidence check, escalate ---
+        if hot_pres_exc is not None or cold_pres_exc is not None:
+            return self._build_property_escalation(
+                state,
+                hot_pres_exc=hot_pres_exc,
+                cold_pres_exc=cold_pres_exc,
+            )
 
         # Store for conditional AI trigger (Piece 4)
         self._hot_props = hot_props
@@ -329,6 +424,352 @@ class Step03FluidProperties(BaseStep):
             outputs=outputs,
             validation_passed=True,
             warnings=warnings,
+        )
+
+    # ------------------------------------------------------------------
+    # EPIC-XSTACK-2026-007-S1: Property escalation helpers
+    # ------------------------------------------------------------------
+
+    def _build_property_escalation(
+        self,
+        state: "DesignState",
+        *,
+        hot_pres_exc: PropertyResolutionRequired | None,
+        cold_pres_exc: PropertyResolutionRequired | None,
+    ) -> StepResult:
+        """Build a StepResult(ESCALATE) when fluid properties need review.
+
+        Stores the pending exceptions on the step instance so
+        ``apply_user_override()`` can access the AI estimates.
+        """
+        self._pending_hot_request = hot_pres_exc
+        self._pending_cold_request = cold_pres_exc
+
+        fluids_payload: list[dict] = []
+        reasoning_parts: list[str] = []
+
+        for exc, side in [(hot_pres_exc, "hot"), (cold_pres_exc, "cold")]:
+            if exc is None:
+                continue
+            fluid_entry: dict = {
+                "fluid_name": exc.fluid_name,
+                "side": side,
+                "temperature_C": exc.temperature_C,
+                "confidence": exc.confidence,
+                "ai_estimate": None,
+            }
+            if exc.ai_estimate is not None:
+                est = exc.ai_estimate
+                fluid_entry["ai_estimate"] = {
+                    "density_kg_m3": est.density_kg_m3,
+                    "viscosity_Pa_s": est.viscosity_Pa_s,
+                    "cp_J_kgK": est.cp_J_kgK,
+                    "k_W_mK": est.k_W_mK,
+                    "Pr": est.Pr,
+                    "property_source": est.property_source,
+                    "property_confidence": est.property_confidence,
+                }
+                reasoning_parts.append(
+                    f"'{exc.fluid_name}' ({side}) at T={exc.temperature_C:.1f}°C — "
+                    f"AI confidence {exc.confidence:.0%} (threshold {exc.threshold:.0%}). "
+                    f"Please review the AI estimate before proceeding."
+                )
+            else:
+                reasoning_parts.append(
+                    f"'{exc.fluid_name}' ({side}) at T={exc.temperature_C:.1f}°C — "
+                    f"no AI estimate available (no API key or AI call failed). "
+                    f"Please provide fluid properties manually."
+                )
+            fluids_payload.append(fluid_entry)
+
+        threshold = (hot_pres_exc or cold_pres_exc).threshold  # type: ignore[union-attr]
+
+        property_request_payload = {
+            "fluids": fluids_payload,
+            "required_properties": [
+                "density_kg_m3",
+                "viscosity_Pa_s",
+                "cp_J_kgK",
+                "k_W_mK",
+            ],
+            "threshold": threshold,
+        }
+
+        reasoning = " | ".join(reasoning_parts)
+
+        review = AIReview(
+            decision=AIDecisionEnum.ESCALATE,
+            reasoning=reasoning,
+            options=[
+                "Approve the AI estimate and continue",
+                "Enter my own measured or datasheet values",
+                "Use a substitute fluid (coming soon)",
+            ],
+            option_ratings=[7, 3, 3],
+            recommendation=(
+                "Review the AI-estimated fluid properties in the table below. "
+                "If they look reasonable for your application, approve them to continue. "
+                "For critical designs, supply measured values."
+            ),
+            event_subtype="property_request",
+            property_request_payload=property_request_payload,
+        )
+
+        return StepResult(
+            step_id=self.step_id,
+            step_name=self.step_name,
+            outputs={
+                "_event_subtype": "property_request",
+                "_property_request_payload": property_request_payload,
+            },
+            validation_passed=False,
+            warnings=[],
+            ai_review=review,
+        )
+
+    def apply_user_override(
+        self,
+        state: "DesignState",
+        option_index: int,
+        text: str = "",
+    ) -> None:
+        """Handle engineer's response to a property escalation.
+
+        Option 0 — "Approve the AI estimate":
+            Stamps ``property_source = "user_approved_estimate"`` and
+            ``approval_timestamp`` on the AI estimate, then writes it to
+            ``state.hot_fluid_props`` / ``state.cold_fluid_props``.
+
+        Returns None to signal "re-run this step" (``pipeline_runner``
+        convention for ``apply_user_override``).
+        """
+        if option_index == 0 or "approve" in (text or "").lower():
+            now_iso = datetime.now(tz=timezone.utc).isoformat()
+
+            for exc, attr in [
+                (self._pending_hot_request, "hot_fluid_props"),
+                (self._pending_cold_request, "cold_fluid_props"),
+            ]:
+                if exc is None:
+                    continue
+                estimate = exc.ai_estimate
+                if estimate is None:
+                    logger.warning(
+                        "Engineer approved property estimate for '%s' (%s side) "
+                        "but no AI estimate was available — skipping.",
+                        exc.fluid_name,
+                        attr.split("_")[0],
+                    )
+                    continue
+                # Stamp approved provenance
+                estimate = estimate.model_copy(update={
+                    "property_source": "user_approved_estimate",
+                    "approval_timestamp": now_iso,
+                })
+                setattr(state, attr, estimate)
+                logger.info(
+                    "Engineer approved AI estimate for '%s' (%s) — "
+                    "approval_timestamp=%s, confidence=%.2f",
+                    exc.fluid_name, attr, now_iso, exc.confidence,
+                )
+        elif option_index == 1:
+            # Option 1: engineer wants to supply their own property values.
+            # ``text`` may be a JSON string or a free-text key=value string;
+            # the structured path is preferred (backend proxy sends JSON).
+            self._apply_manual_properties(state, text)
+
+        else:
+            logger.info(
+                "Engineer chose option %d for property escalation — "
+                "no handler implemented; step will re-run.",
+                option_index,
+            )
+
+        return None  # signal: re-run step 3
+
+    # ------------------------------------------------------------------
+    # EPIC-XSTACK-2026-007-S2: manual property entry helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_user_props(
+        user_props: "FluidProperties",
+        adapter_props: "FluidProperties",
+    ) -> "FluidProperties":
+        """Overlay user-supplied fields on top of adapter-resolved fields.
+
+        Only non-None fields from *user_props* replace the adapter values;
+        all other metadata (phase, Pr, etc.) is taken from *adapter_props*.
+        This ensures user-provided measurements take unconditional priority
+        while the adapter fills in any unspecified properties.
+        """
+        merged_data = adapter_props.model_dump()
+        for field in ("density_kg_m3", "viscosity_Pa_s", "cp_J_kgK", "k_W_mK"):
+            val = getattr(user_props, field, None)
+            if val is not None:
+                merged_data[field] = val
+        merged_data["property_source"] = "user_provided"
+        merged_data["property_provided_at"] = user_props.property_provided_at
+        return FluidProperties(**merged_data)
+
+    def _apply_manual_properties(
+        self,
+        state: "DesignState",
+        text: str,
+    ) -> None:
+        """Parse the engineer's manual property payload and store it.
+
+        The payload may arrive as:
+          - A JSON-encoded dict from the backend proxy
+          - A free-text "key=value" string (fallback)
+
+        Expected JSON structure (from backend proxy):
+          { "fluid_side": "hot"|"cold", "properties": { ... } }
+
+        Missing property keys are allowed; partial sets are stored as-is.
+        Step 3's execute() merges user-provided fields with adapter-resolved
+        fields via _merge_user_props() when only some properties are supplied.
+        """
+        import json
+
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        payload: dict[str, Any] = {}
+
+        # Try structured JSON first
+        if text and text.strip().startswith("{"):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                logger.warning("Step 3: manual-entry text is not valid JSON; skipping.")
+                return
+        else:
+            logger.info(
+                "Step 3: apply_user_override(option=1) called with non-JSON text — "
+                "no manual properties stored; pipeline will re-escalate."
+            )
+            return
+
+        fluid_side = payload.get("fluid_side", "").lower()
+        props_dict = payload.get("properties", {})
+
+        if fluid_side not in ("hot", "cold"):
+            logger.warning(
+                "Step 3 manual entry: fluid_side '%s' unrecognised — skipping.",
+                fluid_side,
+            )
+            return
+
+        if not props_dict:
+            logger.warning("Step 3 manual entry: empty properties dict — skipping.")
+            return
+
+        # Build FluidProperties — Pydantic enforces physical bounds.
+        # ValidationError here means the backend pre-check was bypassed or
+        # the user sent out-of-range values; log and return (pipeline re-escalates).
+        try:
+            fp = FluidProperties(
+                density_kg_m3=props_dict.get("density_kg_m3"),
+                viscosity_Pa_s=props_dict.get("viscosity_Pa_s"),
+                cp_J_kgK=props_dict.get("cp_J_kgK"),
+                k_W_mK=props_dict.get("k_W_mK"),
+                property_source="user_provided",
+                property_provided_at=now_iso,
+            )
+        except PydanticValidationError as exc:
+            logger.warning(
+                "Step 3 manual entry: property validation failed — %s", exc
+            )
+            return
+
+        # Determine mean temperature at which properties were provided.
+        # Use whatever is currently cached (just computed in execute()).
+        T_mean: float | None = (
+            getattr(state, "T_mean_hot_C", None)
+            if fluid_side == "hot"
+            else getattr(state, "T_mean_cold_C", None)
+        )
+
+        if fluid_side == "hot":
+            state.user_provided_hot_props = fp
+            state.hot_fluid_props = fp
+            if T_mean is not None:
+                state.user_property_temp_hot_C = T_mean
+        else:
+            state.user_provided_cold_props = fp
+            state.cold_fluid_props = fp
+            if T_mean is not None:
+                state.user_property_temp_cold_C = T_mean
+
+        fluid_name = (
+            state.hot_fluid_name if fluid_side == "hot" else state.cold_fluid_name
+        )
+        logger.info(
+            "Engineer provided manual properties for '%s' (%s side) — "
+            "source=user_provided, provided_at=%s",
+            fluid_name, fluid_side, now_iso,
+        )
+
+    def _apply_ai_correction_with_gate(
+        self,
+        state: "DesignState",
+        fluid_side: str,
+        field: str,
+        corrected_value: float,
+        reason: str,
+    ) -> None:
+        """Guard for AI-generated property corrections (EPIC-XSTACK-2026-007-S2).
+
+        Per the AI Confirmation Workflow specification (17 May 2026), ARKEN
+        must NEVER silently apply AI-generated corrections to fluid properties.
+
+        Case A — user already provided this field:
+            Block the correction silently; append a note to state.notes.
+
+        Case B — adapter-estimated field:
+            Emit a PropertyEscalationEvent and pause for user confirmation.
+            (Implemented via re-raising a sub-exception that base.py handles;
+            in the current architecture this stores the pending correction on
+            the step instance and marks the pipeline as waiting.)
+        """
+        user_props = (
+            state.user_provided_hot_props
+            if fluid_side == "hot"
+            else state.user_provided_cold_props
+        )
+        user_value = getattr(user_props, field, None) if user_props is not None else None
+
+        if user_value is not None:
+            # Case A: user-provided field — block correction
+            state.notes.append(
+                f"AI correction to {field} ({fluid_side} side) blocked — "
+                f"user-provided value takes precedence."
+            )
+            logger.info(
+                "AI correction to %s (%s side) blocked — user-provided value takes precedence.",
+                field, fluid_side,
+            )
+            return
+
+        # Case B: adapter-estimated field — emit escalation payload for base.py
+        # Store on the instance; base.py's on_review_accepted / correction loop
+        # will detect this and emit the appropriate SSE event.
+        existing_props = (
+            state.hot_fluid_props if fluid_side == "hot" else state.cold_fluid_props
+        )
+        current_value = getattr(existing_props, field, None) if existing_props else None
+
+        self._pending_ai_correction = {
+            "fluid_side": fluid_side,
+            "field": field,
+            "proposed_value": corrected_value,
+            "current_value": current_value,
+            "reason": reason,
+            "engineering_impact": IMPACT_TEXT.get(field, ""),
+        }
+        logger.info(
+            "AI correction to %s (%s side) deferred for user confirmation — "
+            "proposed=%.6g, current=%.6g",
+            field, fluid_side, corrected_value, current_value or 0,
         )
 
     # ------------------------------------------------------------------

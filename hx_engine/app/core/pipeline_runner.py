@@ -1265,6 +1265,8 @@ class PipelineRunner:
                 options=review.options if review else [],
                 option_ratings=review.option_ratings if review else [],
                 recommendation=review.recommendation if review else None,
+                event_subtype=review.event_subtype if review else None,
+                property_request_payload=review.property_request_payload if review else None,
             )
 
         else:

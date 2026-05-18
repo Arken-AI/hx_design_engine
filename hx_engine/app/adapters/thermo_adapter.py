@@ -591,12 +591,19 @@ async def get_fluid_properties(
 
     Phase suffixes ("vapour", "liquid", "gas") are stripped before lookup.
 
-    Raises ``CalculationError`` if the fluid cannot be resolved.
+    Raises ``PropertyResolutionRequired`` when the fluid is not in any
+    validated source (tiers 1–5) and the AI estimate confidence is below
+    ``settings.fluid_property_confidence_threshold`` (default 0.70).
+
+    Raises ``CalculationError`` if the fluid cannot be resolved at all
+    (no AI key, AI failure, and no cache hit above threshold).
     """
+    from hx_engine.app.core.exceptions import PropertyResolutionRequired
     from hx_engine.app.core.fluid_property_store import (
         find_cached_properties,
         ask_ai_for_properties,
     )
+    from hx_engine.app.config import settings as _cfg
 
     if pressure_Pa is None:
         pressure_Pa = _DEFAULT_PRESSURE_PA
@@ -609,6 +616,10 @@ async def get_fluid_properties(
     # Strip phase suffixes ("ethylene vapour" → "ethylene")
     normalised = _strip_phase_suffix(normalised)
 
+    # Confidence threshold for AI-sourced properties.
+    # Reads from settings so it can be overridden via HX_FLUID_PROPERTY_CONFIDENCE_THRESHOLD.
+    _threshold = _cfg.fluid_property_confidence_threshold
+
     # --- Deterministic backends 1-5 ---
     result = _try_deterministic_backends(normalised, temperature_C, pressure_Pa)
     if result is not None:
@@ -617,8 +628,22 @@ async def get_fluid_properties(
     # --- 6. MongoDB cache of previously AI-estimated properties ---
     cached = await find_cached_properties(normalised, temperature_C)
     if cached is not None:
-        import logging
-        logging.getLogger(__name__).info(
+        cached_confidence = cached.property_confidence or 0.0
+        if cached_confidence < _threshold:
+            # Cached but below threshold — gate fires: engineer must review.
+            _logger.info(
+                "Cached AI properties for '%s' at %.1f°C have confidence %.2f "
+                "below threshold %.2f — raising PropertyResolutionRequired",
+                normalised, temperature_C, cached_confidence, _threshold,
+            )
+            raise PropertyResolutionRequired(
+                fluid_name=fluid_name,
+                temperature_C=temperature_C,
+                ai_estimate=cached,
+                confidence=cached_confidence,
+                threshold=_threshold,
+            )
+        _logger.info(
             "Using cached AI properties for '%s' at %.1f°C",
             normalised, temperature_C,
         )
@@ -629,24 +654,40 @@ async def get_fluid_properties(
         normalised, temperature_C, pressure_Pa,
     )
     if ai_result is not None:
-        import logging
-        logging.getLogger(__name__).info(
+        ai_confidence = ai_result.property_confidence or 0.0
+        if ai_confidence < _threshold:
+            # AI returned a result but confidence is below the gate threshold.
+            # Do NOT apply it silently — raise PropertyResolutionRequired so
+            # Step 3 can present the estimate to the engineer for approval.
+            _logger.info(
+                "AI provided properties for '%s' at %.1f°C "
+                "(confidence=%.2f) — below threshold %.2f, raising "
+                "PropertyResolutionRequired",
+                normalised, temperature_C, ai_confidence, _threshold,
+            )
+            raise PropertyResolutionRequired(
+                fluid_name=fluid_name,
+                temperature_C=temperature_C,
+                ai_estimate=ai_result,
+                confidence=ai_confidence,
+                threshold=_threshold,
+            )
+        _logger.info(
             "AI provided properties for '%s' at %.1f°C "
             "(confidence=%.2f, source=%s)",
             normalised, temperature_C,
-            ai_result.property_confidence or 0,
+            ai_confidence,
             ai_result.property_source,
         )
         return ai_result
 
-    # Nothing matched — not even AI could help
-    raise CalculationError(
-        _STEP_ID,
-        f"Unknown fluid '{fluid_name}' — not found in any property source "
-        f"(iapws, CoolProp, petroleum database, specialty fluids, thermo, "
-        f"MongoDB cache, or AI estimation). "
-        f"Provide fluid properties directly via DesignState or specify a "
-        f"recognised fluid name.",
+    # No AI result available (no API key or call failed) — raise with no estimate.
+    raise PropertyResolutionRequired(
+        fluid_name=fluid_name,
+        temperature_C=temperature_C,
+        ai_estimate=None,
+        confidence=0.0,
+        threshold=_threshold,
     )
 
 
