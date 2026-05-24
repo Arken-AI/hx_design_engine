@@ -6,8 +6,9 @@ import pytest
 
 from hx_engine.app.core.ai_engineer import (
     AIEngineer,
-    _BASE_PROMPT,
+    _BASE_PROMPT_FALLBACK,
     _STEP_FILE_NAMES,
+    _STEP_PROMPT_FALLBACKS,
     _load_skill,
     SKILLS_DIR,
     _build_system_prompt,
@@ -67,6 +68,27 @@ class TestBuildSystemPrompt:
     def test_contains_base_prompt(self, step_id):
         prompt = _build_system_prompt(step_id, f"Step {step_id}")
         assert "senior heat exchanger design engineer" in prompt
+
+    def test_base_md_is_primary_prompt_source(self, tmp_path):
+        """Editing base.md must change the assembled prompt."""
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            (tmp_path / "base.md").write_text("PRIMARY BASE SKILL", encoding="utf-8")
+            (tmp_path / "step_02_heat_duty.md").write_text(
+                "## Step 2: Heat Duty Calculation\n\nYOUR REVIEW FOCUS:\n- Test\n\nDO NOT:\n- Test",
+                encoding="utf-8",
+            )
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                prompt = _build_system_prompt(2, "Heat Duty")
+            assert prompt.startswith("PRIMARY BASE SKILL")
+            assert _BASE_PROMPT_FALLBACK not in prompt
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
 
     @pytest.mark.parametrize(
         "step_id, expected_fragment",
@@ -133,6 +155,51 @@ class TestBuildSystemPrompt:
             "step_01_requirements.md was deliberately removed (ai_mode=NONE) "
             "and must not be reintroduced"
         )
+
+    def test_skill_files_are_non_empty(self):
+        for filename in _STEP_FILE_NAMES.values():
+            content = (SKILLS_DIR / filename).read_text(encoding="utf-8").strip()
+            assert content, f"Skill file is empty: {filename}"
+
+    def test_skill_files_include_core_sections(self):
+        for step_id, filename in _STEP_FILE_NAMES.items():
+            content = (SKILLS_DIR / filename).read_text(encoding="utf-8")
+            assert "YOUR REVIEW FOCUS" in content, (
+                f"Step {step_id} skill file missing YOUR REVIEW FOCUS: {filename}"
+            )
+            assert "DO NOT" in content, (
+                f"Step {step_id} skill file missing DO NOT guidance: {filename}"
+            )
+
+    def test_skill_files_are_not_thinner_than_fallbacks(self):
+        for step_id, fallback in _STEP_PROMPT_FALLBACKS.items():
+            filename = _STEP_FILE_NAMES[step_id]
+            content = (SKILLS_DIR / filename).read_text(encoding="utf-8").strip()
+            minimum_length = int(len(fallback.strip()) * 0.8)
+            assert len(content) >= minimum_length, (
+                f"{filename} is shorter than 80% of the inline fallback"
+            )
+
+    def test_step11_skill_contains_hard_fail_and_step12_boundary(self):
+        prompt = _build_system_prompt(11, "Area + Overdesign")
+        assert "Negative overdesign is a hard fail" in prompt
+        assert "Step 12 convergence handles area changes" in prompt
+
+    def test_missing_step_skill_uses_inline_fallback(self, tmp_path):
+        from unittest.mock import patch
+        from hx_engine.app.core import ai_engineer
+
+        original_cache = ai_engineer._SKILL_CACHE.copy()
+        ai_engineer._SKILL_CACHE.clear()
+        try:
+            (tmp_path / "base.md").write_text("PRIMARY BASE SKILL", encoding="utf-8")
+            with patch.object(ai_engineer, "SKILLS_DIR", tmp_path):
+                prompt = _build_system_prompt(11, "Area + Overdesign")
+            assert "PRIMARY BASE SKILL" in prompt
+            assert _STEP_PROMPT_FALLBACKS[11] in prompt
+        finally:
+            ai_engineer._SKILL_CACHE.clear()
+            ai_engineer._SKILL_CACHE.update(original_cache)
 
 
 # -----------------------------------------------------------------------
