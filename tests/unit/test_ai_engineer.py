@@ -1,5 +1,6 @@
 """Tests for AI Engineer — step-wise prompts + parsing."""
 
+import json
 import logging
 
 import pytest
@@ -444,6 +445,94 @@ class TestCallClaudeCacheControl:
         assert isinstance(call_kwargs["system"], list)
         assert call_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
         assert review.decision == AIDecisionEnum.PROCEED
+
+
+# -----------------------------------------------------------------------
+# AI review metrics
+# -----------------------------------------------------------------------
+
+class TestAIReviewMetrics:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("decision", ["proceed", "warn", "correct", "escalate"])
+    async def test_review_emits_metric_for_each_decision(self, decision, caplog):
+        from unittest.mock import AsyncMock, patch
+
+        async def _fake_anthropic(self, *, system_prompt, user_prompt, label):
+            payload = {
+                "decision": decision,
+                "confidence": 0.82,
+                "reasoning": f"{decision} reason",
+                "corrections": [],
+            }
+            if decision == "correct":
+                payload["corrections"] = [
+                    {
+                        "field": "n_passes",
+                        "old_value": 2,
+                        "new_value": 4,
+                        "reason": "Increase velocity",
+                    }
+                ]
+            if decision == "escalate":
+                payload["recommendation"] = "Ask user for site data"
+                payload["options"] = ["Use default", "Provide site data"]
+            return json.dumps(payload)
+
+        with patch("hx_engine.app.core.ai_engineer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "test-key"
+            engineer = AIEngineer(stub_mode=False)
+            engineer._client = AsyncMock()
+
+        with patch.object(AIEngineer, "_anthropic_request_with_retry", _fake_anthropic):
+            state = DesignState(session_id="sess_metrics")
+            step = Step02HeatDuty()
+            result = StepResult(step_id=2, step_name="Heat Duty", outputs={})
+            with caplog.at_level(logging.INFO, logger="hx_engine.app.core.ai_engineer.metrics"):
+                review = await engineer.review(step, state, result)
+
+        metric = json.loads(caplog.records[-1].message)
+        assert review.decision == AIDecisionEnum(decision.upper())
+        assert metric["event"] == "ai_review_metric"
+        assert metric["session_id"] == "sess_metrics"
+        assert metric["step_id"] == 2
+        assert metric["step_name"] == "Heat Duty"
+        assert metric["decision"] == decision
+        assert metric["confidence"] == 0.82
+        assert metric["model"]
+        assert metric["skill_file"] == "step_02_heat_duty.md"
+        assert metric["skill_hash"]
+        assert metric["parse_success"] is True
+        assert metric["fallback_used"] is False
+        assert metric["ai_called"] is True
+        assert metric["corrections_count"] == (1 if decision == "correct" else 0)
+        if decision == "escalate":
+            assert metric["escalation_reason"] == "escalate reason"
+        else:
+            assert metric["escalation_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_review_metric_marks_parse_failure(self, caplog):
+        from unittest.mock import AsyncMock, patch
+
+        async def _fake_anthropic(self, *, system_prompt, user_prompt, label):
+            return "not json"
+
+        with patch("hx_engine.app.core.ai_engineer.settings") as mock_settings:
+            mock_settings.anthropic_api_key = "test-key"
+            engineer = AIEngineer(stub_mode=False)
+            engineer._client = AsyncMock()
+
+        with patch.object(AIEngineer, "_anthropic_request_with_retry", _fake_anthropic):
+            state = DesignState(session_id="sess_bad_json")
+            step = Step02HeatDuty()
+            result = StepResult(step_id=2, step_name="Heat Duty", outputs={})
+            with caplog.at_level(logging.INFO, logger="hx_engine.app.core.ai_engineer.metrics"):
+                review = await engineer.review(step, state, result)
+
+        metric = json.loads(caplog.records[-1].message)
+        assert review.decision == AIDecisionEnum.WARN
+        assert metric["parse_success"] is False
+        assert metric["decision"] == "warn"
 
 
 # -----------------------------------------------------------------------
