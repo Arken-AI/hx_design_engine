@@ -62,10 +62,10 @@ _TEMPERATURE = 0.1
 CONFIDENCE_THRESHOLD = 0.7
 
 # ===================================================================
-# Base Prompt — shared across all steps
+# Base Prompt fallback — used only if skills/base.md cannot be loaded
 # ===================================================================
 
-_BASE_PROMPT = """\
+_BASE_PROMPT_FALLBACK = """\
 You are a senior heat exchanger design engineer reviewing pipeline step outputs.
 
 ENGINE SCOPE: This engine designs shell-and-tube heat exchangers for \
@@ -120,12 +120,12 @@ Do NOT include any text outside the JSON object.\
 """
 
 # ===================================================================
-# Step-specific Prompts — REMOVED
-# All step prompts now live in hx_engine/app/skills/step_XX_*.md files.
-# See _build_system_prompt() and SKILLS_DIR.
+# Step-specific Prompt fallbacks
+# Primary prompts live in hx_engine/app/skills/step_XX_*.md files.
+# These inline prompts are retained only as runtime fallbacks if a skill file
+# cannot be loaded.
 # ===================================================================
 
-# NOTE: _STEP_1_PROMPT ... _STEP_16_PROMPT removed. .md files are sole source.
 _STEP_1_PROMPT = """\
 ## Step 1: Process Requirements — Review Focus
 
@@ -897,6 +897,24 @@ _STEP_FILE_NAMES: dict[int, str] = {
     15: "step_15_cost.md", 16: "step_16_final_validation.md",
 }
 
+_STEP_PROMPT_FALLBACKS: dict[int, str] = {
+    2: _STEP_2_PROMPT,
+    3: _STEP_3_PROMPT,
+    4: _STEP_4_PROMPT,
+    5: _STEP_5_PROMPT,
+    6: _STEP_6_PROMPT,
+    7: _STEP_7_PROMPT,
+    8: _STEP_8_PROMPT,
+    9: _STEP_9_PROMPT,
+    10: _STEP_10_PROMPT,
+    11: _STEP_11_PROMPT,
+    12: _STEP_12_PROMPT,
+    13: _STEP_13_PROMPT,
+    14: _STEP_14_PROMPT,
+    15: _STEP_15_PROMPT,
+    16: _STEP_16_PROMPT,
+}
+
 def _load_skill(filename: str) -> str:
     """Load a skill .md file with caching and safe fallback.
 
@@ -924,12 +942,14 @@ def _load_skill(filename: str) -> str:
 def _build_system_prompt(step_id: int, step_name: str) -> str:
     """Assemble Base + Step prompt for a given step.
 
-    Loads from .md skill files (cached after first read). .md files are the
-    sole source of truth — no inline fallback dict.
+    Loads from .md skill files (cached after first read). Inline prompts are
+    fallbacks only, used when a skill file cannot be loaded.
     """
-    base = _load_skill("base.md") or _BASE_PROMPT
+    base = _load_skill("base.md") or _BASE_PROMPT_FALLBACK
     step_file = _STEP_FILE_NAMES.get(step_id)
     step_prompt = _load_skill(step_file) if step_file else ""
+    if not step_prompt and step_id in _STEP_PROMPT_FALLBACKS:
+        step_prompt = _STEP_PROMPT_FALLBACKS[step_id]
 
     if not step_prompt:
         logger.warning(
