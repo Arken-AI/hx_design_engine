@@ -7,16 +7,13 @@ ratios) so that any future regression in the area formula or in the
 downstream consumers is caught immediately.
 
 Step 16 finding (recorded per implementation plan Phase 2):
-    `step_16_final_validation.py` does not reference `area_provided_m2`,
-    `A_provided`, or `n_shells` — confirmed by repository-wide grep on
-    20 April 2026. The bug-checklist item for Step 16 is therefore
-    closed with justification, and a guard test below pins this fact
-    so that any future Step 16 read of the area field is flagged.
+    `step_16_final_validation.py` now consumes `area_provided_m2` for
+    final cost-per-area reporting. The guard below verifies that Step 11's
+    corrected multi-shell area propagates into Step 16 context instead of
+    pinning the earlier no-reference finding.
 """
 
 from __future__ import annotations
-
-import inspect
 
 import pytest
 
@@ -25,10 +22,11 @@ from hx_engine.app.models.design_state import (
     FluidProperties,
     GeometrySpec,
 )
-from hx_engine.app.steps import step_16_final_validation as step_16_module
+from hx_engine.app.models.step_result import StepResult
 from hx_engine.app.steps.step_11_area_overdesign import Step11AreaOverdesign
 from hx_engine.app.steps.step_12_convergence import Step12Convergence
 from hx_engine.app.steps.step_15_cost import Step15CostEstimate
+from hx_engine.app.steps.step_16_final_validation import Step16FinalValidation
 
 
 def _state_for_n_shells(n_shells: int) -> DesignState:
@@ -188,22 +186,27 @@ class TestStep12ConsumesMultiShellArea:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Step 16 — does NOT consume `area_provided_m2` (documented finding)
+# Step 16 — consumes corrected `area_provided_m2` for final context
 # ══════════════════════════════════════════════════════════════════════
 
-def test_step_16_module_does_not_reference_area_provided():
-    """Guard test: Step 16 source code must not read `area_provided_m2` /
-    `A_provided` / `n_shells`. If this assertion fails in the future,
-    the cross-step propagation contract for area must be re-validated
-    and a Step 16 propagation test added.
-    """
-    source = inspect.getsource(step_16_module)
-    forbidden = ("area_provided_m2", "A_provided", "n_shells")
-    leaked = [token for token in forbidden if token in source]
-    assert leaked == [], (
-        f"Step 16 now references {leaked} — add a propagation test that "
-        f"covers Step 11 → Step 16 area accounting and update bug doc."
+@pytest.mark.asyncio
+async def test_step_16_context_uses_corrected_area_provided_for_cost_per_area():
+    state = _state_for_n_shells(2)
+    state.Q_W = 4_170_000.0
+
+    await Step11AreaOverdesign().execute(state)
+    state.cost_usd = 575_000.0
+
+    result = StepResult(
+        step_id=16,
+        step_name="Final Validation",
+        outputs={"confidence_breakdown": {}, "confidence_score": 0.9},
     )
+    context = Step16FinalValidation().build_ai_context(state, result)
+
+    expected_cost_m2 = state.cost_usd / state.area_provided_m2
+    assert "Cost/m²" in context
+    assert f"${expected_cost_m2:,.0f}" in context
 
 
 # ══════════════════════════════════════════════════════════════════════
