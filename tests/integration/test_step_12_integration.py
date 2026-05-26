@@ -101,6 +101,13 @@ class MockSSEManager:
         pass
 
 
+def _emit_event(sse: MockSSEManager, session_id: str):
+    async def emit(event) -> None:
+        await sse.emit(session_id, event)
+
+    return emit
+
+
 def _make_converging_mock():
     """Return a run_with_review_loop mock that converges in ~4 iterations."""
     call_count = {"n": 0}
@@ -166,7 +173,7 @@ class TestConvergenceHappyPath:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=_make_converging_mock(),
         ):
-            await step12.run(state, ai, sse, "int-test-12-01")
+            await step12.run(state, ai, emit_event=_emit_event(sse, "int-test-12-01"))
 
         assert state.convergence_converged is True
         assert state.convergence_iteration is not None
@@ -184,7 +191,7 @@ class TestConvergenceHappyPath:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=_make_converging_mock(),
         ):
-            await step12.run(state, ai, sse, "int-test-12-02")
+            await step12.run(state, ai, emit_event=_emit_event(sse, "int-test-12-02"))
 
         assert state.in_convergence_loop is False
 
@@ -197,7 +204,7 @@ class TestConvergenceHappyPath:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=_make_converging_mock(),
         ):
-            await step12.run(state, ai, sse, "int-test-12-03")
+            await step12.run(state, ai, emit_event=_emit_event(sse, "int-test-12-03"))
 
         assert len(state.convergence_trajectory) > 0
 
@@ -214,6 +221,6 @@ class TestConvergenceHappyPath:
             "hx_engine.app.steps.base.BaseStep.run_with_review_loop",
             new=exploding_mock,
         ):
-            await step12.run(state, ai, sse, "int-test-12-04")
+            await step12.run(state, ai, emit_event=_emit_event(sse, "int-test-12-04"))
 
         assert state.in_convergence_loop is False
