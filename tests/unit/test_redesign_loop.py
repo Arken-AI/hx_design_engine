@@ -69,6 +69,15 @@ class _StubAI:
             return None
         return self._responses.pop(0)
 
+    async def propose_budget_exhausted_options(
+        self, state: DesignState, violation_summary: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"description": "Increase shell count and re-run.", "rating": 7},
+            {"description": "Relax the failing hydraulic constraint.", "rating": 4},
+            {"description": "Review input specification and re-run.", "rating": 3},
+        ]
+
 
 class _StubRunner:
     """PipelineRunner stand-in. Raises a queued sequence of outcomes."""
@@ -293,11 +302,11 @@ async def test_ai_unavailable_uses_fallback_and_smaller_budget(
     # final run that hits the budget check.
     assert state.redesign_attempt_count == MAX_FALLBACK_ATTEMPTS
     assert all(a.fallback_used for a in state.redesign_history)
-    assert state.pipeline_status == "error"
+    assert state.pipeline_status == "waiting"
 
 
 @pytest.mark.asyncio
-async def test_budget_exhausted_emits_step_error() -> None:
+async def test_budget_exhausted_emits_step_escalated() -> None:
     def violation() -> DesignConstraintViolation:
         return DesignConstraintViolation(
             step_id=10,
@@ -323,17 +332,18 @@ async def test_budget_exhausted_emits_step_error() -> None:
 
     await driver.run(state)
 
-    assert state.pipeline_status == "error"
+    assert state.pipeline_status == "waiting"
     assert state.redesign_attempt_count == MAX_REDESIGN_ATTEMPTS
 
-    # Drain the SSE queue and confirm a step_error came through.
+    # Drain the SSE queue and confirm an escalation came through.
     queue = sse.get_queue(state.session_id)
     events = []
     while not queue.empty():
         events.append(queue.get_nowait())
-    error_events = [e for e in events if e.get("event_type") == "step_error"]
-    assert len(error_events) == 1
-    assert "Redesign budget" in error_events[0]["message"]
+    escalated_events = [e for e in events if e.get("event_type") == "step_escalated"]
+    assert len(escalated_events) == 1
+    assert "Redesign budget" in escalated_events[0]["message"]
+    assert len(escalated_events[0]["options"]) == 3
 
 
 @pytest.mark.asyncio

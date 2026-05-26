@@ -57,7 +57,7 @@ def _rule_dp_tube_within_limit(
     if val is not None and val > limit:
         return False, (
             f"Tube-side ΔP {val:.0f} Pa exceeds "
-            f"{limit:.0f} Pa limit"
+            f"{limit:.0f} Pa ({limit / 100000:.1f} bar) limit"
         )
     return True, None
 
@@ -74,7 +74,7 @@ def _rule_dp_shell_within_limit(
     if val is not None and val > limit:
         return False, (
             f"Shell-side ΔP {val:.0f} Pa exceeds "
-            f"{limit:.0f} Pa limit"
+            f"{limit:.0f} Pa ({limit / 100000:.1f} bar) limit"
         )
     return True, None
 

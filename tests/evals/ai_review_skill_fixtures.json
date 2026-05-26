@@ -1,0 +1,219 @@
+[
+  {
+    "step_id": 4,
+    "name": "bem_high_delta_t_conflict",
+    "input_outputs": { "tema_type": "BEM", "max_delta_t_C": 85 },
+    "expected_decision": "escalate",
+    "must_include": ["BEM must not be used", "max", "50"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 4,
+    "name": "tube_id_exceeds_od_impossible",
+    "input_outputs": { "tube_id_m": 0.022, "tube_od_m": 0.01905 },
+    "expected_decision": "escalate",
+    "must_include": ["Tube ID must be < tube OD", "physically impossible"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 4,
+    "name": "fouling_fluid_in_u_tube",
+    "input_outputs": { "tube_side_fluid": "lube oil", "tema_type": "AEU" },
+    "expected_decision": "warn",
+    "must_include": [
+      "Fouling-prone fluid in U-tube bundle",
+      "Switching to AES"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 4,
+    "name": "shell_crude_requires_square_pitch",
+    "input_outputs": {
+      "shell_side_fluid": "crude oil",
+      "pitch_layout": "triangular"
+    },
+    "expected_decision": "warn",
+    "must_include": ["Shell-side crude/heavy oil", "square pitch"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 4,
+    "name": "user_preference_rule_zero",
+    "input_outputs": {
+      "tema_preference": "tube side hot",
+      "tube_side_fluid": "hot fluid"
+    },
+    "expected_decision": "proceed",
+    "must_include": ["User preference", "overrides all rules"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 8,
+    "name": "low_full_j_product_escalates",
+    "input_outputs": { "J_product": 0.28 },
+    "expected_decision": "escalate",
+    "must_include": ["J_product", "reduce clearances or add sealing strips"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 8,
+    "name": "partial_j_product_not_allowed",
+    "input_outputs": { "J_c": 0.7, "J_l": 0.7, "J_b": 0.7, "J_product": 0.45 },
+    "expected_decision": "proceed",
+    "must_include": [
+      "do NOT compute a partial product",
+      "all five factors combined"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 8,
+    "name": "petroleum_wall_viscosity_backend_mismatch",
+    "input_outputs": { "shell_side_fluid": "lube oil", "mu_wall_Pa_s": 0.0003 },
+    "expected_decision": "escalate",
+    "must_include": ["wrong property backend", "petroleum fluid"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 8,
+    "name": "kern_underprediction_within_range",
+    "input_outputs": { "kern_divergence_pct": 150, "h_shell_W_m2K": 420 },
+    "expected_decision": "proceed",
+    "must_include": ["100-200% divergence", "do NOT escalate"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 8,
+    "name": "positive_shell_htc_hard_rule",
+    "input_outputs": { "h_shell_W_m2K": -5 },
+    "expected_decision": "escalate",
+    "must_include": ["h_shell must be > 0"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 11,
+    "name": "negative_overdesign_hard_fail",
+    "input_outputs": { "overdesign_pct": -3.2 },
+    "expected_decision": "escalate",
+    "must_include": [
+      "Negative overdesign is a hard fail",
+      "decision=\"escalate\""
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 11,
+    "name": "zero_required_area_invalid",
+    "input_outputs": { "A_required_m2": 0 },
+    "expected_decision": "escalate",
+    "must_include": ["Required area must be > 0"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 11,
+    "name": "zero_available_area_invalid",
+    "input_outputs": { "A_available_m2": 0 },
+    "expected_decision": "escalate",
+    "must_include": ["Available area must be > 0"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 11,
+    "name": "manual_area_edits_forbidden",
+    "input_outputs": { "A_required_m2": 120, "A_available_m2": 95 },
+    "expected_decision": "escalate",
+    "must_include": [
+      "Step 12 convergence handles area changes",
+      "must not prescribe manual edits"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 11,
+    "name": "estimated_area_mismatch_not_standalone_failure",
+    "input_outputs": {
+      "U_estimated_W_m2K": 450,
+      "U_dirty_W_m2K": 300,
+      "overdesign_pct": 18
+    },
+    "expected_decision": "proceed",
+    "must_include": [
+      "Treat a Step 6 estimated-area mismatch as a standalone failure",
+      "actual available area is sufficient"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "missing_confidence_score_hard_fail",
+    "input_outputs": { "confidence_score": null },
+    "expected_decision": "escalate",
+    "must_include": ["confidence_score must exist", "Hard Rules"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "confidence_score_not_recomputed",
+    "input_outputs": { "confidence_score": 0.76 },
+    "expected_decision": "proceed",
+    "must_include": ["NOT to recompute", "DO NOT: Modify the confidence score"],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "final_summary_requires_assumptions",
+    "input_outputs": { "confidence_score": 0.82 },
+    "expected_decision": "proceed",
+    "must_include": [
+      "List ALL ASSUMPTIONS",
+      "Fouling factors from TEMA tables"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "low_confidence_requires_recommendations",
+    "input_outputs": { "confidence_score": 0.62 },
+    "expected_decision": "warn",
+    "must_include": [
+      "Provide RECOMMENDATIONS if confidence < 0.80",
+      "recommendations"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "summary_must_be_specific",
+    "input_outputs": {
+      "tema_type": "AES",
+      "Q_W": 5000000,
+      "overdesign_pct": 15
+    },
+    "expected_decision": "proceed",
+    "must_include": [
+      "Mention: TEMA type",
+      "overall U and overdesign percentage"
+    ],
+    "must_not_include": []
+  },
+  {
+    "step_id": 16,
+    "name": "confidence_breakdown_schema",
+    "input_outputs": {
+      "confidence_breakdown": {
+        "geometry_convergence": 1,
+        "ai_agreement_rate": 1,
+        "cross_method_agreement": 0.8,
+        "validation_passes": 1
+      }
+    },
+    "expected_decision": "proceed",
+    "must_include": [
+      "confidence_breakdown",
+      "exactly 4 keys",
+      "geometry_convergence"
+    ],
+    "must_not_include": []
+  }
+]

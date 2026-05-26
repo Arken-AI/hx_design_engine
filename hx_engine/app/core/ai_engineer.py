@@ -15,9 +15,11 @@ See STEPWISE_AI_PROMPT_SPEC.md for the full specification.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from hx_engine.app.models.step_result import (
@@ -34,6 +36,7 @@ if TYPE_CHECKING:
     from hx_engine.app.steps.base import BaseStep
 
 logger = logging.getLogger(__name__)
+metrics_logger = logging.getLogger(f"{__name__}.metrics")
 
 # ---------------------------------------------------------------------------
 # Anthropic client — imported lazily to keep startup fast when no key is set
@@ -62,10 +65,10 @@ _TEMPERATURE = 0.1
 CONFIDENCE_THRESHOLD = 0.7
 
 # ===================================================================
-# Base Prompt — shared across all steps
+# Base Prompt fallback — used only if skills/base.md cannot be loaded
 # ===================================================================
 
-_BASE_PROMPT = """\
+_BASE_PROMPT_FALLBACK = """\
 You are a senior heat exchanger design engineer reviewing pipeline step outputs.
 
 ENGINE SCOPE: This engine designs shell-and-tube heat exchangers for \
@@ -120,12 +123,12 @@ Do NOT include any text outside the JSON object.\
 """
 
 # ===================================================================
-# Step-specific Prompts — REMOVED
-# All step prompts now live in hx_engine/app/skills/step_XX_*.md files.
-# See _build_system_prompt() and SKILLS_DIR.
+# Step-specific Prompt fallbacks
+# Primary prompts live in hx_engine/app/skills/step_XX_*.md files.
+# These inline prompts are retained only as runtime fallbacks if a skill file
+# cannot be loaded.
 # ===================================================================
 
-# NOTE: _STEP_1_PROMPT ... _STEP_16_PROMPT removed. .md files are sole source.
 _STEP_1_PROMPT = """\
 ## Step 1: Process Requirements — Review Focus
 
@@ -883,6 +886,32 @@ SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 _SKILL_CACHE: dict[str, str] = {}
 
+
+def _hash_skill_content(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def _skill_metadata(step_id: int) -> dict[str, Any]:
+    step_file = _STEP_FILE_NAMES.get(step_id)
+    if step_file is None:
+        return {
+            "skill_file": None,
+            "skill_hash": None,
+            "fallback_used": False,
+        }
+
+    skill_content = _load_skill(step_file)
+    fallback_used = False
+    if not skill_content and step_id in _STEP_PROMPT_FALLBACKS:
+        skill_content = _STEP_PROMPT_FALLBACKS[step_id]
+        fallback_used = True
+
+    return {
+        "skill_file": step_file,
+        "skill_hash": _hash_skill_content(skill_content) if skill_content else None,
+        "fallback_used": fallback_used,
+    }
+
 # Step 1 (Requirements Validation) has ai_mode=NONE — no AI review, no
 # skill file, no entry here. Validation rules live in
 # hx_engine/app/core/requirements_validator.py instead.
@@ -895,6 +924,24 @@ _STEP_FILE_NAMES: dict[int, str] = {
     11: "step_11_area_overdesign.md", 12: "step_12_convergence.md",
     13: "step_13_vibration.md", 14: "step_14_mechanical.md",
     15: "step_15_cost.md", 16: "step_16_final_validation.md",
+}
+
+_STEP_PROMPT_FALLBACKS: dict[int, str] = {
+    2: _STEP_2_PROMPT,
+    3: _STEP_3_PROMPT,
+    4: _STEP_4_PROMPT,
+    5: _STEP_5_PROMPT,
+    6: _STEP_6_PROMPT,
+    7: _STEP_7_PROMPT,
+    8: _STEP_8_PROMPT,
+    9: _STEP_9_PROMPT,
+    10: _STEP_10_PROMPT,
+    11: _STEP_11_PROMPT,
+    12: _STEP_12_PROMPT,
+    13: _STEP_13_PROMPT,
+    14: _STEP_14_PROMPT,
+    15: _STEP_15_PROMPT,
+    16: _STEP_16_PROMPT,
 }
 
 def _load_skill(filename: str) -> str:
@@ -924,12 +971,14 @@ def _load_skill(filename: str) -> str:
 def _build_system_prompt(step_id: int, step_name: str) -> str:
     """Assemble Base + Step prompt for a given step.
 
-    Loads from .md skill files (cached after first read). .md files are the
-    sole source of truth — no inline fallback dict.
+    Loads from .md skill files (cached after first read). Inline prompts are
+    fallbacks only, used when a skill file cannot be loaded.
     """
-    base = _load_skill("base.md") or _BASE_PROMPT
+    base = _load_skill("base.md") or _BASE_PROMPT_FALLBACK
     step_file = _STEP_FILE_NAMES.get(step_id)
     step_prompt = _load_skill(step_file) if step_file else ""
+    if not step_prompt and step_id in _STEP_PROMPT_FALLBACKS:
+        step_prompt = _STEP_PROMPT_FALLBACKS[step_id]
 
     if not step_prompt:
         logger.warning(
@@ -1049,11 +1098,18 @@ class AIEngineer:
             self._stub_mode = False
             self._client = AsyncAnthropic(api_key=key)
         self._auth_disabled = False
+        self._last_parse_success = True
 
     @property
     def is_available(self) -> bool:
         """True only when a live Anthropic client is configured and not auth-disabled."""
         return not self._stub_mode and not self._auth_disabled
+
+    @is_available.setter
+    def is_available(self, value: bool) -> None:
+        """Allow tests to force the live/fallback branch without an API key."""
+        self._stub_mode = not value
+        self._auth_disabled = False
 
     async def review(
         self,
@@ -1068,28 +1124,84 @@ class AIEngineer:
         In real mode, calls Claude and parses the response.
         Pass failure_context on retry calls so the AI sees what was already tried.
         """
+        started_at = perf_counter()
+
         if self._stub_mode:
-            return AIReview(
+            review = AIReview(
                 decision=AIDecisionEnum.PROCEED,
                 confidence=0.85,
                 corrections=[],
                 reasoning="Stub: auto-approved (no API key)",
                 ai_called=False,
             )
+            self._emit_review_metric(
+                step=step,
+                state=state,
+                review=review,
+                started_at=started_at,
+                parse_success=True,
+            )
+            return review
 
         if self._auth_disabled:
             # Auth was already invalidated earlier in this run — short-circuit
             # without spamming the API and without spamming the log (the
             # banner was emitted on the first 401).
-            return AIReview(
+            review = AIReview(
                 decision=AIDecisionEnum.PROCEED,
                 confidence=0.85,
                 corrections=[],
                 reasoning="AI disabled for this run (auth failure). Proceeding deterministically.",
                 ai_called=False,
             )
+            self._emit_review_metric(
+                step=step,
+                state=state,
+                review=review,
+                started_at=started_at,
+                parse_success=True,
+            )
+            return review
 
-        return await self._call_claude(step, state, result, failure_context)
+        self._last_parse_success = True
+        review = await self._call_claude(step, state, result, failure_context)
+        self._emit_review_metric(
+            step=step,
+            state=state,
+            review=review,
+            started_at=started_at,
+            parse_success=self._last_parse_success,
+        )
+        return review
+
+    def _emit_review_metric(
+        self,
+        *,
+        step: "BaseStep",
+        state: "DesignState",
+        review: AIReview,
+        started_at: float,
+        parse_success: bool,
+    ) -> None:
+        skill_meta = _skill_metadata(step.step_id)
+        event = {
+            "event": "ai_review_metric",
+            "session_id": getattr(state, "session_id", None),
+            "step_id": step.step_id,
+            "step_name": step.step_name,
+            "decision": review.decision.value.lower(),
+            "confidence": review.confidence,
+            "latency_ms": round((perf_counter() - started_at) * 1000, 3),
+            "model": _MODEL,
+            "skill_file": skill_meta["skill_file"],
+            "skill_hash": skill_meta["skill_hash"],
+            "corrections_count": len(review.corrections),
+            "escalation_reason": review.reasoning if review.decision == AIDecisionEnum.ESCALATE else None,
+            "parse_success": parse_success,
+            "fallback_used": skill_meta["fallback_used"],
+            "ai_called": review.ai_called,
+        }
+        metrics_logger.info(json.dumps(event, sort_keys=True, default=str))
 
     async def _call_claude(
         self,
@@ -1123,6 +1235,7 @@ class AIEngineer:
         if text is None:
             # Auth disabled mid-call (banner already logged) → behave like stub.
             if self._auth_disabled:
+                self._last_parse_success = True
                 return AIReview(
                     decision=AIDecisionEnum.PROCEED,
                     confidence=0.85,
@@ -1131,6 +1244,7 @@ class AIEngineer:
                     ai_called=False,
                 )
             # Other failures fall back to WARN — historical contract.
+            self._last_parse_success = False
             return AIReview(
                 decision=AIDecisionEnum.WARN,
                 confidence=0.70,
@@ -1139,7 +1253,8 @@ class AIEngineer:
                 ai_called=True,
             )
 
-        return self._parse_review(text)
+        review, self._last_parse_success = self._parse_review_with_status(text)
+        return review
 
     # ------------------------------------------------------------------
     # Shared low-level Anthropic call with auth handling + retry
@@ -1401,6 +1516,11 @@ class AIEngineer:
 
     def _parse_review(self, text: str) -> AIReview:
         """Parse Claude's JSON review response."""
+        review, _ = self._parse_review_with_status(text)
+        return review
+
+    def _parse_review_with_status(self, text: str) -> tuple[AIReview, bool]:
+        """Parse Claude's JSON review response and return parse status."""
         import re
 
         text = text.strip()
@@ -1439,7 +1559,7 @@ class AIEngineer:
                 corrections=[],
                 reasoning=f"AI response unparseable. Proceeding with caution.",
                 ai_called=True,
-            )
+            ), False
 
         # Map decision string to enum
         decision_str = str(data.get("decision", "proceed")).lower()
@@ -1491,12 +1611,22 @@ class AIEngineer:
         user_summary = data.get("user_summary")
 
         return AIReview(
-            decision=AIDecisionEnum.PROCEED,
-            confidence=0.85,
-            corrections=[],
-            reasoning="Stub: auto-approved (AI review permanently disabled)",
-            ai_called=False,
-        )
+            decision=decision,
+            confidence=confidence,
+            corrections=corrections,
+            reasoning=str(data.get("reasoning", "")),
+            observation=str(data.get("observation", "") or ""),
+            recommendation=str(recommendation_raw) if recommendation_raw else None,
+            options=[str(option) for option in options_raw],
+            option_ratings=[int(rating) for rating in ratings_raw if isinstance(rating, int)],
+            ai_called=True,
+            design_summary=str(design_summary) if design_summary is not None else None,
+            assumptions=[str(item) for item in assumptions_raw],
+            design_strengths=[str(item) for item in strengths_raw],
+            design_risks=[str(item) for item in risks_raw],
+            recommendations=[str(item) for item in recommendations_raw],
+            user_summary=str(user_summary) if user_summary is not None else None,
+        ), True
 
     async def recommend_redesign(
         self,
