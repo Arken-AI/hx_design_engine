@@ -6,7 +6,7 @@ from unittest.mock import patch, AsyncMock
 
 import pytest
 
-from hx_engine.app.core.exceptions import CalculationError
+from hx_engine.app.core.exceptions import CalculationError, PropertyResolutionRequired
 from hx_engine.app.models.design_state import FluidProperties
 from hx_engine.app.steps.step_03_fluid_props import Step03FluidProperties
 
@@ -55,12 +55,12 @@ class TestResolveFluid:
         assert props.k_W_mK is not None and props.k_W_mK > 0
         assert props.Pr is not None and props.Pr > 0
 
-    async def test_unknown_fluid_raises(self):
-        """Fantasy fluid 'unobtanium' raises CalculationError with step_id=3."""
-        with pytest.raises(CalculationError) as exc_info:
+    async def test_unknown_fluid_requires_property_resolution(self):
+        """Fantasy fluid 'unobtanium' requests engineer property review."""
+        with pytest.raises(PropertyResolutionRequired) as exc_info:
             await Step03FluidProperties._resolve_fluid("unobtanium", 50.0, 101325.0)
-        assert exc_info.value.step_id == 3
-        assert "unobtanium" in exc_info.value.message
+        assert exc_info.value.fluid_name == "unobtanium"
+        assert exc_info.value.temperature_C == pytest.approx(50.0)
 
     async def test_default_pressure(self):
         """Passing pressure_Pa=None uses 1 atm default — same result."""
