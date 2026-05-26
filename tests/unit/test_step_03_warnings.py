@@ -176,8 +176,8 @@ class TestCornerCases:
         # Should have no warnings (stable props, no crude, no water, no high viscosity)
         assert len(result.warnings) == 0
 
-    async def test_unknown_fluid_error_is_helpful(self):
-        """'unobtanium' → CalculationError message contains fluid name."""
+    async def test_unknown_fluid_requests_property_review(self):
+        """'unobtanium' → property-request escalation contains fluid name."""
         state = DesignState(
             hot_fluid_name="unobtanium",
             cold_fluid_name="ethanol",
@@ -187,8 +187,9 @@ class TestCornerCases:
             T_cold_out_C=60.0,
         )
         step = Step03FluidProperties()
-        with pytest.raises(CalculationError) as exc_info:
-            await step.execute(state)
+        result = await step.execute(state)
 
-        assert "unobtanium" in exc_info.value.message
-        assert exc_info.value.step_id == 3
+        assert result.validation_passed is False
+        assert result.outputs["_event_subtype"] == "property_request"
+        assert result.ai_review is not None
+        assert "unobtanium" in result.ai_review.reasoning
