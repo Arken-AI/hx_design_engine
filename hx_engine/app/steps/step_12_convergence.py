@@ -200,6 +200,14 @@ class Step12Convergence:
     VELOCITY_LOW_GAS: float = 5.0        # m/s — gas tube-side
     VELOCITY_HIGH_GAS: float = 30.0      # m/s — gas tube-side
 
+    # Damping exponent for the area-driven proportional tube-count update.
+    # Raw ratio-1 correction (N_new = N * A_req/A_prov) over-shoots because
+    # adding tubes lowers tube-side velocity → lowers h_tube → lowers U,
+    # which grows A_required and triggers a reverse over-correction next
+    # iteration.  The 0.6 exponent damps that feedback loop:
+    #     N_tubes,new = N_tubes,current × (A_required / A_provided) ** 0.6
+    AREA_RATIO_EXPONENT: float = 0.6
+
     def _velocity_limits(self, state: "DesignState") -> tuple[float, float]:
         """Return (v_low, v_high) based on tube-side phase."""
         shell_side = getattr(state, "shell_side_fluid", None) or "hot"
@@ -477,7 +485,14 @@ class Step12Convergence:
         primary: str,
         new_direction: dict[str, int],
     ) -> tuple[dict[str, Any], dict[str, int]]:
-        """Proportional scaling for iterations 1-2."""
+        """Proportional scaling for iterations 1-2.
+
+        For area-driven adjustments (under/overdesign), tube count is scaled
+        by (A_required / A_provided) ** AREA_RATIO_EXPONENT.  The <1 exponent
+        damps the U-feedback loop (more tubes → lower velocity → lower U →
+        larger A_required) that would otherwise cause the raw ratio-1 update
+        to over-shoot and oscillate.
+        """
         changes: dict[str, Any] = {}
         g = state.geometry
         assert g is not None
@@ -489,7 +504,9 @@ class Step12Convergence:
                 and state.area_provided_m2 > 0
             ):
                 ratio = state.area_required_m2 / state.area_provided_m2
-                new_n = int(round(g.n_tubes * ratio))
+                # Damped correction: N_new = N * ratio ** 0.6 (see class const).
+                scale = ratio ** self.AREA_RATIO_EXPONENT
+                new_n = int(round(g.n_tubes * scale))
                 changes["n_tubes"] = max(1, new_n)
                 new_direction["n_tubes"] = 1 if ratio > 1 else -1
 
